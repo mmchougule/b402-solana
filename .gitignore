@@ -1,0 +1,38 @@
+node_modules/
+dist/
+build/
+target/
+.anchor/
+.DS_Store
+*.log
+
+# Local skill installs / parallel agent staging — user-machine-specific.
+.agents/
+.codex-staging/
+skills-lock.json
+
+# Anchor / Solana
+test-ledger/
+*.so
+**/target/
+
+# Circom artifacts (keep only pinned release artifacts in artifacts/)
+circuits/**/build/
+circuits/**/*.r1cs
+circuits/**/*.sym
+circuits/**/witness.wtns
+
+# snarkjs / ptau intermediate
+ops/ceremony/*.ptau
+ops/ceremony/*.zkey.tmp
+
+# env
+.env
+.env.*
+!.env.example
+
+# internal docs — never commit
+DEMO.md
+OPS.md
+NOTES.md
+SCRATCH.md

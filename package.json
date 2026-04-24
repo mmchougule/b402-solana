@@ -1,0 +1,24 @@
+{
+  "name": "b402-solana",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Private DeFi on Solana — shielded pool + composable execution. Counterpart to the b402 Railgun fork on EVM.",
+  "packageManager": "pnpm@9.0.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "circuits:build": "echo 'pending PRD-03 sign-off'",
+    "circuits:test": "echo 'pending PRD-03 sign-off'",
+    "program:build": "echo 'pending PRD-03 sign-off'",
+    "program:test": "echo 'pending PRD-03 sign-off'"
+  },
+  "license": "UNLICENSED"
+}

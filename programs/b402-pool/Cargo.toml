@@ -1,0 +1,27 @@
+[package]
+name = "b402-pool"
+version.workspace = true
+edition.workspace = true
+description = "b402 shielded pool program"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "b402_pool"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+# TEST-ONLY: gates the `check_adapter_delta_mock` instruction + `adapt_mock` module.
+# MUST NOT be enabled in devnet or mainnet builds. CI turns it on only for
+# running the adapt-delta invariant tests against litesvm.
+test-mock = []
+
+[dependencies]
+anchor-lang = { workspace = true, features = ["init-if-needed"] }
+anchor-spl.workspace = true
+thiserror.workspace = true
+bytemuck.workspace = true
+indexmap = { version = "=2.9.0" }
