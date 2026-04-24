@@ -25,6 +25,10 @@ use crate::error::PoolError;
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
 pub struct CheckAdapterDeltaArgs {
+    /// Amount the pool "transfers" to the adapter — unused by the mock,
+    /// included to match the unified adapter ABI `execute(in_amount,
+    /// min_out, payload)` that real adapters (Jupiter, etc.) expect.
+    pub in_amount: u64,
     /// Amount the pool asks the adapter to produce.
     pub expected_out_value: u64,
     /// Opaque payload forwarded to the adapter.
@@ -54,15 +58,16 @@ pub fn handler(
     ctx.accounts.out_vault.reload()?;
     let pre = ctx.accounts.out_vault.amount;
 
-    // 2. Build the adapter instruction. This stub uses the mock adapter's
-    // `execute(min_out_amount: u64, action_payload: Vec<u8>)` signature.
+    // 2. Build the adapter instruction. Unified ABI:
+    //   execute(in_amount: u64, min_out_amount: u64, action_payload: Vec<u8>)
     //
-    // Anchor wire: discriminator || u64 LE || u32 LE len || bytes.
+    // Anchor wire: discriminator || u64 LE || u64 LE || u32 LE len || bytes.
     // Discriminator = sha256("global:execute")[0..8].
     const EXECUTE_DISCRIMINATOR: [u8; 8] = [130, 221, 242, 154, 13, 193, 189, 29];
 
-    let mut data: Vec<u8> = Vec::with_capacity(8 + 8 + 4 + args.action_payload.len());
+    let mut data: Vec<u8> = Vec::with_capacity(8 + 8 + 8 + 4 + args.action_payload.len());
     data.extend_from_slice(&EXECUTE_DISCRIMINATOR);
+    data.extend_from_slice(&args.in_amount.to_le_bytes());
     data.extend_from_slice(&args.expected_out_value.to_le_bytes());
     data.extend_from_slice(&(args.action_payload.len() as u32).to_le_bytes());
     data.extend_from_slice(&args.action_payload);
