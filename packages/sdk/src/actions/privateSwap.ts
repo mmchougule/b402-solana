@@ -33,7 +33,7 @@ import {
   TransactionMessage,
   VersionedTransaction,
 } from '@solana/web3.js';
-import { TOKEN_PROGRAM_ID, getAssociatedTokenAddress } from '@solana/spl-token';
+import { TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync } from '@solana/spl-token';
 import { randomBytes } from '@noble/hashes/utils';
 
 import { leToFrReduced } from '@b402ai/solana-shared';
@@ -96,6 +96,125 @@ export interface PrivateSwapResult {
   txSizeBytes: number;
 }
 
+/**
+ * Inputs for the pure, network-free tx builder. Split from `privateSwap`
+ * so the regression test can assert tx size without touching RPC.
+ */
+export interface BuildPrivateSwapTxInputs {
+  poolProgramId: PublicKey;
+  jupiterAdapterId: PublicKey;
+  altAccounts: AddressLookupTableAccount[];
+  caller: PublicKey;
+  outputCommitmentLe: Uint8Array;
+  encryptedNote: EncryptedNote;
+  inMint: PublicKey;
+  outMint: PublicKey;
+  inAmount: bigint;
+  minOutAmount: bigint;
+  jupiterSwapIx: JupiterSwapInstruction;
+  blockhash: string;
+}
+
+/**
+ * Pure tx builder. No RPC, no signing. Returns the unsigned v0 tx + the
+ * serialized size (unsigned size + signature slot space). Callers:
+ * `privateSwap` for submission; unit tests for size regression.
+ */
+export function buildPrivateSwapTx(
+  inputs: BuildPrivateSwapTxInputs,
+): { tx: VersionedTransaction; estimatedSize: number } {
+  const {
+    poolProgramId, jupiterAdapterId, altAccounts, caller,
+    outputCommitmentLe, encryptedNote, inMint, outMint,
+    inAmount, minOutAmount, jupiterSwapIx, blockhash,
+  } = inputs;
+
+  if (jupiterSwapIx.data.length > MAX_ACTION_PAYLOAD) {
+    throw new Error(
+      `adapter route data ${jupiterSwapIx.data.length} B exceeds MAX_ACTION_PAYLOAD ${MAX_ACTION_PAYLOAD} B`,
+    );
+  }
+
+  const rawAdapterIxData = concat(
+    instructionDiscriminator('execute'),
+    u64Le(inAmount),
+    u64Le(minOutAmount),
+    vecU8(jupiterSwapIx.data),
+  );
+
+  const poolIxData = concat(
+    instructionDiscriminator('adapt_execute_devnet'),
+    u64Le(inAmount),
+    u64Le(minOutAmount),
+    vecU8(rawAdapterIxData),
+    outputCommitmentLe,
+    encodeEncryptedNote(encryptedNote),
+  );
+
+  const adapterAuthority = PublicKey.findProgramAddressSync(
+    [new TextEncoder().encode('b402/v1'), new TextEncoder().encode('adapter')],
+    jupiterAdapterId,
+  )[0];
+  const adapterInTa = getAssociatedTokenAddressSync(inMint, adapterAuthority, true);
+  const adapterOutTa = getAssociatedTokenAddressSync(outMint, adapterAuthority, true);
+
+  const poolIxKeys = [
+    { pubkey: caller,                                   isSigner: true,  isWritable: true  },
+    { pubkey: poolConfigPda(poolProgramId),             isSigner: false, isWritable: false },
+    { pubkey: adapterRegistryPda(poolProgramId),        isSigner: false, isWritable: false },
+    { pubkey: tokenConfigPda(poolProgramId, inMint),    isSigner: false, isWritable: false },
+    { pubkey: tokenConfigPda(poolProgramId, outMint),   isSigner: false, isWritable: false },
+    { pubkey: vaultPda(poolProgramId, inMint),          isSigner: false, isWritable: true  },
+    { pubkey: vaultPda(poolProgramId, outMint),         isSigner: false, isWritable: true  },
+    { pubkey: treeStatePda(poolProgramId),              isSigner: false, isWritable: true  },
+    { pubkey: jupiterAdapterId,                         isSigner: false, isWritable: false },
+    { pubkey: adapterAuthority,                         isSigner: false, isWritable: false },
+    { pubkey: adapterInTa,                              isSigner: false, isWritable: true  },
+    { pubkey: adapterOutTa,                             isSigner: false, isWritable: true  },
+    { pubkey: TOKEN_PROGRAM_ID,                         isSigner: false, isWritable: false },
+    ...jupiterSwapIx.keys,
+  ];
+
+  const poolIx = new TransactionInstruction({
+    programId: poolProgramId,
+    keys: poolIxKeys,
+    data: Buffer.from(poolIxData),
+  });
+  const cuIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 });
+
+  const msg = new TransactionMessage({
+    payerKey: caller,
+    recentBlockhash: blockhash,
+    instructions: [cuIx, poolIx],
+  }).compileToV0Message(altAccounts);
+
+  const tx = new VersionedTransaction(msg);
+  // web3.js's MessageV0.serialize writes into a fixed 1232 B buffer and
+  // throws RangeError when the message itself already overflows. Catch it
+  // so the caller can report the condition cleanly instead of surfacing an
+  // opaque buffer-overrun error. We return a size > MAX_TX_SIZE sentinel
+  // when overflow is detected so consumers can either throw or diagnose.
+  let estimatedSize: number;
+  try {
+    const numSigs = msg.header.numRequiredSignatures;
+    const sigHeaderLen = compactArrayHeaderLen(numSigs);
+    estimatedSize = sigHeaderLen + numSigs * 64 + msg.serialize().length;
+  } catch (err) {
+    if (err instanceof RangeError) {
+      estimatedSize = MAX_TX_SIZE + 1; // overflow sentinel
+    } else {
+      throw err;
+    }
+  }
+  return { tx, estimatedSize };
+}
+
+function compactArrayHeaderLen(n: number): number {
+  if (n < 0x80) return 1;
+  if (n < 0x4000) return 2;
+  return 3;
+}
+
 export async function privateSwap(params: PrivateSwapParams): Promise<PrivateSwapResult> {
   const {
     connection, poolProgramId, jupiterAdapterId, b402Alt, jupiterAlts,
@@ -139,86 +258,24 @@ export async function privateSwap(params: PrivateSwapParams): Promise<PrivateSwa
   );
   const outputCommitmentLe = fr32Le(commitment);
 
-  // 3. Encode adapter's `execute` Anchor ix data.
-  //    disc(8) || in_amount (u64 LE) || min_out (u64 LE) || Vec<u8>(payload)
-  const rawAdapterIxData = concat(
-    instructionDiscriminator('execute'),
-    u64Le(inAmount),
-    u64Le(minOutAmount),
-    vecU8(jupiterSwapIx.data),
-  );
-
-  // 4. Pool ix data: disc || AdaptExecuteDevnetArgs
-  //    args: u64 in_amount, u64 min_out, Vec<u8> raw_adapter_ix_data,
-  //          [u8;32] output_commitment, EncryptedNote { [u8;89], [u8;32], [u8;2] }
-  const poolArgs = concat(
-    u64Le(inAmount),
-    u64Le(minOutAmount),
-    vecU8(rawAdapterIxData),
-    outputCommitmentLe,
-    encodeEncryptedNote(encryptedNote),
-  );
-  const poolIxData = concat(
-    instructionDiscriminator('adapt_execute_devnet'),
-    poolArgs,
-  );
-
-  // 5. Build pool ix account list: named accounts then Jupiter keys.
-  const adapterAuthority = PublicKey.findProgramAddressSync(
-    [new TextEncoder().encode('b402/v1'), new TextEncoder().encode('adapter')],
-    jupiterAdapterId,
-  )[0];
-  const adapterInTa = await getAssociatedTokenAddress(inMint, adapterAuthority, true);
-  const adapterOutTa = await getAssociatedTokenAddress(outMint, adapterAuthority, true);
-
-  const poolIxKeys = [
-    { pubkey: caller.publicKey,                 isSigner: true,  isWritable: true  },
-    { pubkey: poolConfigPda(poolProgramId),     isSigner: false, isWritable: false },
-    { pubkey: adapterRegistryPda(poolProgramId),isSigner: false, isWritable: false },
-    { pubkey: tokenConfigPda(poolProgramId, inMint),   isSigner: false, isWritable: false },
-    { pubkey: tokenConfigPda(poolProgramId, outMint),  isSigner: false, isWritable: false },
-    { pubkey: vaultPda(poolProgramId, inMint),         isSigner: false, isWritable: true  },
-    { pubkey: vaultPda(poolProgramId, outMint),        isSigner: false, isWritable: true  },
-    { pubkey: treeStatePda(poolProgramId),             isSigner: false, isWritable: true  },
-    { pubkey: jupiterAdapterId,                        isSigner: false, isWritable: false },
-    { pubkey: adapterAuthority,                        isSigner: false, isWritable: false },
-    { pubkey: adapterInTa,                             isSigner: false, isWritable: true  },
-    { pubkey: adapterOutTa,                            isSigner: false, isWritable: true  },
-    { pubkey: TOKEN_PROGRAM_ID,                        isSigner: false, isWritable: false },
-    // Remaining accounts: Jupiter's keys (forwarded to adapter).
-    ...jupiterSwapIx.keys,
-  ];
-
-  const poolIx = new TransactionInstruction({
-    programId: poolProgramId,
-    keys: poolIxKeys,
-    data: Buffer.from(poolIxData),
-  });
-
-  // Pool handles CPI budget internally; request enough headroom for
-  // Jupiter + verifier-equivalent work.
-  const cuIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 });
-
-  // 6. Compose v0 tx with ALTs.
+  // 3. Build + size-check tx via the pure builder.
   const blockhash = (await connection.getLatestBlockhash('confirmed')).blockhash;
-  const msg = new TransactionMessage({
-    payerKey: caller.publicKey,
-    recentBlockhash: blockhash,
-    instructions: [cuIx, poolIx],
-  }).compileToV0Message(altAccounts);
-
-  const tx = new VersionedTransaction(msg);
-  tx.sign([caller]);
-
-  const serialized = tx.serialize();
-  if (serialized.length > MAX_TX_SIZE) {
+  const { tx, estimatedSize } = buildPrivateSwapTx({
+    poolProgramId, jupiterAdapterId, altAccounts,
+    caller: caller.publicKey,
+    outputCommitmentLe, encryptedNote,
+    inMint, outMint, inAmount, minOutAmount, jupiterSwapIx, blockhash,
+  });
+  if (estimatedSize > MAX_TX_SIZE) {
     throw new Error(
-      `tx size ${serialized.length} B exceeds MAX_TX_SIZE ${MAX_TX_SIZE} B. ` +
-      `action_payload=${jupiterSwapIx.data.length} accounts=${poolIxKeys.length} alts=${altAccounts.length}. ` +
-      `Reduce route hops or add the heavy accounts to b402 ALT via ops/alt/create-alt.ts add-adapter.`,
+      `tx size ${estimatedSize} B exceeds MAX_TX_SIZE ${MAX_TX_SIZE} B. ` +
+      `action_payload=${jupiterSwapIx.data.length} alts=${altAccounts.length}. ` +
+      `Reduce route hops or add heavy accounts to b402 ALT via ops/alt/create-alt.ts add-adapter.`,
     );
   }
 
+  tx.sign([caller]);
+  const serialized = tx.serialize();
   const sig = await connection.sendRawTransaction(serialized, {
     skipPreflight: false, preflightCommitment: 'confirmed',
   });
