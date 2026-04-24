@@ -14,6 +14,11 @@ pub mod verifier_cpi;
 // cannot invoke it on a deployed program.
 pub mod adapt_mock;
 
+// DEVNET-ONLY MODULE: `adapt_execute_devnet` exercises the full pool-side
+// composability plumbing minus ZK. Feature `adapt-devnet` gates dispatch.
+// Slotted for removal once the real adapt circuit + verifier land.
+pub mod adapt_execute;
+
 pub use init_pool::*;
 pub use add_token_config::*;
 pub use shield::*;
@@ -21,3 +26,4 @@ pub use transact::*;
 pub use unshield::*;
 pub use admin::*;
 pub use adapt_mock::*;
+pub use adapt_execute::*;
