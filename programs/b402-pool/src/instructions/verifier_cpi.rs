@@ -15,6 +15,7 @@ use anchor_lang::solana_program::program::invoke;
 use crate::error::PoolError;
 
 pub const PUBLIC_INPUT_COUNT: usize = 18;
+pub const PUBLIC_INPUT_COUNT_ADAPT: usize = 23;
 
 /// sha256("global:verify")[0..8]. Pre-computed to avoid hashing at runtime.
 /// Must match the Anchor-generated discriminator for `pub fn verify(...)` in
@@ -63,6 +64,41 @@ pub fn invoke_verify_transact<'info>(
     //
     // Workaround for v1: change the verifier to use UncheckedAccount (no
     // Signer requirement). Handled in the verifier program source.
+
+    let ix = Instruction {
+        program_id: *verifier_program.key,
+        accounts: vec![],
+        data,
+    };
+
+    invoke(&ix, &[verifier_program.clone()])
+        .map_err(|_| error!(PoolError::ProofVerificationFailed))?;
+    Ok(())
+}
+
+/// Sibling of `invoke_verify_transact` for the adapt verifier. Same wire
+/// format — the only difference is `public_inputs.len()` must equal 23.
+pub fn invoke_verify_adapt<'info>(
+    verifier_program: &AccountInfo<'info>,
+    proof: &[u8; 256],
+    public_inputs: &[[u8; 32]],
+) -> Result<()> {
+    if public_inputs.len() != PUBLIC_INPUT_COUNT_ADAPT {
+        return err!(PoolError::ProofPublicInputMismatch);
+    }
+
+    let inner_len = 1 + 256 + 32 * PUBLIC_INPUT_COUNT_ADAPT;
+    let mut inner: Vec<u8> = Vec::with_capacity(inner_len);
+    inner.push(0x01);
+    inner.extend_from_slice(proof);
+    for fr in public_inputs.iter() {
+        inner.extend_from_slice(fr);
+    }
+
+    let mut data: Vec<u8> = Vec::with_capacity(8 + 4 + inner_len);
+    data.extend_from_slice(&VERIFY_DISCRIMINATOR);
+    data.extend_from_slice(&(inner_len as u32).to_le_bytes());
+    data.extend_from_slice(&inner);
 
     let ix = Instruction {
         program_id: *verifier_program.key,
