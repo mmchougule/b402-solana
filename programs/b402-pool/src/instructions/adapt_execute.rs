@@ -1,76 +1,95 @@
-//! `adapt_execute_devnet` — Phase 1 pool-side composability path.
+//! `adapt_execute` — ZK-bound composable execution path (PRD-04 §3).
 //!
-//! Exercises the full `adapt_execute` plumbing minus the ZK layer:
-//!   1. Adapter registry lookup (program_id + instruction discriminator).
-//!   2. Pool signs `in_vault → adapter_in_ta` transfer (in_amount).
-//!   3. CPI `adapter.execute` with caller-supplied raw instruction data.
-//!   4. Post-CPI balance-delta invariant on `out_vault`.
-//!   5. Append caller-supplied output commitment to the tree.
+//! Full flow, with all cryptographic bindings:
+//!   1. Parse AdaptPublicInputs (23 circuit public inputs + 2 pool-side args).
+//!   2. Bind to pool state:
+//!        - public_token_mint          == token_config_in.mint
+//!        - expected_out_mint          == token_config_out.mint
+//!        - adapter_program             is registered + enabled
+//!        - adapter_program ix disc    is allowlisted
+//!        - adapter_id (public input)  == keccak(adapter_program.key) mod p
+//!        - action_hash (public input) == Poseidon_3(
+//!                                           adaptBindTag,
+//!                                           keccak(action_payload) mod p,
+//!                                           expected_out_mint Fr,
+//!                                       )
+//!        - merkle_root                 is in the 128-root recent ring
+//!   3. Verify Groth16 proof via b402_verifier_adapt CPI (23 public inputs).
+//!   4. Burn input nullifiers (same sharded insert as unshield).
+//!   5. Pool-signed transfer: in_vault → adapter_in_ta (amount = public_amount_in).
+//!   6. Snapshot out_vault pre-balance.
+//!   7. CPI the adapter with caller-supplied raw ix data + remaining_accounts.
+//!   8. Post-CPI invariant: out_vault delta ≥ expected_out_value (I4).
+//!   9. Append output commitments to the tree (same pattern as transact).
+//!  10. Pay relayer fee in IN mint from in_vault (pool-signed).
+//!  11. Emit AdaptExecuted event.
 //!
-//! What's missing vs. real `adapt_execute` (PRD-04 §3):
-//!   - No proof verification. `output_commitment` is trusted from the caller.
-//!   - No nullifier burn. Input tokens must already be in `in_vault` (via a
-//!     prior `shield` of the input mint).
-//!   - No relayer-fee deduction. Fee accounting happens once the adapt
-//!     circuit is ready.
-//!
-//! This handler is gated behind the `adapt-devnet` crate feature. Mainnet
-//! builds compile it in (Anchor's `#[program]` macro doesn't respect cfg on
-//! individual fns), but the runtime `cfg!` check in `lib.rs` rejects every
-//! call when the feature is off. Security property claimed here: **none**.
+//! Replaces the earlier feature-gated `adapt_execute_devnet` handler. That
+//! stub trusted caller-supplied output commitments; the circuit binding
+//! above closes the cross-mint hole described in docs/PHASE-2.md.
 
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
-use anchor_lang::solana_program::program::invoke_signed;
+use anchor_lang::solana_program::keccak;
+use anchor_lang::solana_program::poseidon::{hashv, Endianness, Parameters};
+use anchor_lang::solana_program::program::invoke;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
-use crate::constants::{SEED_CONFIG, SEED_ADAPTERS, SEED_TOKEN, SEED_TREE, SEED_VAULT, VERSION_PREFIX};
+use crate::constants::{
+    SEED_ADAPTERS, SEED_CONFIG, SEED_NULL, SEED_TOKEN, SEED_TREE, SEED_VAULT, VERSION_PREFIX,
+    TAG_ADAPT_BIND, TAG_COMMIT, TAG_FEE_BIND, TAG_MK_NODE, TAG_NULLIFIER, TAG_RECIPIENT_BIND,
+    TAG_SPEND_KEY_PUB,
+};
 use crate::error::PoolError;
-use crate::events::CommitmentAppended;
-use crate::state::{AdapterRegistry, PoolConfig, TokenConfig, TreeState};
+use crate::events::{AdaptExecuted, CommitmentAppended, NullifierSpent};
+use crate::state::{AdapterRegistry, NullifierShard, PoolConfig, TokenConfig, TreeState};
 use crate::util;
 
 use super::shield::EncryptedNote;
+use super::verifier_cpi;
 
-/// Event emitted on successful devnet adapt. Separate from `CommitmentAppended`
-/// so indexers can distinguish "output note from a composed swap" from plain
-/// shield/unshield change notes.
-#[event]
-pub struct AdaptExecutedDevnet {
-    pub adapter_program: Pubkey,
-    pub in_mint: Pubkey,
-    pub out_mint: Pubkey,
-    pub in_amount: u64,
-    pub out_delta: u64,
-    pub min_out_amount: u64,
-    pub slot: u64,
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
+pub struct AdaptPublicInputs {
+    pub merkle_root: [u8; 32],
+    pub nullifier: [[u8; 32]; 2],
+    pub commitment_out: [[u8; 32]; 2],
+    pub public_amount_in: u64,
+    pub public_amount_out: u64,         // adapt requires this to be zero
+    pub public_token_mint: Pubkey,       // IN mint
+    pub relayer_fee: u64,
+    pub relayer_fee_bind: [u8; 32],
+    pub root_bind: [u8; 32],
+    pub recipient_bind: [u8; 32],
+    pub adapter_id: [u8; 32],            // keccak(adapter_program_id) mod p
+    pub action_hash: [u8; 32],           // Poseidon_3(adaptBindTag, keccakFr, expectedOutMint_Fr)
+    pub expected_out_value: u64,
+    pub expected_out_mint: Pubkey,       // OUT mint
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
-pub struct AdaptExecuteDevnetArgs {
-    /// Amount the pool transfers `in_vault → adapter_in_ta` before calling
-    /// the adapter.
-    pub in_amount: u64,
-    /// Pool's post-CPI delta floor on `out_vault`. Adapter's own slippage
-    /// check is opaque to the pool; this is the pool's independent guard.
-    pub min_out_amount: u64,
-    /// Raw bytes forwarded to the adapter as `Instruction.data`. First 8
-    /// bytes are the instruction discriminator, checked against the
-    /// adapter's `allowed_instructions` in the registry. Remaining bytes
-    /// are the adapter-specific arg layout (Anchor-serialized).
+pub struct AdaptExecuteArgs {
+    pub proof: Vec<u8>,                  // must be 256 bytes
+    pub public_inputs: AdaptPublicInputs,
+    pub encrypted_notes: Vec<EncryptedNote>, // 0..=2 entries
+    pub in_dummy_mask: u8,
+    pub out_dummy_mask: u8,
+    pub nullifier_shard_prefix: [u16; 2],
+    pub relayer_fee_recipient: Pubkey,
+    /// Exact bytes forwarded as the adapter's Anchor instruction data.
+    /// First 8 bytes are the adapter's ix discriminator, checked against
+    /// the registry's allowlist.
     pub raw_adapter_ix_data: Vec<u8>,
-    /// Output commitment to append to the tree. In the real flow this
-    /// comes from the circuit's public outputs; here it's trusted.
-    pub output_commitment: [u8; 32],
-    /// Ciphertext + viewing tag for the output note, emitted in
-    /// `CommitmentAppended` for the recipient's scanner.
-    pub encrypted_note: EncryptedNote,
+    /// The action_payload the proof was generated over. Pool recomputes
+    /// keccak256(action_payload) mod p and checks it matches the
+    /// circuit's action_hash public input.
+    pub action_payload: Vec<u8>,
 }
 
 #[derive(Accounts)]
-pub struct AdaptExecuteDevnet<'info> {
+#[instruction(args: AdaptExecuteArgs)]
+pub struct AdaptExecute<'info> {
     #[account(mut)]
-    pub caller: Signer<'info>,
+    pub relayer: Signer<'info>,
 
     #[account(
         seeds = [VERSION_PREFIX, SEED_CONFIG],
@@ -121,61 +140,231 @@ pub struct AdaptExecuteDevnet<'info> {
     )]
     pub tree_state: AccountLoader<'info, TreeState>,
 
-    /// CHECK: validated against `adapter_registry.adapters[].program_id`.
+    /// CHECK: validated against pool_config.verifier_adapt.
+    pub verifier_program: AccountInfo<'info>,
+
+    /// CHECK: validated against adapter_registry.
     pub adapter_program: UncheckedAccount<'info>,
 
-    /// CHECK: adapter's own PDA signer. Seeds / bump checked by the adapter.
+    /// CHECK: adapter's own PDA signer. The adapter validates its own seeds.
     pub adapter_authority: UncheckedAccount<'info>,
 
     #[account(
         mut,
         constraint = adapter_in_ta.mint == token_config_in.mint @ PoolError::MintMismatch,
-        constraint = adapter_in_ta.owner == adapter_authority.key(),
+        constraint = adapter_in_ta.owner == adapter_authority.key() @ PoolError::VaultMismatch,
     )]
     pub adapter_in_ta: Account<'info, TokenAccount>,
 
     #[account(
         mut,
         constraint = adapter_out_ta.mint == token_config_out.mint @ PoolError::MintMismatch,
-        constraint = adapter_out_ta.owner == adapter_authority.key(),
+        constraint = adapter_out_ta.owner == adapter_authority.key() @ PoolError::VaultMismatch,
     )]
     pub adapter_out_ta: Account<'info, TokenAccount>,
 
+    #[account(
+        init_if_needed,
+        payer = relayer,
+        space = NullifierShard::LEN,
+        seeds = [VERSION_PREFIX, SEED_NULL, &args.nullifier_shard_prefix[0].to_le_bytes()],
+        bump,
+    )]
+    pub nullifier_shard_0: AccountLoader<'info, NullifierShard>,
+
+    #[account(
+        init_if_needed,
+        payer = relayer,
+        space = NullifierShard::LEN,
+        seeds = [VERSION_PREFIX, SEED_NULL, &args.nullifier_shard_prefix[1].to_le_bytes()],
+        bump,
+    )]
+    pub nullifier_shard_1: AccountLoader<'info, NullifierShard>,
+
+    /// Relayer fee destination (in IN mint). Pass `in_vault` as a sentinel
+    /// when fee is zero to avoid creating an extra ATA.
+    #[account(mut)]
+    pub relayer_fee_token_account: Account<'info, TokenAccount>,
+
     pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
 }
 
 #[inline(never)]
 pub fn handler<'info>(
-    ctx: Context<'_, '_, '_, 'info, AdaptExecuteDevnet<'info>>,
-    args: AdaptExecuteDevnetArgs,
+    ctx: Context<'_, '_, '_, 'info, AdaptExecute<'info>>,
+    args: AdaptExecuteArgs,
 ) -> Result<()> {
+    require!(args.proof.len() == 256, PoolError::InvalidInstructionData);
+    require!(args.encrypted_notes.len() <= 2, PoolError::InvalidInstructionData);
+    require!(args.raw_adapter_ix_data.len() >= 8, PoolError::InvalidInstructionData);
+
     let cfg = &ctx.accounts.pool_config;
     require!(!cfg.paused_adapts, PoolError::PoolPaused);
-
-    require!(args.in_amount > 0, PoolError::PublicAmountExclusivity);
     require!(
-        args.raw_adapter_ix_data.len() >= 8,
-        PoolError::InvalidInstructionData
+        ctx.accounts.verifier_program.key() == cfg.verifier_adapt,
+        PoolError::ProofVerificationFailed
     );
 
-    // 1. Registry check: adapter_program registered + enabled, and the
-    // instruction discriminator we're about to forward is whitelisted.
-    let adapter_key = ctx.accounts.adapter_program.key();
-    let disc: [u8; 8] = args.raw_adapter_ix_data[0..8].try_into()
+    let pi = &args.public_inputs;
+
+    // Adapt-side exclusivity: no public withdrawal; there must be something to swap.
+    require!(pi.public_amount_out == 0, PoolError::PublicAmountExclusivity);
+    require!(pi.public_amount_in > 0, PoolError::PublicAmountExclusivity);
+
+    // Mint bindings.
+    require!(
+        pi.public_token_mint == ctx.accounts.token_config_in.mint,
+        PoolError::MintMismatch
+    );
+    require!(
+        pi.expected_out_mint == ctx.accounts.token_config_out.mint,
+        PoolError::MintMismatch
+    );
+
+    // Adapter registry + ix discriminator allowlist.
+    let adapter_program_key = ctx.accounts.adapter_program.key();
+    let adapter_ix_disc: [u8; 8] = args.raw_adapter_ix_data[0..8]
+        .try_into()
         .map_err(|_| error!(PoolError::InvalidInstructionData))?;
     {
         let registry = &ctx.accounts.adapter_registry;
-        let info = registry.adapters.iter()
-            .find(|a| a.program_id == adapter_key && a.enabled)
+        let info = registry
+            .adapters
+            .iter()
+            .find(|a| a.program_id == adapter_program_key && a.enabled)
             .ok_or(error!(PoolError::AdapterNotRegistered))?;
         let allowed = &info.allowed_instructions[..info.allowed_instruction_count as usize];
         require!(
-            allowed.iter().any(|d| *d == disc),
+            allowed.iter().any(|d| *d == adapter_ix_disc),
             PoolError::AdapterNotRegistered
+        );
+
+        // Circuit's adapter_id public input must match keccak of program ID,
+        // reduced mod Fr. Prevents a proof for adapter X from being replayed
+        // against adapter Y.
+        let digest = keccak::hash(adapter_program_key.as_ref()).0;
+        let expected_adapter_id = util::reduce_le_mod_p(&digest);
+        require!(
+            pi.adapter_id == expected_adapter_id,
+            PoolError::InvalidAdapterBinding
         );
     }
 
-    // 2. Pool → adapter_in_ta transfer (pool_config PDA is vault authority).
+    // action_hash binding: circuit proved Poseidon_3 over (adaptBindTag,
+    // keccak(action_payload) mod p, expected_out_mint Fr). Pool recomputes
+    // and rejects any tampering between proof gen and submission.
+    {
+        let payload_keccak = keccak::hash(&args.action_payload).0;
+        let payload_keccak_fr = util::reduce_le_mod_p(&payload_keccak);
+        let expected_out_mint_fr = util::reduce_le_mod_p(&pi.expected_out_mint.to_bytes());
+        let expected_action_hash = hashv(
+            Parameters::Bn254X5,
+            Endianness::LittleEndian,
+            &[&TAG_ADAPT_BIND[..], &payload_keccak_fr[..], &expected_out_mint_fr[..]],
+        )
+        .map_err(|_| error!(PoolError::InvalidInstructionData))?
+        .to_bytes();
+        require!(
+            pi.action_hash == expected_action_hash,
+            PoolError::InvalidAdapterBinding
+        );
+    }
+
+    // Root ring membership.
+    {
+        let tree = ctx.accounts.tree_state.load()?;
+        require!(
+            util::tree_has_recent_root(&tree, &pi.merkle_root),
+            PoolError::InvalidMerkleRoot
+        );
+    }
+
+    // Shard prefix consistency for non-dummy nullifiers.
+    for i in 0..2 {
+        let is_dummy = (args.in_dummy_mask >> i) & 1 == 1;
+        if is_dummy {
+            require!(
+                pi.nullifier[i] == [0u8; 32],
+                PoolError::ProofPublicInputMismatch
+            );
+            continue;
+        }
+        let actual_prefix = util::shard_prefix(&pi.nullifier[i]);
+        require!(
+            actual_prefix == args.nullifier_shard_prefix[i],
+            PoolError::NullifierShardMismatch
+        );
+    }
+
+    // Relayer-fee recipient consistency (owner + mint). Sentinel: fee=0
+    // skips these checks (fee account may just be the in_vault).
+    if pi.relayer_fee > 0 {
+        require!(
+            ctx.accounts.relayer_fee_token_account.owner == args.relayer_fee_recipient,
+            PoolError::InvalidFeeBinding
+        );
+        require!(
+            ctx.accounts.relayer_fee_token_account.mint == ctx.accounts.token_config_in.mint,
+            PoolError::MintMismatch
+        );
+    }
+
+    // Verify proof.
+    let public_inputs: Vec<[u8; 32]> = build_public_inputs_for_adapt(pi);
+    let mut proof_bytes = [0u8; 256];
+    proof_bytes.copy_from_slice(&args.proof);
+    verifier_cpi::invoke_verify_adapt(
+        &ctx.accounts.verifier_program,
+        &proof_bytes,
+        &public_inputs,
+    )?;
+
+    // Nullifier ordering check (when both input slots are non-dummy).
+    if (args.in_dummy_mask & 0b11) == 0 {
+        require!(
+            pi.nullifier[0] < pi.nullifier[1],
+            PoolError::NullifierOrderingViolation
+        );
+    }
+
+    let clock = Clock::get()?;
+
+    // Burn input nullifiers.
+    if (args.in_dummy_mask & 0b01) == 0 {
+        let mut shard = load_or_init_shard(
+            &ctx.accounts.nullifier_shard_0,
+            args.nullifier_shard_prefix[0],
+        )?;
+        require!(
+            shard.prefix == args.nullifier_shard_prefix[0],
+            PoolError::NullifierShardMismatch
+        );
+        util::nullifier_insert(&mut shard, pi.nullifier[0])?;
+        emit!(NullifierSpent {
+            nullifier: pi.nullifier[0],
+            shard: shard.prefix,
+            slot: clock.slot,
+        });
+    }
+    if (args.in_dummy_mask & 0b10) == 0 {
+        let mut shard = load_or_init_shard(
+            &ctx.accounts.nullifier_shard_1,
+            args.nullifier_shard_prefix[1],
+        )?;
+        require!(
+            shard.prefix == args.nullifier_shard_prefix[1],
+            PoolError::NullifierShardMismatch
+        );
+        util::nullifier_insert(&mut shard, pi.nullifier[1])?;
+        emit!(NullifierSpent {
+            nullifier: pi.nullifier[1],
+            shard: shard.prefix,
+            slot: clock.slot,
+        });
+    }
+
+    // Pool transfers public_amount_in to adapter_in_ta (pool PDA signs the vault).
     let pool_config_info = ctx.accounts.pool_config.to_account_info();
     let signer_seeds: &[&[u8]] = &[VERSION_PREFIX, SEED_CONFIG, &[ctx.bumps.pool_config]];
     let signer = &[signer_seeds];
@@ -185,27 +374,32 @@ pub fn handler<'info>(
             Transfer {
                 from: ctx.accounts.in_vault.to_account_info(),
                 to: ctx.accounts.adapter_in_ta.to_account_info(),
-                authority: pool_config_info,
+                authority: pool_config_info.clone(),
             },
             signer,
         ),
-        args.in_amount,
+        pi.public_amount_in,
     )?;
 
-    // 3. Pre-snapshot the out_vault balance for the delta invariant.
+    // Pre-CPI snapshot for the delta invariant.
     ctx.accounts.out_vault.reload()?;
     let pre = ctx.accounts.out_vault.amount;
 
-    // 4. Build + CPI the adapter. Accounts forwarded: named adapter inputs
-    // followed by `remaining_accounts` for downstream protocol plumbing.
+    // Build + CPI adapter. Unified ABI: six named accounts, then remaining.
     let adapter_metas: Vec<AccountMeta> = {
         let mut m = Vec::with_capacity(6 + ctx.remaining_accounts.len());
-        m.push(AccountMeta::new_readonly(ctx.accounts.adapter_authority.key(), false));
+        m.push(AccountMeta::new_readonly(
+            ctx.accounts.adapter_authority.key(),
+            false,
+        ));
         m.push(AccountMeta::new(ctx.accounts.in_vault.key(), false));
         m.push(AccountMeta::new(ctx.accounts.out_vault.key(), false));
         m.push(AccountMeta::new(ctx.accounts.adapter_in_ta.key(), false));
         m.push(AccountMeta::new(ctx.accounts.adapter_out_ta.key(), false));
-        m.push(AccountMeta::new_readonly(ctx.accounts.token_program.key(), false));
+        m.push(AccountMeta::new_readonly(
+            ctx.accounts.token_program.key(),
+            false,
+        ));
         for a in ctx.remaining_accounts.iter() {
             if a.is_writable {
                 m.push(AccountMeta::new(*a.key, a.is_signer));
@@ -215,8 +409,8 @@ pub fn handler<'info>(
         }
         m
     };
-
-    let mut adapter_infos: Vec<AccountInfo<'info>> = Vec::with_capacity(6 + ctx.remaining_accounts.len());
+    let mut adapter_infos: Vec<AccountInfo<'info>> =
+        Vec::with_capacity(6 + ctx.remaining_accounts.len());
     adapter_infos.push(ctx.accounts.adapter_authority.to_account_info());
     adapter_infos.push(ctx.accounts.in_vault.to_account_info());
     adapter_infos.push(ctx.accounts.out_vault.to_account_info());
@@ -228,51 +422,130 @@ pub fn handler<'info>(
     }
 
     let ix = Instruction {
-        program_id: adapter_key,
+        program_id: adapter_program_key,
         accounts: adapter_metas,
         data: args.raw_adapter_ix_data,
     };
-    invoke_signed(&ix, &adapter_infos, signer)
-        .map_err(|_| error!(PoolError::AdapterCallReverted))?;
+    invoke(&ix, &adapter_infos).map_err(|_| error!(PoolError::AdapterCallReverted))?;
 
-    // 5. Post-delta check.
+    // Post-CPI balance-delta invariant (I4).
     ctx.accounts.out_vault.reload()?;
     let post = ctx.accounts.out_vault.amount;
     let delta = post.saturating_sub(pre);
-    require!(delta >= args.min_out_amount, PoolError::AdapterReturnedLessThanMin);
+    require!(
+        delta >= pi.expected_out_value,
+        PoolError::AdapterReturnedLessThanMin
+    );
 
-    // 6. Append output commitment to the tree.
-    let clock = Clock::get()?;
-    let (leaf_index, new_root) = {
+    // Append output commitments to the tree.
+    {
         let mut tree = ctx.accounts.tree_state.load_mut()?;
-        let leaf_index = tree.leaf_count;
-        let new_root = util::tree_append(&mut tree, args.output_commitment)?;
-        (leaf_index, new_root)
-    };
+        for (i, commitment) in pi.commitment_out.iter().enumerate() {
+            let is_dummy = (args.out_dummy_mask >> i) & 1 == 1;
+            if is_dummy {
+                require!(
+                    *commitment == [0u8; 32],
+                    PoolError::ProofPublicInputMismatch
+                );
+                continue;
+            }
+            let leaf_index = tree.leaf_count;
+            let new_root = util::tree_append(&mut tree, *commitment)?;
+            let (ct, ep, vt) = match args.encrypted_notes.get(i) {
+                Some(n) => (n.ciphertext, n.ephemeral_pub, n.viewing_tag),
+                None => ([0u8; 89], [0u8; 32], [0u8; 2]),
+            };
+            emit!(CommitmentAppended {
+                leaf_index,
+                commitment: *commitment,
+                ciphertext: ct,
+                ephemeral_pub: ep,
+                viewing_tag: vt,
+                tree_root_after: new_root,
+                slot: clock.slot,
+            });
+        }
+    }
 
-    emit!(CommitmentAppended {
-        leaf_index,
-        commitment: args.output_commitment,
-        ciphertext: args.encrypted_note.ciphertext,
-        ephemeral_pub: args.encrypted_note.ephemeral_pub,
-        viewing_tag: args.encrypted_note.viewing_tag,
-        tree_root_after: new_root,
-        slot: clock.slot,
-    });
+    // Pay relayer fee in IN mint from in_vault (pool PDA signs).
+    if pi.relayer_fee > 0 {
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.in_vault.to_account_info(),
+                    to: ctx.accounts.relayer_fee_token_account.to_account_info(),
+                    authority: pool_config_info,
+                },
+                signer,
+            ),
+            pi.relayer_fee,
+        )?;
+    }
 
-    emit!(AdaptExecutedDevnet {
-        adapter_program: adapter_key,
+    emit!(AdaptExecuted {
+        adapter_program: adapter_program_key,
         in_mint: ctx.accounts.token_config_in.mint,
         out_mint: ctx.accounts.token_config_out.mint,
-        in_amount: args.in_amount,
+        public_amount_in: pi.public_amount_in,
         out_delta: delta,
-        min_out_amount: args.min_out_amount,
+        expected_out_value: pi.expected_out_value,
+        relayer_fee: pi.relayer_fee,
         slot: clock.slot,
     });
-
-    // Prevent the "unused when feature off" warning without actually
-    // changing behavior — util is always referenced above.
-    let _ = util::tree_has_recent_root;
 
     Ok(())
 }
+
+fn u64_to_fr_le(v: u64) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    out[..8].copy_from_slice(&v.to_le_bytes());
+    out
+}
+
+fn load_or_init_shard<'a, 'info>(
+    loader: &'a AccountLoader<'info, NullifierShard>,
+    expected_prefix: u16,
+) -> Result<std::cell::RefMut<'a, NullifierShard>> {
+    if let Ok(mut shard) = loader.load_mut() {
+        if shard.count == 0 && shard.prefix == 0 {
+            shard.prefix = expected_prefix;
+        }
+        return Ok(shard);
+    }
+    let mut shard = loader.load_init()?;
+    shard.prefix = expected_prefix;
+    Ok(shard)
+}
+
+#[inline(never)]
+fn build_public_inputs_for_adapt(pi: &AdaptPublicInputs) -> Vec<[u8; 32]> {
+    let mut v: Vec<[u8; 32]> = Vec::with_capacity(verifier_cpi::PUBLIC_INPUT_COUNT_ADAPT);
+    // First 18 — identical layout to transact.
+    v.push(pi.merkle_root);
+    v.push(pi.nullifier[0]);
+    v.push(pi.nullifier[1]);
+    v.push(pi.commitment_out[0]);
+    v.push(pi.commitment_out[1]);
+    v.push(u64_to_fr_le(pi.public_amount_in));
+    v.push(u64_to_fr_le(pi.public_amount_out));
+    v.push(util::reduce_le_mod_p(&pi.public_token_mint.to_bytes()));
+    v.push(u64_to_fr_le(pi.relayer_fee));
+    v.push(pi.relayer_fee_bind);
+    v.push(pi.root_bind);
+    v.push(pi.recipient_bind);
+    v.push(TAG_COMMIT);
+    v.push(TAG_NULLIFIER);
+    v.push(TAG_MK_NODE);
+    v.push(TAG_SPEND_KEY_PUB);
+    v.push(TAG_FEE_BIND);
+    v.push(TAG_RECIPIENT_BIND);
+    // Adapt-specific — 5 more.
+    v.push(pi.adapter_id);
+    v.push(pi.action_hash);
+    v.push(u64_to_fr_le(pi.expected_out_value));
+    v.push(util::reduce_le_mod_p(&pi.expected_out_mint.to_bytes()));
+    v.push(TAG_ADAPT_BIND);
+    v
+}
+

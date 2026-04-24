@@ -83,20 +83,15 @@ pub mod b402_pool {
         instructions::adapt_mock::handler(ctx, args)
     }
 
-    /// DEVNET-ONLY: Phase 1 adapter composition minus the ZK layer. See
-    /// `instructions/adapt_execute.rs`. Same feature-gate pattern as
-    /// `check_adapter_delta_mock` — dispatchable only when compiled with
-    /// `--features adapt-devnet`. Security property: none (no proof, no
-    /// nullifier burn, output commitment trusted from caller). Do not
-    /// enable this feature for mainnet builds.
-    pub fn adapt_execute_devnet<'info>(
-        ctx: Context<'_, '_, '_, 'info, AdaptExecuteDevnet<'info>>,
-        args: AdaptExecuteDevnetArgs,
+    /// Composable private execution — burns input shielded notes in IN mint,
+    /// CPIs a registered adapter to swap/lend/etc, mints output shielded
+    /// notes in OUT mint. Full ZK bindings (adapter ID, action hash, mint,
+    /// expected output) via the adapt circuit + `b402_verifier_adapt`. See
+    /// `instructions/adapt_execute.rs`.
+    pub fn adapt_execute<'info>(
+        ctx: Context<'_, '_, '_, 'info, AdaptExecute<'info>>,
+        args: AdaptExecuteArgs,
     ) -> Result<()> {
-        require!(
-            cfg!(feature = "adapt-devnet"),
-            error::PoolError::InvalidInstructionData
-        );
         instructions::adapt_execute::handler(ctx, args)
     }
 }

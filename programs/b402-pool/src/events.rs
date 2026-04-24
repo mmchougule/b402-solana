@@ -65,3 +65,15 @@ pub struct PoolPauseChanged {
     pub paused: bool,
     pub slot: u64,
 }
+
+#[event]
+pub struct AdaptExecuted {
+    pub adapter_program: Pubkey,
+    pub in_mint: Pubkey,
+    pub out_mint: Pubkey,
+    pub public_amount_in: u64,
+    pub out_delta: u64,
+    pub expected_out_value: u64,
+    pub relayer_fee: u64,
+    pub slot: u64,
+}
