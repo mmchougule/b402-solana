@@ -7,10 +7,10 @@
 set -euo pipefail
 
 RPC=${RPC:-http://127.0.0.1:8899}
-POOL=2vMTGvSCobE7HfVvdSHsmVNzCFmbYdc3TsQwekUwcusy
-VERIFIER=G6AycE529UPg1hib72A5A7Yf8eZRx9uFmDZQYMSYhEC7
-ADAPTER=2FLQngd2Z1cqN7q4BU8vxDm2WNxXLwGDT3FYubQrFncg
-MOCK=9RsayAuGPpxBrbuDdT5tnxKMKnsL8CSpGKwcrGjKvfHx
+POOL=42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y
+VERIFIER=Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK
+ADAPTER=3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7
+MOCK=89kw33YDcbXfiayVNauz599LaDm51EuU8amWydpjYKgp
 
 fail=0
 for name_id in "pool:$POOL" "verifier:$VERIFIER" "jupiter-adapter:$ADAPTER" "mock-adapter:$MOCK"; do

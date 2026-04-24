@@ -22,7 +22,7 @@ pub mod util;
 
 use instructions::*;
 
-declare_id!("2vMTGvSCobE7HfVvdSHsmVNzCFmbYdc3TsQwekUwcusy");
+declare_id!("42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y");
 
 #[program]
 pub mod b402_pool {

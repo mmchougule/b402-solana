@@ -29,10 +29,10 @@ for so in b402_verifier_transact b402_pool b402_jupiter_adapter b402_mock_adapte
 done
 
 # Program IDs — must match `declare_id!` in each program source.
-POOL_ID=2vMTGvSCobE7HfVvdSHsmVNzCFmbYdc3TsQwekUwcusy
-VERIFIER_ID=G6AycE529UPg1hib72A5A7Yf8eZRx9uFmDZQYMSYhEC7
-ADAPTER_ID=2FLQngd2Z1cqN7q4BU8vxDm2WNxXLwGDT3FYubQrFncg
-MOCK_ADAPTER_ID=9RsayAuGPpxBrbuDdT5tnxKMKnsL8CSpGKwcrGjKvfHx
+POOL_ID=42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y
+VERIFIER_ID=Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK
+ADAPTER_ID=3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7
+MOCK_ADAPTER_ID=89kw33YDcbXfiayVNauz599LaDm51EuU8amWydpjYKgp
 
 echo "→ starting solana-test-validator"
 echo "  pool     = $POOL_ID"
