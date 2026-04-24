@@ -4,6 +4,18 @@ Real tx from our local test-validator run, dissected layer by layer. Mirrors
 what you'd see on Solscan for a shield/unshield on Solana — the equivalent
 of the Basescan view you'd get for a Railgun shield on Base EVM.
 
+> **Note**: the sample below is from an early local-validator session. Program
+> IDs shown (`2vMTGv…`, `G6AycE…`) are from that run and were rotated when
+> we deployed to devnet. The **current devnet deployment** uses:
+>
+> - pool `42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y`
+> - verifier `Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK`
+>
+> The structural breakdown (accounts, compute, instruction data, proof bytes,
+> log format) is identical — only the IDs differ. See [this devnet shield
+> tx](https://explorer.solana.com/tx/5XLaccuw6tv6AWowMDKLK24zTSxD4Ej2nuRwSnpbLWZSHU19SPb7n8mNpx8G4fHEHxBMRo5GiYPyPj6G4pmsLyZB?cluster=devnet)
+> for the real-chain version.
+
 ## Sample tx: shield 100 tokens
 
 ```
