@@ -103,8 +103,21 @@ export async function tryDecryptNote(
   leafIndex: bigint,
   mySpendingPub: bigint,
 ): Promise<Note | null> {
-  // Fast path: viewing tag check.
-  const shared = x25519.getSharedSecret(myViewingPriv, enc.ephemeralPub);
+  // Events with `omitEncryptedNotes=true` (e.g. self-shields saving tx size)
+  // emit all-zero ciphertext / ephemeralPub / viewingTag. X25519 rejects
+  // the all-zero pubkey with an exception — treat it as a "not for me"
+  // signal so the scanner doesn't crash on benign events.
+  if (isAllZero(enc.ephemeralPub)) return null;
+
+  // Fast path: viewing tag check. Wrap getSharedSecret too — a
+  // byzantine/corrupted ephemeralPub could still be invalid even when
+  // non-zero, and we want the scanner to survive those without halting.
+  let shared: Uint8Array;
+  try {
+    shared = x25519.getSharedSecret(myViewingPriv, enc.ephemeralPub);
+  } catch {
+    return null;
+  }
   const sharedFr = leToFrReduced(shared);
   const tagFull = await poseidonTagged('viewTag', sharedFr);
   const candidateTag = frToLe(tagFull).slice(0, 2);
@@ -123,4 +136,9 @@ export async function tryDecryptNote(
   } catch {
     return null;
   }
+}
+
+function isAllZero(b: Uint8Array): boolean {
+  for (let i = 0; i < b.length; i++) if (b[i] !== 0) return false;
+  return true;
 }
