@@ -30,6 +30,9 @@ const DEFAULT_OUT = path.resolve(__dirname, '../../programs/b402-verifier-transa
 
 const inPath = process.argv[2] ?? DEFAULT_IN;
 const outPath = process.argv[3] ?? DEFAULT_OUT;
+// Name of the exported Groth16Verifyingkey const. Passed as arg[4] for
+// circuits beyond transact (e.g. `ADAPT_VK` for adapt.circom).
+const vkConstName = process.argv[4] ?? 'TRANSACT_VK';
 
 if (!fs.existsSync(inPath)) {
   console.error(`missing VK: ${inPath}`);
@@ -151,7 +154,7 @@ pub const VK_IC: [[u8; 64]; ${ic.length}] = [
 ${icBlocks}
 ];
 
-pub const TRANSACT_VK: Groth16Verifyingkey = Groth16Verifyingkey {
+pub const ${vkConstName}: Groth16Verifyingkey = Groth16Verifyingkey {
     nr_pubinputs: ${ic.length - 1},
     vk_alpha_g1: VK_ALPHA_G1,
     vk_beta_g2: VK_BETA_G2,
