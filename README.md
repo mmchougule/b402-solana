@@ -12,25 +12,42 @@ viewing-key model; ported to Solana's account-centric runtime.
 
 ## Status
 
-Phase 1 in progress. Shield and unshield are live on devnet and passing
-end-to-end with real Groth16 proofs. Composable `adapt_execute` is wired
-behind a feature gate for devnet demos.
+Phase 1 complete. Three end-to-end flows proven with real Groth16 proofs:
+
+- **Shield → unshield on live devnet** (round-tripped 100 test-mint units)
+- **Shield → private swap → unshield on localnet** via mock adapter
+  (exercises `adapt_execute_devnet` pool handler + SDK + ALT accounting)
+- **Shield → REAL Jupiter swap → unshield on mainnet-forked validator**
+  (0.1 wSOL → 8.549 USDC via SolFi V2, real Jupiter V6 bytecode CPI'd
+  from our adapter, real AMM pool state cloned from mainnet)
 
 **Devnet deployment (2026-04-23)**
 
-| Program | ID | Cost |
+| Program | ID | Feature |
 |---|---|---|
-| Pool | `42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y` | 2.99 SOL |
-| Verifier | `Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK` | 1.28 SOL |
-| Jupiter adapter | `3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7` | 1.35 SOL |
-| b402 ALT | `9FPYufa1KDkrn1VgfjkR7R667hbnTA7CNtmy38QcsuNj` | ~0.002 SOL |
+| Pool | `42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y` | adapt-devnet |
+| Verifier | `Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK` | — |
+| Jupiter adapter | `3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7` | — |
+| b402 ALT | `9FPYufa1KDkrn1VgfjkR7R667hbnTA7CNtmy38QcsuNj` | 14 entries |
 
 **Live shield/unshield on devnet:**
 
-- Shield: [`5XLaccuw6tv6AWowMDKLK24zTSxD4Ej2nuRwSnpbLWZSHU19SPb7n8mNpx8G4fHEHxBMRo5GiYPyPj6G4pmsLyZB`](https://explorer.solana.com/tx/5XLaccuw6tv6AWowMDKLK24zTSxD4Ej2nuRwSnpbLWZSHU19SPb7n8mNpx8G4fHEHxBMRo5GiYPyPj6G4pmsLyZB?cluster=devnet)
-- Unshield: [`38mKQXBPuwtYhM5JvbyJA2se9cehMvw1mUbevhERAkZdni7a6VTYdYNx66nZ5KqzbgUng1SsbCiQEJX2F3XG77PD`](https://explorer.solana.com/tx/38mKQXBPuwtYhM5JvbyJA2se9cehMvw1mUbevhERAkZdni7a6VTYdYNx66nZ5KqzbgUng1SsbCiQEJX2F3XG77PD?cluster=devnet)
+- Shield: [`5XLaccuw…pmsLyZB`](https://explorer.solana.com/tx/5XLaccuw6tv6AWowMDKLK24zTSxD4Ej2nuRwSnpbLWZSHU19SPb7n8mNpx8G4fHEHxBMRo5GiYPyPj6G4pmsLyZB?cluster=devnet)
+- Unshield: [`38mKQXBP…G77PD`](https://explorer.solana.com/tx/38mKQXBPuwtYhM5JvbyJA2se9cehMvw1mUbevhERAkZdni7a6VTYdYNx66nZ5KqzbgUng1SsbCiQEJX2F3XG77PD?cluster=devnet)
 
 See `docs/TX-WALKTHROUGH.md` for a layer-by-layer anatomy of both.
+
+**Observed on-chain costs**
+
+| Op | Tx size | Compute | Fee |
+|---|---|---|---|
+| Shield | 1,157 B | 239,224 CU | 5,000 lamports (~$0.001) |
+| Unshield | ~1,150 B | ~350k CU | 5,000 lamports |
+| Private swap (mainnet-fork, SolFi V2) | 1,231 B | ~60k + Jupiter route CU | 5,000 lamports |
+
+Proof verification fits in one instruction (under Solana's 1.4M CU budget),
+so no multi-tx split required — cheaper and simpler than the EVM
+counterpart.
 
 ## What's implemented
 
@@ -89,6 +106,22 @@ cd examples && pnpm e2e                   # terminal 2 — runs shield → unshi
 
 # 6. Same e2e against devnet (uses CLI wallet + deployed programs)
 RPC_URL=https://api.devnet.solana.com pnpm --filter=@b402ai/solana-examples e2e
+
+# 7. Private swap on localnet (shield → mock adapter → unshield)
+./ops/local-validator.sh --reset          # terminal 1
+cd examples && pnpm swap-e2e              # terminal 2
+
+# 8. Private swap on a mainnet-forked validator (shield → REAL Jupiter → unshield)
+#    Fetches a live Jupiter quote, boots validator with Jupiter + AMM state
+#    cloned from mainnet, runs the full flow. No real money, real bytecode.
+cd examples && pnpm tsx ../ops/jup-quote.ts \
+  --in So11111111111111111111111111111111111111112 \
+  --out EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v \
+  --amount 100000000 \
+  --caller $(solana address -k ~/.config/solana/id.json) \
+  --out-file /tmp/jup-route.json
+./ops/mainnet-fork-validator.sh --route /tmp/jup-route.json --reset   # terminal 1
+cd examples && pnpm swap-e2e-jupiter      # terminal 2
 ```
 
 ## Repo layout
