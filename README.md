@@ -56,7 +56,7 @@ counterpart.
 ## What's implemented
 
 ### Programs (`programs/`)
-- `b402-pool` — init/shield/unshield/transact + admin (pause, register adapter) + `adapt_execute_devnet` feature-gated handler
+- `b402-pool` — init/shield/unshield/transact + admin (pause, register adapter) + `adapt_execute_devnet` feature-gated handler. **That handler trusts the caller's output commitment and claims no security property** — devnet-only; see `docs/PHASE-2.md` for what the full `adapt_execute` circuit closes.
 - `b402-verifier-transact` — Groth16 verifier wrapping `Lightprotocol/groth16-solana`, VK baked from ceremony at build time
 - `b402-jupiter-adapter` — CPI adapter forwarding `action_payload` to Jupiter V6
 - `b402-mock-adapter` — test-only adapter for balance-delta invariant tests
@@ -197,4 +197,4 @@ See `ENGINEER-REVIEW.md` for the full "please flag in review" list. Summary:
 
 ## License
 
-TBD (will likely match `@b402ai/sdk`).
+Apache 2.0 — see `LICENSE`.
