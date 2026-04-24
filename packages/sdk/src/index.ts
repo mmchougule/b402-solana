@@ -24,4 +24,5 @@ export {
 export { fetchTreeState, decodeTreeState, type TreeStateView } from './programs/tree-state.js';
 export {
   instructionDiscriminator, eventDiscriminator,
+  concat, u16Le, u32Le, u64Le, vecU8,
 } from './programs/anchor.js';

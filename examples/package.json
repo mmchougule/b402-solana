@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "e2e": "tsx e2e.ts",
+    "swap-e2e": "tsx swap-e2e.ts",
     "alt": "tsx ../ops/alt/create-alt.ts"
   },
   "dependencies": {
