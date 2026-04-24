@@ -10,20 +10,19 @@ viewing-key model; ported to Solana's account-centric runtime.
 > ⚠️ **Alpha, devnet only. Not audited. Trusted-setup ceremony is a single-contributor
 > throwaway — do not deploy real funds.**
 
-## Status
+## What works today
 
-Phase 1 complete. Four end-to-end flows proven with real Groth16 proofs:
-
-- **Shield → unshield on live devnet** (round-tripped 100 test-mint units)
-- **Shield → private swap → unshield on localnet** via mock adapter
-  (exercises `adapt_execute_devnet` pool handler + SDK + ALT accounting)
-- **Shield → REAL Jupiter swap → unshield on mainnet-forked validator**
-  (0.1 wSOL → 8.549 USDC via SolFi V2, real Jupiter V6 bytecode CPI'd
-  from our adapter, real AMM pool state cloned from mainnet)
-- **Alice → Bob (scanner auto-discovery) → Charlie**: Bob's wallet finds
-  a privately-sent note from only his own keys + the public event stream,
-  then unshields it. Proves recipient-side privacy works without any
-  side-channel between sender and recipient.
+- Shield and unshield on Solana devnet with real Groth16 proofs.
+- `adapt_execute` composition path (feature-gated `adapt-devnet`) that
+  CPIs any registered adapter. Validated end-to-end against **real
+  Jupiter V6** on a mainnet-forked validator: 0.1 wSOL → 8.549 USDC
+  through SolFi V2, real aggregator bytecode, real pool state cloned
+  from mainnet.
+- Recipient-side privacy: a `Scanner` subscribes to pool logs, runs
+  viewing-tag pre-filter + ECDH decrypt, auto-discovers incoming notes.
+  Alice → Bob → Charlie is wired and green.
+- 71 tests across Rust crypto, verifier, Circom parity, prover, on-chain
+  (litesvm), and SDK tx-size regression. See `docs/REPRODUCE.md`.
 
 **Devnet deployment (2026-04-23)**
 
@@ -39,34 +38,8 @@ Phase 1 complete. Four end-to-end flows proven with real Groth16 proofs:
 - Shield: [`5XLaccuw…pmsLyZB`](https://explorer.solana.com/tx/5XLaccuw6tv6AWowMDKLK24zTSxD4Ej2nuRwSnpbLWZSHU19SPb7n8mNpx8G4fHEHxBMRo5GiYPyPj6G4pmsLyZB?cluster=devnet)
 - Unshield: [`38mKQXBP…G77PD`](https://explorer.solana.com/tx/38mKQXBPuwtYhM5JvbyJA2se9cehMvw1mUbevhERAkZdni7a6VTYdYNx66nZ5KqzbgUng1SsbCiQEJX2F3XG77PD?cluster=devnet)
 
-See `docs/TX-WALKTHROUGH.md` for a layer-by-layer anatomy of both.
-
-## Verify in 2 minutes
-
-Skeptical of the above? You don't need to build the repo. If you have
-the Solana CLI installed, every claim on devnet is falsifiable with two
-commands:
-
-```bash
-# shield tx — see depositor ATA → pool vault transfer + verifier CPI
-solana -u devnet confirm -v \
-  5XLaccuw6tv6AWowMDKLK24zTSxD4Ej2nuRwSnpbLWZSHU19SPb7n8mNpx8G4fHEHxBMRo5GiYPyPj6G4pmsLyZB
-
-# unshield tx — see verifier CPI + two nullifier-shard inits +
-# pool-signed vault → recipient ATA transfer
-solana -u devnet confirm -v \
-  38mKQXBPuwtYhM5JvbyJA2se9cehMvw1mUbevhERAkZdni7a6VTYdYNx66nZ5KqzbgUng1SsbCiQEJX2F3XG77PD
-```
-
-Or click either explorer link above and read the program logs directly
-in the browser. Both txs hit pool `42a3hsCX…rt2y` and verifier
-`Afjbnv2E…6ZrK` — the same program IDs listed in the table.
-
-The mainnet-fork Jupiter swap is reproducible too (no real money) —
-`ops/jup-quote.ts` fetches a live route, `ops/mainnet-fork-validator.sh`
-clones Jupiter V6 + AMM state from mainnet, `examples/swap-e2e-jupiter.ts`
-runs shield → real Jupiter swap → unshield. Full commands in the
-quickstart below.
+See `docs/TX-WALKTHROUGH.md` for a layer-by-layer anatomy of both, and
+`docs/REPRODUCE.md` for the exact commands to re-run everything locally.
 
 **Observed on-chain costs**
 
