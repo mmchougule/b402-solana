@@ -266,7 +266,111 @@ Plus live devnet shield + unshield txs as the 72nd + 73rd "tests".
   program with its own VK.
 - **Full `adapt_execute`** handler: proof verify → nullifier burn → adapter
   CPI → delta check → commitment append, replacing the devnet-gated stub.
-- Jupiter real-route devnet e2e blocked on AMM liquidity; mainnet fork or
-  mainnet with tiny amounts are the realistic validation paths.
 - Kamino / Drift / Orca adapters (one per protocol, same `execute` ABI).
 - Relayer HTTP service + Jito bundle submission.
+- Scanner auto-discovery e2e (Task D): recipient's wallet finds its own
+  output notes from the log subscription without being told the leaf index.
+
+## Gate-close round 4 (2026-04-24, Phase 1 composability end-to-end)
+
+Three end-to-end flows proven today, each building on the last:
+
+### Task A — localnet shield → private swap → unshield (mock adapter)
+
+Unified the mock-adapter ABI with the jupiter-adapter shape (3-arg
+`execute(in_amount, min_out, payload)`, canonical `[b"b402/v1", b"adapter"]`
+PDA seeds). `adapt_execute_devnet` in the pool drives either adapter
+identically. Full round-trip on `solana-test-validator`:
+
+- shield 100 in_mint → commitment at leaf 0, in_vault = 100
+- `adapt_execute_devnet` swap via mock: in_vault=50, mock CPI delivers
+  100 out_mint to out_vault, output commitment appended at leaf 1
+- unshield output note with real Groth16 proof → fresh recipient gets 100
+
+Localnet signatures logged. Timings: shield ~1100ms, swap 466ms, unshield 1072ms.
+All 15 on-chain tests + 4 SDK tx-size tests green after the ABI unification.
+
+### Task B — pool redeploy on devnet with `--features adapt-devnet`
+
+Upgraded `42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y` in place — same
+program ID, existing upgrade authority (`4ym542u1...`). Buffer rent
+~3.2 SOL was returned after the swap; net cost was fees only (~0.21 SOL).
+Pool now dispatches `adapt_execute_devnet` on devnet while mainnet
+builds (no feature flag) still reject the instruction at the runtime
+`cfg!` gate.
+
+### Option 1 — real Jupiter swap on mainnet-forked validator
+
+`ops/mainnet-fork-validator.sh` boots `solana-test-validator` with:
+
+- `--clone-upgradeable-program` for Jupiter V6 + every AMM program in
+  the route (detected via `getAccountInfo(executable)` in `ops/jup-quote.ts`)
+- `--maybe-clone` for every data account referenced by the swap ix
+- Built-in programs (System, Token, ATA, Sysvars, ComputeBudget, BPF
+  loaders) filtered so solana-test-validator's own copies are used
+- All four b402 programs `--bpf-program`'d alongside
+
+`examples/swap-e2e-jupiter.ts` then ran the full flow against real
+Jupiter bytecode + real AMM pool state:
+
+| Step | Amount | Signature |
+|---|---|---|
+| Shield | 0.1 wSOL (100,000,000 lamports) | `3GyU6qst…FCcZA` |
+| **Real Jupiter swap** | 0.1 wSOL → 8.549 USDC via SolFi V2 | `3BzF7M8W…FXEZ` (512ms) |
+| Unshield | 8.509 USDC → fresh recipient | `bccbx7RG…Hq6` |
+
+Post-swap assertions: `wsol_vault=0`, `usdc_vault=8549123` (≥ min_out
+8509157), output commitment appended at leaf 1, recipient got 8509157
+USDC. Tx size 1231 B (1 B under cap, no ALT).
+
+Two production fixes landed in the process:
+1. **jupiter-adapter signer escalation**: CPI to Jupiter needs
+   `userTransferAuthority` (= adapter PDA) marked as `is_signer=true`.
+   Adapter was copying the false flag from forwarded accounts. Fix:
+   explicitly mark the adapter PDA as signer in the CPI ix so
+   `invoke_signed`'s seeds satisfy Jupiter's requirement.
+2. **Program classification in `ops/jup-quote.ts`**: route contains
+   ~18 accounts of mixed type. AMM programs need
+   `--clone-upgradeable-program`; data accounts need `--maybe-clone`;
+   built-ins must be skipped entirely. Quote script now classifies
+   via `getAccountInfo` and filters a hardcoded built-ins set.
+
+### Observed on-chain costs (Solana)
+
+| Op | Tx size | Compute | Fee |
+|---|---|---|---|
+| Shield | 1,157 B | 239,224 CU | 5,000 lamports (~$0.001) |
+| Unshield | ~1,150 B | ~350k CU | 5,000 lamports |
+| Private swap (shield→adapt→unshield chain) | shield+swap+unshield = 3 txs | ~1M CU total | ~15,000 lamports (~$0.003) |
+
+Under a quarter of what a Railgun EVM shield costs on Base at current
+base-fee + priority; proof verification fits inside one Solana ix at
+1.4M CU budget (no multi-tx split needed).
+
+### Three new ops scripts
+
+| Path | What |
+|---|---|
+| `ops/jup-quote.ts` | Fetch Jupiter `/quote` + `/swap-instructions` from mainnet, classify accounts (programs vs data vs built-in), emit `{quote, swap, programs, data}` JSON for the fork validator. |
+| `ops/mainnet-fork-validator.sh` | Boot test-validator cloning Jupiter + all AMM programs + AMM state from mainnet, with all four b402 programs pre-deployed. |
+| `examples/swap-e2e-jupiter.ts` | End-to-end shield → real Jupiter swap → unshield against the fork. Asserts vault deltas + recipient balance. |
+
+### Test status (post round 4)
+
+| Suite | Tests | Status |
+|---|---:|---|
+| Rust `b402-crypto` unit | 17 | ✓ |
+| Rust verifier integration | 3 | ✓ |
+| TS circuits primitives + parity | 20 | ✓ |
+| TS circuits witness + prove-verify | 9 | ✓ |
+| TS prover → Rust verifier | 4 | ✓ |
+| On-chain shield (litesvm) | 8 | ✓ |
+| On-chain unshield (litesvm) | 3 | ✓ |
+| On-chain adapt-delta (litesvm) | 3 | ✓ |
+| SDK tx-size regression | 4 | ✓ |
+| **Total** | **71** | **all green** |
+
+Plus three live round-trips: devnet shield+unshield (round 3), localnet
+shield+swap+unshield via mock adapter (Task A), mainnet-fork
+shield+real-Jupiter-swap+unshield (Option 1). Six real tx signatures
+captured in the logs.

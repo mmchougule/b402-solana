@@ -71,7 +71,7 @@ Program IDs deployed:
 
 Reproduce with `RPC_URL=https://api.devnet.solana.com pnpm --filter=@b402ai/solana-examples e2e`.
 
-## Phase 1 (2026-04-24) — composable execution plumbing
+## Phase 1 (2026-04-24) — composable execution, three proven flows
 
 `adapt_execute_devnet` handler, behind `--features adapt-devnet` in the
 pool crate. Exercises full pool-side composition path (registry check →
@@ -81,15 +81,42 @@ no nullifier burn. Runtime `cfg!` gate ensures default / mainnet builds
 cannot dispatch the instruction. Scheduled for deletion when the adapt
 circuit + `b402_verifier_adapt` land.
 
-SDK `privateSwap` composes a Jupiter-shaped adapt tx:
-- Takes a pre-fetched Jupiter `/swap-instructions` response
-- Builds v0 tx with `[B402_ALT, ...jupiterAlts]`
-- Enforces MAX_ACTION_PAYLOAD = 350 B pre-build
-- Asserts serialized size ≤ 1232 B before submit
+SDK `privateSwap` composes a Jupiter-shaped adapt tx: takes a pre-fetched
+Jupiter `/swap-instructions` response, builds v0 tx with
+`[B402_ALT, ...jupiterAlts]`, enforces `MAX_ACTION_PAYLOAD = 350 B`
+pre-build, asserts serialized size ≤ 1232 B.
+
+Three flows proven end-to-end:
+
+| Where | What | Key signatures |
+|---|---|---|
+| **live devnet** | shield → unshield, 100 test-mint units | `5XLaccuw…` / `38mKQXBP…` |
+| **localnet + mock adapter** | shield → `adapt_execute_devnet` swap → unshield | Task A log in commit `a23bf3e` |
+| **mainnet-forked validator** | shield → **real Jupiter V6 swap** via SolFi V2 → unshield | 0.1 wSOL → 8.549 USDC, commit `da0a179` |
+
+Mainnet-fork flow uses `ops/jup-quote.ts` to fetch a real mainnet route
+and classify every referenced account (programs via `executable=true`
+go to `--clone-upgradeable-program`, data accounts to `--maybe-clone`,
+built-ins skipped), then `ops/mainnet-fork-validator.sh` boots
+`solana-test-validator` with production Jupiter bytecode + real AMM pool
+state. Our jupiter-adapter CPIs Jupiter's actual `route` instruction;
+post-CPI balance-delta invariant enforces `out_vault` delta ≥ min_out.
 
 Tx-size regression tests lock the budget: 2-hop and 3-hop Jupiter routes
 both fit with the 14-entry b402 ALT; without ALT the 3-hop overflows
-(guard against accidentally dropping ALT attachment).
+(guard against accidentally dropping ALT attachment). Observed
+mainnet-fork swap tx came in at 1,231 B inline (no ALT) — 1 B under cap.
+
+**Observed on-chain costs:**
+
+| Op | Tx size | Compute | Fee |
+|---|---|---|---|
+| Shield | 1,157 B | 239,224 CU | 5,000 lamports |
+| Unshield | ~1,150 B | ~350k CU | 5,000 lamports |
+| Real Jupiter swap (via pool) | 1,231 B | ~60k + route CU | 5,000 lamports |
+
+Everything fits inside Solana's 1.4M CU budget in a single instruction —
+no multi-tx split needed for proof verification.
 
 ## Pre-Phase-0 hardening (2026-04-23)
 
