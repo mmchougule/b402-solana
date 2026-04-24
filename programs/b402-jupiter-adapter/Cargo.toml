@@ -1,0 +1,21 @@
+[package]
+name = "b402-jupiter-adapter"
+version.workspace = true
+edition.workspace = true
+description = "b402 Jupiter swap adapter"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "b402_jupiter_adapter"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+
+[dependencies]
+anchor-lang.workspace = true
+anchor-spl.workspace = true
+indexmap = { version = "=2.9.0" }

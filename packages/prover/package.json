@@ -1,0 +1,30 @@
+{
+  "name": "@b402ai/solana-prover",
+  "version": "0.0.1",
+  "description": "Groth16 proof generation for the b402 transact circuit",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@b402ai/solana-shared": "workspace:*",
+    "ffjavascript": "^0.3.1",
+    "snarkjs": "^0.7.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "circomlibjs": "^0.1.7",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4"
+  }
+}

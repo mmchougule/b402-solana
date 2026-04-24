@@ -1,0 +1,26 @@
+[toolchain]
+anchor_version = "0.30.1"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+b402_pool = "2vMTGvSCobE7HfVvdSHsmVNzCFmbYdc3TsQwekUwcusy"
+b402_verifier_transact = "G6AycE529UPg1hib72A5A7Yf8eZRx9uFmDZQYMSYhEC7"
+b402_jupiter_adapter = "2FLQngd2Z1cqN7q4BU8vxDm2WNxXLwGDT3FYubQrFncg"
+
+[programs.devnet]
+b402_pool = "2vMTGvSCobE7HfVvdSHsmVNzCFmbYdc3TsQwekUwcusy"
+b402_verifier_transact = "G6AycE529UPg1hib72A5A7Yf8eZRx9uFmDZQYMSYhEC7"
+b402_jupiter_adapter = "2FLQngd2Z1cqN7q4BU8vxDm2WNxXLwGDT3FYubQrFncg"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "Localnet"
+wallet = "~/.config/solana/id.json"
+
+[scripts]
+test = "pnpm --filter=@b402ai/solana-tests test"

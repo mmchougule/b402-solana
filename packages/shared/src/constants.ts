@@ -1,0 +1,103 @@
+/**
+ * Canonical protocol constants. MUST match `packages/crypto` (Rust) and
+ * `programs/b402-pool/src/constants.rs` bit-for-bit.
+ */
+
+/** BN254 scalar field modulus. */
+export const FR_MODULUS: bigint =
+  21888242871839275222246405745257275088548364400416034343698204186575808495617n;
+
+export const TREE_DEPTH = 26 as const;
+export const ROOT_HISTORY_SIZE = 64 as const;
+
+export const DomainTags = {
+  commit:         'b402/v1/commit',
+  nullifier:      'b402/v1/null',
+  mkNode:         'b402/v1/mk-node',
+  mkZero:         'b402/v1/mk-zero',
+  noteEncKey:     'b402/v1/note-enc-key',
+  spendKey:       'b402/v1/spend-key',
+  spendKeyPub:    'b402/v1/spend-key-pub',
+  viewKey:        'b402/v1/view-key',
+  viewTag:        'b402/v1/viewtag',
+  feeBind:        'b402/v1/fee-bind',
+  rootBind:       'b402/v1/root-bind',
+  adaptBind:      'b402/v1/adapt-bind',
+  disclose:       'b402/v1/disclose',
+  recipientBind:  'b402/v1/recipient-bind',
+} as const;
+
+export type DomainTagName = keyof typeof DomainTags;
+
+export const PROGRAM_IDS = {
+  b402Pool:               'B402PooLFh4qZwRh3gkT1MkWN5z1jBTpLvZz5vE1Pool',
+  b402VerifierTransact:   'B402VrfYTrAnsCt1wBLxSxw9ZhQvA8LtQmP1VrfyTrx',
+  b402JupiterAdapter:     'B402JupTRSzWQZxNzEkR1pFsXJnKbQTp5eV1JuPAdpt',
+} as const;
+
+export const JUPITER_V6_PROGRAM_ID = 'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4';
+
+/** Known mainnet mints we ship support for in v1. */
+export const MAINNET_MINTS = {
+  USDC: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+  WSOL: 'So11111111111111111111111111111111111111112',
+} as const;
+
+/** PDA seed prefixes matching `programs/b402-pool/src/constants.rs`. */
+export const PDA_SEEDS = {
+  version:    new Uint8Array([0x62, 0x34, 0x30, 0x32, 0x2f, 0x76, 0x31]), // "b402/v1"
+  config:     new TextEncoder().encode('config'),
+  token:      new TextEncoder().encode('token'),
+  vault:      new TextEncoder().encode('vault'),
+  tree:       new TextEncoder().encode('tree'),
+  nullifier:  new TextEncoder().encode('null'),
+  adapters:   new TextEncoder().encode('adapters'),
+  treasury:   new TextEncoder().encode('treasury'),
+} as const;
+
+/** Public-input count for the transact circuit verifier (includes domain tags + recipient bind). */
+export const TRANSACT_PUBLIC_INPUT_COUNT = 18 as const;
+
+/**
+ * Canonical order of public inputs for the transact circuit verifier.
+ *
+ * SOURCE OF TRUTH for SDK + tests + indexers. The on-chain pool program
+ * (`programs/b402-pool/src/instructions/{shield,transact,unshield}.rs`)
+ * pushes inputs in this exact order, and the circuit's `component main {
+ * public [...] }` enumerates them in this exact order (see
+ * `circuits/transact.circom`).
+ *
+ * Drift between this constant and any of those three sources will silently
+ * fail every proof — the verifier rejects a permutation as a tampered proof.
+ *
+ * Indexes are 0-based.
+ */
+export const TRANSACT_PUBLIC_INPUT_ORDER = [
+  'merkleRoot',           // 0
+  'nullifier0',           // 1
+  'nullifier1',           // 2
+  'commitmentOut0',       // 3
+  'commitmentOut1',       // 4
+  'publicAmountIn',       // 5  (u64 LE in low 8 bytes of 32B)
+  'publicAmountOut',      // 6  (u64 LE in low 8 bytes of 32B)
+  'publicTokenMint',      // 7  (32B raw Pubkey)
+  'relayerFee',           // 8  (u64 LE in low 8 bytes of 32B)
+  'relayerFeeBind',       // 9
+  'rootBind',             // 10
+  'recipientBind',        // 11
+  'commitTag',            // 12
+  'nullTag',              // 13
+  'mkNodeTag',            // 14
+  'spendKeyPubTag',       // 15
+  'feeBindTag',           // 16
+  'recipientBindTag',     // 17
+] as const;
+
+export type TransactPublicInputName = typeof TRANSACT_PUBLIC_INPUT_ORDER[number];
+
+/** Lookup the index of a public input by name. Throws on unknown name. */
+export function publicInputIndex(name: TransactPublicInputName): number {
+  const idx = TRANSACT_PUBLIC_INPUT_ORDER.indexOf(name);
+  if (idx < 0) throw new Error(`unknown public input ${name}`);
+  return idx;
+}

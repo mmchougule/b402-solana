@@ -1,0 +1,37 @@
+[package]
+name = "b402-verifier-transact"
+version.workspace = true
+edition.workspace = true
+description = "b402 Groth16 verifier for the transact circuit"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "b402_verifier_transact"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+# Host-only dev binaries (not valid for SBF target).
+host-bins = []
+
+[dependencies]
+anchor-lang.workspace = true
+groth16-solana.workspace = true
+solana-program.workspace = true
+thiserror.workspace = true
+# Force a pre-edition2024 indexmap so Solana's bundled rustc 1.84.1 can build.
+# Unpinning requires rustc ≥1.85 in the solana toolchain.
+indexmap = { version = "=2.9.0" }
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+
+[[bin]]
+name = "b402-verify-cli"
+path = "src/bin/b402-verify-cli.rs"
+required-features = ["host-bins"]
