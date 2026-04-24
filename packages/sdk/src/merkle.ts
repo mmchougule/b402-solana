@@ -6,6 +6,63 @@
 import { TREE_DEPTH } from '@b402ai/solana-shared';
 import { merkleNodeHash, merkleZeroSeed } from './poseidon.js';
 
+/**
+ * Compute the depth-26 zero subtree cache. Index `i` is the hash of the
+ * empty subtree of height `i`. `zeroCache[0]` = leaf-level zero;
+ * `zeroCache[TREE_DEPTH]` = empty-tree root.
+ */
+export async function buildZeroCache(depth = TREE_DEPTH): Promise<bigint[]> {
+  const cache: bigint[] = [await merkleZeroSeed()];
+  for (let i = 0; i < depth; i++) {
+    cache.push(await merkleNodeHash(cache[i], cache[i]));
+  }
+  return cache;
+}
+
+/** Convert a 32-byte LE buffer to bigint. */
+function leToBig(b: Uint8Array): bigint {
+  let v = 0n;
+  for (let i = b.length - 1; i >= 0; i--) v = (v << 8n) | BigInt(b[i]);
+  return v;
+}
+
+/**
+ * Derive the merkle proof for the **most recently appended** leaf using the
+ * on-chain frontier + zero cache — no scan needed.
+ *
+ * Valid only if the proof is for leaf_index = leafCount - 1. For older leaves
+ * we need full history (use Scanner).
+ *
+ * Path rule for the most-recent leaf at idx = N:
+ *   At level L, bit L of N:
+ *     = 0 → our subtree is a left child; right sibling = zero_cache[L]
+ *     = 1 → our subtree is a right child; left sibling = frontier[L]
+ *           (frontier[L] was set by some earlier append; our append didn't
+ *            touch levels below `lowest_zero_bit(N)` so frontier[L] is still
+ *            the "left sibling" along our path)
+ */
+export function proveMostRecentLeaf(
+  leaf: bigint,
+  leafIndex: bigint,
+  root: bigint,
+  frontierLe: Uint8Array[],
+  zeroCacheLe: Uint8Array[],
+  depth = TREE_DEPTH,
+): MerkleProof {
+  if (leafIndex < 0n) throw new Error('leafIndex must be ≥ 0');
+  if (frontierLe.length !== depth) throw new Error(`frontier length ${frontierLe.length} != ${depth}`);
+  if (zeroCacheLe.length < depth) throw new Error('zero cache too short');
+
+  const siblings: bigint[] = [];
+  const pathBits: number[] = [];
+  for (let lvl = 0; lvl < depth; lvl++) {
+    const bit = Number((leafIndex >> BigInt(lvl)) & 1n);
+    pathBits.push(bit);
+    siblings.push(bit === 1 ? leToBig(frontierLe[lvl]) : leToBig(zeroCacheLe[lvl]));
+  }
+  return { leaf, leafIndex, siblings, pathBits, root };
+}
+
 export interface MerkleProof {
   leaf: bigint;
   leafIndex: bigint;

@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@b402ai/solana-shared": "workspace:*",
+    "@b402ai/solana-prover": "workspace:*",
     "@solana/web3.js": "^1.95.8",
     "@solana/spl-token": "^0.4.9",
     "@noble/hashes": "^1.5.0",

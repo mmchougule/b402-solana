@@ -4,3 +4,4 @@ packages:
   - 'packages/prover'
   - 'packages/relayer'
   - 'circuits'
+  - 'examples'

@@ -1,0 +1,21 @@
+{
+  "name": "@b402ai/solana-examples",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "e2e": "tsx e2e.ts"
+  },
+  "dependencies": {
+    "@b402ai/solana": "workspace:*",
+    "@b402ai/solana-shared": "workspace:*",
+    "@b402ai/solana-prover": "workspace:*",
+    "@solana/web3.js": "^1.95.8",
+    "@solana/spl-token": "^0.4.9"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "@types/node": "^22.9.0"
+  }
+}
