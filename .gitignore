@@ -36,6 +36,7 @@ DEMO.md
 OPS.md
 NOTES.md
 SCRATCH.md
+docs/SUBMISSION.md
 
 # Deploy authority keypairs — never commit, back up locally.
 ops/keypairs/

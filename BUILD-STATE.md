@@ -188,3 +188,85 @@ The mock validates the **balance-delta invariant** (the security-critical post-C
 - Note store's `handleLogs` is a stub-acknowledgment until the Anchor IDL ships with a generated decoder — `ingestCommitment` direct-claim path exercises the real decrypt flow.
 - Circuit nullifier-ordering constraint is enforced in the program (PRD-03 §4.4 step 6), not in-circuit. Revisit per PRD-02 §12 Q2.
 - Verifier VK is placeholder-gated with explicit runtime panic (`UninitializedVk`) until ceremony runs — no chance of an unverified deploy.
+
+## Gate-close round 3 (2026-04-23 → 2026-04-24, devnet deploy + Phase 1)
+
+**Devnet deployment** (from program keypairs in `ops/keypairs/`, gitignored):
+
+| Program | Program ID | Rent |
+|---|---|---|
+| Pool | `42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y` | 2.99 SOL |
+| Verifier | `Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK` | 1.28 SOL |
+| Jupiter adapter | `3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7` | 1.35 SOL |
+
+**Live shield/unshield on devnet, round-tripped:**
+- shield sig `5XLaccuw6tv6AWowMDKLK24zTSxD4Ej2nuRwSnpbLWZSHU19SPb7n8mNpx8G4fHEHxBMRo5GiYPyPj6G4pmsLyZB`
+- unshield sig `38mKQXBPuwtYhM5JvbyJA2se9cehMvw1mUbevhERAkZdni7a6VTYdYNx66nZ5KqzbgUng1SsbCiQEJX2F3XG77PD`
+- shield 1299ms, unshield 1387ms, 100 synthetic-mint units through the full circuit on real Solana devnet
+
+See `docs/TX-WALKTHROUGH.md` for account-by-account breakdown.
+
+### Phase 1 — adapter composability plumbing (2026-04-24)
+
+Goal: wire `adapt_execute` end-to-end **without** the adapt circuit so we
+can validate pool + SDK + ALT budgeting on devnet before ceremony work.
+
+1. **b402 ALT on devnet**: `9FPYufa1KDkrn1VgfjkR7R667hbnTA7CNtmy38QcsuNj`, 14 stable
+   accounts (programs, PDAs, common mints, Jupiter-adapter scratch ATAs).
+   Extensible per-adapter via `ops/alt/create-alt.ts add-adapter`.
+   Without it, 2-hop Jupiter routes overflow Solana's 1,232 B tx cap.
+
+2. **`adapt_execute_devnet` handler** behind `--features adapt-devnet`:
+   - Registry lookup (adapter program + ix discriminator allowlisted)
+   - Pool signs `in_vault → adapter_in_ta` transfer
+   - CPI adapter.execute with caller-supplied raw ix data + accounts
+   - Post-CPI balance-delta invariant on `out_vault`
+   - Append caller-supplied output commitment to tree
+   - Emit `AdaptExecutedDevnet` + `CommitmentAppended`
+
+   Security property: **none** (no proof verification, no nullifier
+   burn, output commitment trusted from caller). Devnet-only. Gated via
+   runtime `cfg!` check so default builds and any mainnet build that
+   forgets `--features` cannot dispatch the instruction.
+
+3. **SDK `privateSwap` builder**:
+   - Takes a pre-fetched Jupiter swap instruction from `/swap-instructions`
+   - Composes adapter's Anchor ix data `disc || in_amount || min_out || vec(payload)`
+   - Builds v0 tx with `[B402 ALT, ...jupiterAlts]`, asserts ≤ 1232 B
+   - Enforces `MAX_ACTION_PAYLOAD = 350 B` pre-build (PRD-04 §5.3 allows 400)
+   - Splits into pure `buildPrivateSwapTx` (no I/O) for size-regression testing
+
+4. **Tx-size regression** (`packages/sdk/src/__tests__/tx-size.test.ts`):
+   - 2-hop Jupiter (14 accounts, 180 B payload) with b402 ALT → ≤ 1232 B ✓
+   - 3-hop Jupiter (20 accounts, 280 B payload) with b402 ALT → ≤ 1232 B ✓
+   - action_payload > ceiling throws pre-build ✓
+   - Same 3-hop WITHOUT any ALT overflows (documents the dependency) ✓
+
+### Test status (post Phase 1)
+
+| Suite | Tests | Status |
+|---|---:|---|
+| Rust `b402-crypto` unit | 17 | ✓ |
+| Rust verifier integration | 3 | ✓ |
+| TS circuits primitives + parity | 20 | ✓ |
+| TS circuits witness + prove-verify | 9 | ✓ |
+| TS prover → Rust verifier | 4 | ✓ |
+| On-chain shield (litesvm) | 8 | ✓ |
+| On-chain unshield (litesvm) | 3 | ✓ |
+| On-chain adapt-delta (litesvm) | 3 | ✓ |
+| SDK tx-size regression | 4 | ✓ |
+| **Total** | **71** | **all green** |
+
+Plus live devnet shield + unshield txs as the 72nd + 73rd "tests".
+
+### Deferred to Phase 2
+
+- **Adapt circuit** (`adapt.circom`): transact + `adapter_id`, `action_hash`,
+  `expected_out_value` public inputs. New ceremony. New `b402_verifier_adapt`
+  program with its own VK.
+- **Full `adapt_execute`** handler: proof verify → nullifier burn → adapter
+  CPI → delta check → commitment append, replacing the devnet-gated stub.
+- Jupiter real-route devnet e2e blocked on AMM liquidity; mainnet fork or
+  mainnet with tiny amounts are the realistic validation paths.
+- Kamino / Drift / Orca adapters (one per protocol, same `execute` ABI).
+- Relayer HTTP service + Jito bundle submission.
