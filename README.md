@@ -12,7 +12,7 @@ viewing-key model; ported to Solana's account-centric runtime.
 
 ## Status
 
-Phase 1 complete. Three end-to-end flows proven with real Groth16 proofs:
+Phase 1 complete. Four end-to-end flows proven with real Groth16 proofs:
 
 - **Shield → unshield on live devnet** (round-tripped 100 test-mint units)
 - **Shield → private swap → unshield on localnet** via mock adapter
@@ -20,6 +20,10 @@ Phase 1 complete. Three end-to-end flows proven with real Groth16 proofs:
 - **Shield → REAL Jupiter swap → unshield on mainnet-forked validator**
   (0.1 wSOL → 8.549 USDC via SolFi V2, real Jupiter V6 bytecode CPI'd
   from our adapter, real AMM pool state cloned from mainnet)
+- **Alice → Bob (scanner auto-discovery) → Charlie**: Bob's wallet finds
+  a privately-sent note from only his own keys + the public event stream,
+  then unshields it. Proves recipient-side privacy works without any
+  side-channel between sender and recipient.
 
 **Devnet deployment (2026-04-23)**
 
@@ -110,6 +114,11 @@ RPC_URL=https://api.devnet.solana.com pnpm --filter=@b402ai/solana-examples e2e
 # 7. Private swap on localnet (shield → mock adapter → unshield)
 ./ops/local-validator.sh --reset          # terminal 1
 cd examples && pnpm swap-e2e              # terminal 2
+
+# 7a. Scanner auto-discovery: Alice privately sends to Bob, Bob's scanner
+#     discovers the note from public logs, Bob unshields to Charlie.
+./ops/local-validator.sh --reset          # terminal 1
+cd examples && pnpm scanner-e2e           # terminal 2
 
 # 8. Private swap on a mainnet-forked validator (shield → REAL Jupiter → unshield)
 #    Fetches a live Jupiter quote, boots validator with Jupiter + AMM state

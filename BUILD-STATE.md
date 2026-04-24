@@ -268,8 +268,6 @@ Plus live devnet shield + unshield txs as the 72nd + 73rd "tests".
   CPI → delta check → commitment append, replacing the devnet-gated stub.
 - Kamino / Drift / Orca adapters (one per protocol, same `execute` ABI).
 - Relayer HTTP service + Jito bundle submission.
-- Scanner auto-discovery e2e (Task D): recipient's wallet finds its own
-  output notes from the log subscription without being told the leaf index.
 
 ## Gate-close round 4 (2026-04-24, Phase 1 composability end-to-end)
 
@@ -370,7 +368,43 @@ base-fee + priority; proof verification fits inside one Solana ix at
 | SDK tx-size regression | 4 | ✓ |
 | **Total** | **71** | **all green** |
 
-Plus three live round-trips: devnet shield+unshield (round 3), localnet
+Plus four live round-trips: devnet shield+unshield (round 3), localnet
 shield+swap+unshield via mock adapter (Task A), mainnet-fork
-shield+real-Jupiter-swap+unshield (Option 1). Six real tx signatures
+shield+real-Jupiter-swap+unshield (Option 1), and Alice→Bob
+scanner-auto-discovery→Charlie (Task D). Nine real tx signatures
 captured in the logs.
+
+### Task D — scanner auto-discovery e2e (2026-04-24)
+
+`examples/scanner-e2e.ts` proves the recipient-side privacy loop.
+Alice, Bob, Charlie are three independent keypairs:
+
+1. Bob's `Scanner` subscribes to pool program logs using only his own
+   viewing + spending keys. He's told nothing about Alice's txs.
+2. Alice shields 100 in_mint (her own note).
+3. Alice does `adapt_execute_devnet` swap. The output commitment's
+   encrypted ciphertext is built using ONLY Bob's public keys
+   (`spendingPub`, `viewingPub`) — Alice never touches `bobWallet.spendingPriv`.
+4. Bob's scanner catches the `CommitmentAppended` event, runs the 2-byte
+   viewtag Poseidon pre-filter, ECDH-decrypts the 89B ciphertext with
+   his `viewingPriv`, verifies the recovered note's commitment hashes
+   match the on-chain value, pushes a `SpendableNote` to his NoteStore.
+5. Bob reads `noteStore.getSpendable(outMintFr)`, gets the note, unshields
+   it to Charlie (fresh recipient) with a real Groth16 proof.
+
+Two library fixes landed from the test:
+
+1. **`tryDecryptNote` defensive**: X25519 `getSharedSecret` throws on
+   all-zero pubkey, which shield emits when `omitEncryptedNotes=true`
+   (saves tx size for self-shields). Scanner was crashing on every
+   such event. Now treats invalid pubkey as "not for me" and returns null.
+
+2. **leafIndex-as-nonce discipline**: ChaCha20-Poly1305 nonce derives
+   from `leafIndex`. Sender must predict the landing index
+   (= `tree.leafCount` pre-tx). Placeholder `0n` produced notes Bob's
+   scanner could viewtag-match but not decrypt. `shield.ts` already did
+   this correctly; swap-side builders were fixed in scanner-e2e.ts.
+
+This closes the loop for agent-to-agent payments, DAO payouts, and any
+flow where the recipient is a third party who must discover their note
+from chain state.
