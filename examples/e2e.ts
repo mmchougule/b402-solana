@@ -43,6 +43,7 @@ import {
   getAccount,
 } from '@solana/spl-token';
 import path from 'node:path';
+import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -63,11 +64,12 @@ import {
 import { TransactProver } from '@b402ai/solana-prover';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const RPC_URL = 'http://127.0.0.1:8899';
+// Override: RPC_URL=https://api.devnet.solana.com pnpm e2e
+const RPC_URL = process.env.RPC_URL ?? 'http://127.0.0.1:8899';
 
 // Program IDs — must match `declare_id!` in each program source.
-const POOL_ID = new PublicKey('2vMTGvSCobE7HfVvdSHsmVNzCFmbYdc3TsQwekUwcusy');
-const VERIFIER_ID = new PublicKey('G6AycE529UPg1hib72A5A7Yf8eZRx9uFmDZQYMSYhEC7');
+const POOL_ID = new PublicKey('42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y');
+const VERIFIER_ID = new PublicKey('Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK');
 
 const CIRCUITS_BUILD = path.resolve(__dirname, '../circuits/build');
 
@@ -78,18 +80,31 @@ async function main() {
   console.log(`  current slot = ${slot}`);
 
   // ---- Keypairs ----
-  // Admin is deterministic so re-runs against the same validator can skip
-  // init_pool while still being able to sign admin operations.
-  // Depositor + relayer are fresh each run.
-  const admin = Keypair.fromSeed(new Uint8Array(32).fill(7));
-  const relayer = Keypair.generate();
-  const depositor = Keypair.generate();
+  // On localnet we airdrop to fresh keypairs. On devnet airdrop is rate-
+  // limited, so we reuse the locally-funded CLI wallet as admin+relayer+
+  // depositor. Override via ADMIN_KEYPAIR env var.
+  const isLocal = RPC_URL.includes('127.0.0.1');
+  let admin: Keypair, relayer: Keypair, depositor: Keypair;
 
-  for (const kp of [admin, relayer, depositor]) {
-    const sig = await connection.requestAirdrop(kp.publicKey, 5 * LAMPORTS_PER_SOL);
-    await connection.confirmTransaction(sig, 'confirmed');
+  if (isLocal) {
+    admin = Keypair.fromSeed(new Uint8Array(32).fill(7));
+    relayer = Keypair.generate();
+    depositor = Keypair.generate();
+    for (const kp of [admin, relayer, depositor]) {
+      const sig = await connection.requestAirdrop(kp.publicKey, 5 * LAMPORTS_PER_SOL);
+      await connection.confirmTransaction(sig, 'confirmed');
+    }
+    console.log('▶ funded admin / relayer / depositor via local airdrop');
+  } else {
+    const walletPath = process.env.ADMIN_KEYPAIR
+      ?? path.join(process.env.HOME ?? '', '.config/solana/id.json');
+    const secret = new Uint8Array(JSON.parse(fs.readFileSync(walletPath, 'utf8')));
+    admin = Keypair.fromSecretKey(secret);
+    relayer = admin;
+    depositor = admin;
+    const bal = await connection.getBalance(admin.publicKey);
+    console.log(`▶ using CLI wallet ${admin.publicKey.toBase58()} (${(bal / LAMPORTS_PER_SOL).toFixed(3)} SOL)`);
   }
-  console.log('▶ funded admin / relayer / depositor');
 
   // ---- init_pool (skip if already initialized) ----
   const cfgAcct = await connection.getAccountInfo(poolConfigPda(POOL_ID));

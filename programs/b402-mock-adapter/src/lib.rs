@@ -13,7 +13,7 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
-declare_id!("9RsayAuGPpxBrbuDdT5tnxKMKnsL8CSpGKwcrGjKvfHx");
+declare_id!("89kw33YDcbXfiayVNauz599LaDm51EuU8amWydpjYKgp");
 
 #[program]
 pub mod b402_mock_adapter {

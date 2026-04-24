@@ -20,7 +20,7 @@ use solana_signer::Signer;
 use solana_transaction::Transaction;
 use std::str::FromStr;
 
-const MOCK_ADAPTER_ID_STR: &str = "9RsayAuGPpxBrbuDdT5tnxKMKnsL8CSpGKwcrGjKvfHx";
+const MOCK_ADAPTER_ID_STR: &str = "89kw33YDcbXfiayVNauz599LaDm51EuU8amWydpjYKgp";
 const TOKEN_PROGRAM_ID_STR: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 
 fn mock_adapter_id() -> Pubkey { Pubkey::from_str(MOCK_ADAPTER_ID_STR).unwrap() }

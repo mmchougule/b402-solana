@@ -10,7 +10,7 @@ use groth16_solana::groth16::Groth16Verifier;
 mod vk;
 use vk::TRANSACT_VK;
 
-declare_id!("G6AycE529UPg1hib72A5A7Yf8eZRx9uFmDZQYMSYhEC7");
+declare_id!("Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK");
 
 pub const PUBLIC_INPUT_COUNT: usize = 18;
 

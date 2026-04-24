@@ -6,14 +6,14 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-b402_pool = "2vMTGvSCobE7HfVvdSHsmVNzCFmbYdc3TsQwekUwcusy"
-b402_verifier_transact = "G6AycE529UPg1hib72A5A7Yf8eZRx9uFmDZQYMSYhEC7"
-b402_jupiter_adapter = "2FLQngd2Z1cqN7q4BU8vxDm2WNxXLwGDT3FYubQrFncg"
+b402_pool = "42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y"
+b402_verifier_transact = "Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK"
+b402_jupiter_adapter = "3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7"
 
 [programs.devnet]
-b402_pool = "2vMTGvSCobE7HfVvdSHsmVNzCFmbYdc3TsQwekUwcusy"
-b402_verifier_transact = "G6AycE529UPg1hib72A5A7Yf8eZRx9uFmDZQYMSYhEC7"
-b402_jupiter_adapter = "2FLQngd2Z1cqN7q4BU8vxDm2WNxXLwGDT3FYubQrFncg"
+b402_pool = "42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y"
+b402_verifier_transact = "Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK"
+b402_jupiter_adapter = "3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7"
 
 [registry]
 url = "https://api.apr.dev"
