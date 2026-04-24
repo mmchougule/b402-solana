@@ -82,6 +82,23 @@ pub mod b402_pool {
         );
         instructions::adapt_mock::handler(ctx, args)
     }
+
+    /// DEVNET-ONLY: Phase 1 adapter composition minus the ZK layer. See
+    /// `instructions/adapt_execute.rs`. Same feature-gate pattern as
+    /// `check_adapter_delta_mock` — dispatchable only when compiled with
+    /// `--features adapt-devnet`. Security property: none (no proof, no
+    /// nullifier burn, output commitment trusted from caller). Do not
+    /// enable this feature for mainnet builds.
+    pub fn adapt_execute_devnet<'info>(
+        ctx: Context<'_, '_, '_, 'info, AdaptExecuteDevnet<'info>>,
+        args: AdaptExecuteDevnetArgs,
+    ) -> Result<()> {
+        require!(
+            cfg!(feature = "adapt-devnet"),
+            error::PoolError::InvalidInstructionData
+        );
+        instructions::adapt_execute::handler(ctx, args)
+    }
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]

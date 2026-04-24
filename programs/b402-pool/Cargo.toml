@@ -18,6 +18,11 @@ default = []
 # MUST NOT be enabled in devnet or mainnet builds. CI turns it on only for
 # running the adapt-delta invariant tests against litesvm.
 test-mock = []
+# DEVNET-ONLY: gates the `adapt_execute_devnet` instruction. Enables real
+# adapter composition on devnet WITHOUT ZK — caller supplies the output
+# commitment, no nullifier burn. MUST NOT ship to mainnet. Deleted once
+# the real adapt circuit + b402_verifier_adapt land.
+adapt-devnet = []
 
 [dependencies]
 anchor-lang = { workspace = true, features = ["init-if-needed"] }
