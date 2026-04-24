@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "e2e": "tsx e2e.ts"
+    "e2e": "tsx e2e.ts",
+    "alt": "tsx ../ops/alt/create-alt.ts"
   },
   "dependencies": {
     "@b402ai/solana": "workspace:*",

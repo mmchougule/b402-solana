@@ -37,6 +37,17 @@ export const PROGRAM_IDS = {
 
 export const JUPITER_V6_PROGRAM_ID = 'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4';
 
+/**
+ * b402 Address Lookup Table — compresses stable high-frequency accounts
+ * (programs, protocol PDAs, common mints, adapter scratch ATAs) from 32 B to
+ * 1 B in every `adapt_execute` tx. Required to fit Jupiter routes under
+ * Solana's 1,232 B tx-size cap. See PRD-04 §5.2 and ops/alt/README.md.
+ *
+ * Regenerate with `pnpm --filter=@b402ai/solana-examples alt create`.
+ */
+export const B402_ALT_DEVNET = '9FPYufa1KDkrn1VgfjkR7R667hbnTA7CNtmy38QcsuNj';
+export const B402_ALT_MAINNET = '' as const; // populated at mainnet launch
+
 /** Known mainnet mints we ship support for in v1. */
 export const MAINNET_MINTS = {
   USDC: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
