@@ -41,6 +41,33 @@ Phase 1 complete. Four end-to-end flows proven with real Groth16 proofs:
 
 See `docs/TX-WALKTHROUGH.md` for a layer-by-layer anatomy of both.
 
+## Verify in 2 minutes
+
+Skeptical of the above? You don't need to build the repo. If you have
+the Solana CLI installed, every claim on devnet is falsifiable with two
+commands:
+
+```bash
+# shield tx — see depositor ATA → pool vault transfer + verifier CPI
+solana -u devnet confirm -v \
+  5XLaccuw6tv6AWowMDKLK24zTSxD4Ej2nuRwSnpbLWZSHU19SPb7n8mNpx8G4fHEHxBMRo5GiYPyPj6G4pmsLyZB
+
+# unshield tx — see verifier CPI + two nullifier-shard inits +
+# pool-signed vault → recipient ATA transfer
+solana -u devnet confirm -v \
+  38mKQXBPuwtYhM5JvbyJA2se9cehMvw1mUbevhERAkZdni7a6VTYdYNx66nZ5KqzbgUng1SsbCiQEJX2F3XG77PD
+```
+
+Or click either explorer link above and read the program logs directly
+in the browser. Both txs hit pool `42a3hsCX…rt2y` and verifier
+`Afjbnv2E…6ZrK` — the same program IDs listed in the table.
+
+The mainnet-fork Jupiter swap is reproducible too (no real money) —
+`ops/jup-quote.ts` fetches a live route, `ops/mainnet-fork-validator.sh`
+clones Jupiter V6 + AMM state from mainnet, `examples/swap-e2e-jupiter.ts`
+runs shield → real Jupiter swap → unshield. Full commands in the
+quickstart below.
+
 **Observed on-chain costs**
 
 | Op | Tx size | Compute | Fee |
