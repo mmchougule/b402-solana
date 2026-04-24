@@ -7,6 +7,7 @@
     "e2e": "tsx e2e.ts",
     "swap-e2e": "tsx swap-e2e.ts",
     "swap-e2e-jupiter": "tsx swap-e2e-jupiter.ts",
+    "scanner-e2e": "tsx scanner-e2e.ts",
     "alt": "tsx ../ops/alt/create-alt.ts"
   },
   "dependencies": {
