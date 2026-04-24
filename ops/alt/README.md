@@ -32,9 +32,21 @@ Run from `examples/` so workspace deps resolve:
 
 ```
 pnpm --filter=@b402ai/solana-examples alt create --cluster devnet
-pnpm --filter=@b402ai/solana-examples alt add-mint --alt <ALT> --mint <MINT> --cluster devnet
-pnpm --filter=@b402ai/solana-examples alt show --alt <ALT> --cluster devnet
+pnpm --filter=@b402ai/solana-examples alt add-mint    --alt <ALT> --mint <MINT> [--adapter <ADAPTER>] --cluster devnet
+pnpm --filter=@b402ai/solana-examples alt add-adapter --alt <ALT> --adapter <ADAPTER> [--mints <M1,M2>] --cluster devnet
+pnpm --filter=@b402ai/solana-examples alt show       --alt <ALT> --cluster devnet
 ```
+
+**Extending to new protocols.** The pool + verifier + adapter ABI are
+action-agnostic — private swap, lend, perp, LP all use the same
+`adapt_execute` path. To add Kamino/Drift/Orca:
+
+1. Build + deploy the new adapter program (implements the common
+   `execute(in_amount, min_out_amount, action_payload)` ABI).
+2. Register it in `AdapterRegistry` with its allowed ix discriminators.
+3. `alt add-adapter --adapter <NEW_ADAPTER> --mints <wSOL,USDC,...>` —
+   seeds the new adapter's program + authority PDA + scratch ATAs into
+   the same ALT. No pool redeploy, no circuit change.
 
 Env overrides:
 

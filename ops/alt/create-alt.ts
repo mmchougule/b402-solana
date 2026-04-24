@@ -10,9 +10,14 @@
  * adapter scratch ATAs) are added on demand via `add-mint`.
  *
  * Usage:
- *   tsx ops/alt/create-alt.ts create --cluster devnet
- *   tsx ops/alt/create-alt.ts add-mint --mint <MINT_PUBKEY> --alt <ALT_PUBKEY> --cluster devnet
- *   tsx ops/alt/create-alt.ts show   --alt <ALT_PUBKEY> --cluster devnet
+ *   tsx ops/alt/create-alt.ts create     --cluster devnet
+ *   tsx ops/alt/create-alt.ts add-mint   --mint <MINT> --alt <ALT> [--adapter <ADAPTER>] --cluster devnet
+ *   tsx ops/alt/create-alt.ts add-adapter --adapter <ADAPTER_PROGRAM> --alt <ALT> [--mints <M1,M2,...>] --cluster devnet
+ *   tsx ops/alt/create-alt.ts show       --alt <ALT> --cluster devnet
+ *
+ * The pool + verifier are adapter-agnostic. Each new adapter (Kamino, Drift,
+ * Orca, ...) registers its program and extends the same ALT via `add-adapter`
+ * — no pool redeploy, no circuit change.
  *
  * Env overrides:
  *   RPC_URL         full RPC URL (takes precedence over --cluster)
@@ -70,8 +75,13 @@ function vaultPda(mint: PublicKey): PublicKey {
 function tokenConfigPda(mint: PublicKey): PublicKey {
   return pda([VERSION_PREFIX, SEED_TOKEN, mint.toBytes()], POOL_ID);
 }
-function jupiterAdapterAuthority(): PublicKey {
-  return pda([VERSION_PREFIX, SEED_ADAPTER], JUPITER_ADAPTER_ID);
+/**
+ * Adapter authority PDA — seeds `["b402/v1", "adapter"]` derived under the
+ * adapter's own program ID (not the pool's). All adapters follow this
+ * convention so `add-adapter` works for any registered adapter.
+ */
+function adapterAuthorityFor(adapterProgramId: PublicKey): PublicKey {
+  return pda([VERSION_PREFIX, SEED_ADAPTER], adapterProgramId);
 }
 
 // --- CLI -----------------------------------------------------------------
@@ -127,39 +137,69 @@ async function confirmSend(
 
 // --- Seed set ------------------------------------------------------------
 
-async function stableSeedAccounts(): Promise<PublicKey[]> {
-  // Order is cosmetic; ALT indices are position-based but the v0 tx builder
-  // looks up by pubkey.
-  const adapterAuthority = jupiterAdapterAuthority();
+/**
+ * Protocol-level accounts that every adapt tx references regardless of
+ * which adapter is being called. Safe to seed on day 1.
+ */
+function protocolCoreAccounts(): PublicKey[] {
   return [
-    // Programs (7)
-    JUPITER_V6_ID,
+    // b402 programs
     POOL_ID,
     VERIFIER_ID,
-    JUPITER_ADAPTER_ID,
+    // SPL plumbing
     TOKEN_PROGRAM_ID,
     ASSOCIATED_TOKEN_PROGRAM_ID,
     SystemProgram.programId,
-    // b402 PDAs (3)
+    // b402 PDAs
     poolConfigPda(),
     treeStatePda(),
-    adapterAuthority,
-    // Common mints (2)
+    // Common mints (harmless dead weight on devnet, load-bearing on mainnet)
     WSOL_MINT,
     USDC_MAINNET,
-    // Adapter scratch ATAs for the common mints (2)
-    await getAssociatedTokenAddress(WSOL_MINT, adapterAuthority, true),
-    await getAssociatedTokenAddress(USDC_MAINNET, adapterAuthority, true),
   ];
 }
 
-async function mintSpecificAccounts(mint: PublicKey): Promise<PublicKey[]> {
-  const adapterAuthority = jupiterAdapterAuthority();
+/**
+ * Per-adapter accounts: the adapter program, its authority PDA, and scratch
+ * ATAs for a given mint list. Called by both `create` (seeding Jupiter) and
+ * `add-adapter` (any future adapter: Kamino, Drift, Orca, ...).
+ */
+async function adapterAccounts(
+  adapterProgramId: PublicKey, mints: PublicKey[],
+): Promise<PublicKey[]> {
+  const authority = adapterAuthorityFor(adapterProgramId);
+  const out: PublicKey[] = [adapterProgramId, authority];
+  for (const mint of mints) {
+    out.push(await getAssociatedTokenAddress(mint, authority, true));
+  }
+  return out;
+}
+
+/**
+ * Day-1 seed: protocol core + Jupiter V6 program + Jupiter adapter + scratch
+ * ATAs for wSOL/USDC. Future adapters layered on via `add-adapter`.
+ */
+async function stableSeedAccounts(): Promise<PublicKey[]> {
+  return [
+    JUPITER_V6_ID,
+    ...protocolCoreAccounts(),
+    ...await adapterAccounts(JUPITER_ADAPTER_ID, [WSOL_MINT, USDC_MAINNET]),
+  ];
+}
+
+/**
+ * Per-mint accounts for a specific adapter: the mint, its Vault + TokenConfig
+ * PDAs (pool-side), and the adapter's scratch ATA for that mint.
+ */
+async function mintSpecificAccounts(
+  mint: PublicKey, adapterProgramId: PublicKey,
+): Promise<PublicKey[]> {
+  const authority = adapterAuthorityFor(adapterProgramId);
   return [
     mint,
     vaultPda(mint),
     tokenConfigPda(mint),
-    await getAssociatedTokenAddress(mint, adapterAuthority, true),
+    await getAssociatedTokenAddress(mint, authority, true),
   ];
 }
 
@@ -200,17 +240,40 @@ async function cmdCreate(connection: Connection, signer: Keypair): Promise<void>
 }
 
 async function cmdAddMint(
-  connection: Connection, signer: Keypair, alt: PublicKey, mint: PublicKey,
+  connection: Connection,
+  signer: Keypair,
+  alt: PublicKey,
+  mint: PublicKey,
+  adapterProgramId: PublicKey,
 ): Promise<void> {
   const existing = await connection.getAddressLookupTable(alt);
   if (!existing.value) throw new Error(`ALT ${alt.toBase58()} not found`);
   const have = new Set(existing.value.state.addresses.map(a => a.toBase58()));
 
-  const candidates = await mintSpecificAccounts(mint);
+  const candidates = await mintSpecificAccounts(mint, adapterProgramId);
   const toAdd = candidates.filter(k => !have.has(k.toBase58()));
   if (toAdd.length === 0) { console.log('nothing to add'); return; }
 
   console.log(`▶ adding ${toAdd.length} accounts for mint ${mint.toBase58()}`);
+  await extendInBatches(connection, signer, alt, toAdd);
+}
+
+async function cmdAddAdapter(
+  connection: Connection,
+  signer: Keypair,
+  alt: PublicKey,
+  adapterProgramId: PublicKey,
+  mints: PublicKey[],
+): Promise<void> {
+  const existing = await connection.getAddressLookupTable(alt);
+  if (!existing.value) throw new Error(`ALT ${alt.toBase58()} not found`);
+  const have = new Set(existing.value.state.addresses.map(a => a.toBase58()));
+
+  const candidates = await adapterAccounts(adapterProgramId, mints);
+  const toAdd = candidates.filter(k => !have.has(k.toBase58()));
+  if (toAdd.length === 0) { console.log('nothing to add'); return; }
+
+  console.log(`▶ adding ${toAdd.length} accounts for adapter ${adapterProgramId.toBase58()}`);
   await extendInBatches(connection, signer, alt, toAdd);
 }
 
@@ -243,7 +306,7 @@ async function extendInBatches(
 async function main(): Promise<void> {
   const { cmd, flags } = parseArgs(process.argv.slice(2));
   if (!cmd || cmd === 'help') {
-    console.log('usage: tsx ops/alt/create-alt.ts <create|add-mint|show> [flags]');
+    console.log('usage: tsx ops/alt/create-alt.ts <create|add-mint|add-adapter|show> [flags]');
     process.exit(cmd ? 0 : 1);
   }
 
@@ -260,7 +323,13 @@ async function main(): Promise<void> {
   } else if (cmd === 'add-mint') {
     if (!flags.alt)  throw new Error('--alt <pubkey> required');
     if (!flags.mint) throw new Error('--mint <pubkey> required');
-    await cmdAddMint(connection, signer, new PublicKey(flags.alt), new PublicKey(flags.mint));
+    const adapter = flags.adapter ? new PublicKey(flags.adapter) : JUPITER_ADAPTER_ID;
+    await cmdAddMint(connection, signer, new PublicKey(flags.alt), new PublicKey(flags.mint), adapter);
+  } else if (cmd === 'add-adapter') {
+    if (!flags.alt)     throw new Error('--alt <pubkey> required');
+    if (!flags.adapter) throw new Error('--adapter <pubkey> required');
+    const mints = (flags.mints ?? '').split(',').filter(Boolean).map(s => new PublicKey(s));
+    await cmdAddAdapter(connection, signer, new PublicKey(flags.alt), new PublicKey(flags.adapter), mints);
   } else if (cmd === 'show') {
     if (!flags.alt) throw new Error('--alt <pubkey> required');
     await cmdShow(connection, new PublicKey(flags.alt));
