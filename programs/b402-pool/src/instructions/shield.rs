@@ -101,7 +101,9 @@ pub struct Shield<'info> {
 #[inline(never)]
 pub fn handler(ctx: Context<Shield>, args: ShieldArgs) -> Result<()> {
     require!(args.proof.len() == 256, PoolError::InvalidInstructionData);
-    require!(args.encrypted_notes.len() == 2, PoolError::InvalidInstructionData);
+    // Accept 0..=2 encrypted_notes. Missing entries emit zero ciphertext on
+    // chain; receiver-discovery for those notes happens via off-chain channel.
+    require!(args.encrypted_notes.len() <= 2, PoolError::InvalidInstructionData);
 
     let cfg = &ctx.accounts.pool_config;
     require!(!cfg.paused_shields, PoolError::PoolPaused);
@@ -175,12 +177,18 @@ pub fn handler(ctx: Context<Shield>, args: ShieldArgs) -> Result<()> {
             let leaf_index = tree.leaf_count;
             let new_root = util::tree_append(&mut tree, *commitment)?;
 
+            // Missing encrypted_notes[i] => zero ciphertext (off-chain delivery).
+            let (ct, ep, vt) = match args.encrypted_notes.get(i) {
+                Some(n) => (n.ciphertext, n.ephemeral_pub, n.viewing_tag),
+                None => ([0u8; 89], [0u8; 32], [0u8; 2]),
+            };
+
             emit!(CommitmentAppended {
                 leaf_index,
                 commitment: *commitment,
-                ciphertext: args.encrypted_notes[i].ciphertext,
-                ephemeral_pub: args.encrypted_notes[i].ephemeral_pub,
-                viewing_tag: args.encrypted_notes[i].viewing_tag,
+                ciphertext: ct,
+                ephemeral_pub: ep,
+                viewing_tag: vt,
                 tree_root_after: new_root,
                 slot: clock.slot,
             });
@@ -212,7 +220,7 @@ fn build_public_inputs_for_shield(pi: &TransactPublicInputs) -> Vec<[u8; 32]> {
     v.push(pi.commitment_out[1]);
     v.push(u64_to_fr_le(pi.public_amount_in));
     v.push(u64_to_fr_le(pi.public_amount_out));
-    v.push(pi.public_token_mint.to_bytes());
+    v.push(crate::util::reduce_le_mod_p(&pi.public_token_mint.to_bytes()));
     v.push(u64_to_fr_le(pi.relayer_fee));
     v.push(pi.relayer_fee_bind);
     v.push(pi.root_bind);
