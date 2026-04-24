@@ -46,13 +46,19 @@ pub mod b402_jupiter_adapter {
 
         let pre_out = ctx.accounts.adapter_out_ta.amount;
 
-        // Build CPI instruction for Jupiter.
+        // Build CPI instruction for Jupiter. Critically: if any forwarded
+        // account matches adapter_authority, mark it as signer in the CPI
+        // ix. We'll invoke_signed for that PDA below, and Jupiter's `Route`
+        // expects userTransferAuthority to be a signer. Without this flag
+        // the CPI fails with "signer privilege escalated".
+        let auth_key = ctx.accounts.adapter_authority.key();
         let accounts_for_cpi: Vec<anchor_lang::solana_program::instruction::AccountMeta> =
             ctx.remaining_accounts.iter().map(|a| {
+                let is_signer = a.is_signer || *a.key == auth_key;
                 if a.is_writable {
-                    anchor_lang::solana_program::instruction::AccountMeta::new(*a.key, a.is_signer)
+                    anchor_lang::solana_program::instruction::AccountMeta::new(*a.key, is_signer)
                 } else {
-                    anchor_lang::solana_program::instruction::AccountMeta::new_readonly(*a.key, a.is_signer)
+                    anchor_lang::solana_program::instruction::AccountMeta::new_readonly(*a.key, is_signer)
                 }
             }).collect();
 
