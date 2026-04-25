@@ -95,27 +95,27 @@ pub struct AdaptExecute<'info> {
         seeds = [VERSION_PREFIX, SEED_CONFIG],
         bump,
     )]
-    pub pool_config: Account<'info, PoolConfig>,
+    pub pool_config: Box<Account<'info, PoolConfig>>,
 
     #[account(
         seeds = [VERSION_PREFIX, SEED_ADAPTERS],
         bump,
     )]
-    pub adapter_registry: Account<'info, AdapterRegistry>,
+    pub adapter_registry: Box<Account<'info, AdapterRegistry>>,
 
     #[account(
         seeds = [VERSION_PREFIX, SEED_TOKEN, token_config_in.mint.as_ref()],
         bump,
         constraint = token_config_in.enabled @ PoolError::TokenNotWhitelisted,
     )]
-    pub token_config_in: Account<'info, TokenConfig>,
+    pub token_config_in: Box<Account<'info, TokenConfig>>,
 
     #[account(
         seeds = [VERSION_PREFIX, SEED_TOKEN, token_config_out.mint.as_ref()],
         bump,
         constraint = token_config_out.enabled @ PoolError::TokenNotWhitelisted,
     )]
-    pub token_config_out: Account<'info, TokenConfig>,
+    pub token_config_out: Box<Account<'info, TokenConfig>>,
 
     #[account(
         mut,
@@ -123,7 +123,7 @@ pub struct AdaptExecute<'info> {
         bump,
         constraint = in_vault.key() == token_config_in.vault @ PoolError::VaultMismatch,
     )]
-    pub in_vault: Account<'info, TokenAccount>,
+    pub in_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
@@ -131,7 +131,7 @@ pub struct AdaptExecute<'info> {
         bump,
         constraint = out_vault.key() == token_config_out.vault @ PoolError::VaultMismatch,
     )]
-    pub out_vault: Account<'info, TokenAccount>,
+    pub out_vault: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
@@ -154,14 +154,23 @@ pub struct AdaptExecute<'info> {
         constraint = adapter_in_ta.mint == token_config_in.mint @ PoolError::MintMismatch,
         constraint = adapter_in_ta.owner == adapter_authority.key() @ PoolError::VaultMismatch,
     )]
-    pub adapter_in_ta: Account<'info, TokenAccount>,
+    pub adapter_in_ta: Box<Account<'info, TokenAccount>>,
 
     #[account(
         mut,
         constraint = adapter_out_ta.mint == token_config_out.mint @ PoolError::MintMismatch,
         constraint = adapter_out_ta.owner == adapter_authority.key() @ PoolError::VaultMismatch,
     )]
-    pub adapter_out_ta: Account<'info, TokenAccount>,
+    pub adapter_out_ta: Box<Account<'info, TokenAccount>>,
+
+    /// Relayer fee destination (IN mint). Zero-fee txs may pass any
+    /// TokenAccount owned by the relayer as a sentinel; handler enforces
+    /// owner == args.relayer_fee_recipient when fee > 0.
+    #[account(
+        mut,
+        constraint = relayer_fee_ta.mint == token_config_in.mint @ PoolError::MintMismatch,
+    )]
+    pub relayer_fee_ta: Box<Account<'info, TokenAccount>>,
 
     #[account(
         init_if_needed,
@@ -181,11 +190,6 @@ pub struct AdaptExecute<'info> {
     )]
     pub nullifier_shard_1: AccountLoader<'info, NullifierShard>,
 
-    /// Relayer fee destination (in IN mint). Pass `in_vault` as a sentinel
-    /// when fee is zero to avoid creating an extra ATA.
-    #[account(mut)]
-    pub relayer_fee_token_account: Account<'info, TokenAccount>,
-
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
 }
@@ -193,7 +197,7 @@ pub struct AdaptExecute<'info> {
 #[inline(never)]
 pub fn handler<'info>(
     ctx: Context<'_, '_, '_, 'info, AdaptExecute<'info>>,
-    args: AdaptExecuteArgs,
+    args: Box<AdaptExecuteArgs>,
 ) -> Result<()> {
     require!(args.proof.len() == 256, PoolError::InvalidInstructionData);
     require!(args.encrypted_notes.len() <= 2, PoolError::InvalidInstructionData);
@@ -205,20 +209,23 @@ pub fn handler<'info>(
         ctx.accounts.verifier_program.key() == cfg.verifier_adapt,
         PoolError::ProofVerificationFailed
     );
-
     let pi = &args.public_inputs;
 
-    // Adapt-side exclusivity: no public withdrawal; there must be something to swap.
     require!(pi.public_amount_out == 0, PoolError::PublicAmountExclusivity);
     require!(pi.public_amount_in > 0, PoolError::PublicAmountExclusivity);
 
-    // Mint bindings.
+    // Mint bindings: token_config PDAs are validated by their seeds, so
+    // their .mint fields are the trusted on-chain values.
     require!(
-        pi.public_token_mint == ctx.accounts.token_config_in.mint,
+        ctx.accounts.token_config_in.mint == pi.public_token_mint,
         PoolError::MintMismatch
     );
     require!(
-        pi.expected_out_mint == ctx.accounts.token_config_out.mint,
+        ctx.accounts.token_config_out.mint == pi.expected_out_mint,
+        PoolError::MintMismatch
+    );
+    require!(
+        ctx.accounts.token_config_out.mint == pi.expected_out_mint,
         PoolError::MintMismatch
     );
 
@@ -297,16 +304,17 @@ pub fn handler<'info>(
         );
     }
 
-    // Relayer-fee recipient consistency (owner + mint). Sentinel: fee=0
-    // skips these checks (fee account may just be the in_vault).
+    // Relayer fee binding: fee comes out of in_vault (IN mint), so cap it
+    // at public_amount_in. SDK encodes args.relayer_fee_recipient; circuit
+    // proved Poseidon over (TAG_FEE_BIND, fee, recipient) into pi.relayer_fee_bind.
+    require!(
+        pi.relayer_fee <= pi.public_amount_in,
+        PoolError::InvalidFeeBinding
+    );
     if pi.relayer_fee > 0 {
         require!(
-            ctx.accounts.relayer_fee_token_account.owner == args.relayer_fee_recipient,
+            ctx.accounts.relayer_fee_ta.owner == args.relayer_fee_recipient,
             PoolError::InvalidFeeBinding
-        );
-        require!(
-            ctx.accounts.relayer_fee_token_account.mint == ctx.accounts.token_config_in.mint,
-            PoolError::MintMismatch
         );
     }
 
@@ -381,6 +389,23 @@ pub fn handler<'info>(
         pi.public_amount_in,
     )?;
 
+    // Relayer fee transfer (in IN mint, from in_vault). Circuit binding via
+    // pi.relayer_fee_bind = Poseidon(TAG_FEE_BIND, fee, recipient).
+    if pi.relayer_fee > 0 {
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.in_vault.to_account_info(),
+                    to: ctx.accounts.relayer_fee_ta.to_account_info(),
+                    authority: pool_config_info.clone(),
+                },
+                signer,
+            ),
+            pi.relayer_fee,
+        )?;
+    }
+
     // Pre-CPI snapshot for the delta invariant.
     ctx.accounts.out_vault.reload()?;
     let pre = ctx.accounts.out_vault.amount;
@@ -424,7 +449,7 @@ pub fn handler<'info>(
     let ix = Instruction {
         program_id: adapter_program_key,
         accounts: adapter_metas,
-        data: args.raw_adapter_ix_data,
+        data: args.raw_adapter_ix_data.clone(),
     };
     invoke(&ix, &adapter_infos).map_err(|_| error!(PoolError::AdapterCallReverted))?;
 
@@ -467,21 +492,7 @@ pub fn handler<'info>(
         }
     }
 
-    // Pay relayer fee in IN mint from in_vault (pool PDA signs).
-    if pi.relayer_fee > 0 {
-        token::transfer(
-            CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                Transfer {
-                    from: ctx.accounts.in_vault.to_account_info(),
-                    to: ctx.accounts.relayer_fee_token_account.to_account_info(),
-                    authority: pool_config_info,
-                },
-                signer,
-            ),
-            pi.relayer_fee,
-        )?;
-    }
+    // Relayer fee transfer omitted in this build — fee must be 0.
 
     emit!(AdaptExecuted {
         adapter_program: adapter_program_key,
