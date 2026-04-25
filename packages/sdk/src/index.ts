@@ -11,11 +11,12 @@ export { NoteStore } from './note-store.js';
 // Action builders + on-chain helpers
 export { shield, type ShieldParams, type ShieldResult } from './actions/shield.js';
 export { unshield, type UnshieldParams, type UnshieldResult } from './actions/unshield.js';
-export {
-  privateSwap, MAX_TX_SIZE, MAX_ACTION_PAYLOAD,
-  type PrivateSwapParams, type PrivateSwapResult, type JupiterSwapInstruction,
-} from './actions/privateSwap.js';
 export { Scanner, parseProgramDataLog, expectedCommitmentForOwner, type ScannerOptions } from './notes/scanner.js';
+
+/** Solana hard tx-size cap. */
+export const MAX_TX_SIZE = 1232;
+/** Soft ceiling for adapter action_payload. Pool recomputes keccak over it. */
+export const MAX_ACTION_PAYLOAD = 350;
 
 export {
   poolConfigPda, treeStatePda, tokenConfigPda, vaultPda,

@@ -62,6 +62,20 @@ pub fn unpause(ctx: Context<AdminAction>, which: PauseFlag) -> Result<()> {
     Ok(())
 }
 
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VerifierKind { Transact, Adapt, Disclose }
+
+pub fn set_verifier(ctx: Context<AdminAction>, kind: VerifierKind, new_id: Pubkey) -> Result<()> {
+    ensure_admin(&ctx.accounts.pool_config, &ctx.accounts.admin.key())?;
+    let cfg = &mut ctx.accounts.pool_config;
+    match kind {
+        VerifierKind::Transact => cfg.verifier_transact = new_id,
+        VerifierKind::Adapt    => cfg.verifier_adapt    = new_id,
+        VerifierKind::Disclose => cfg.verifier_disclose = new_id,
+    }
+    Ok(())
+}
+
 #[derive(Accounts)]
 pub struct RegisterAdapter<'info> {
     #[account(mut)]

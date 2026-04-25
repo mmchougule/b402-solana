@@ -1,66 +1,37 @@
-# Phase 2 — what closes the real `adapt_execute`
+# Phase 2 — adapt circuit
 
-The current `adapt_execute_devnet` handler exists to validate pool + SDK +
-ALT plumbing against a real adapter CPI. It is **feature-gated** behind
-`--features adapt-devnet` and explicitly claims **no security property**.
-A default build (which is what a mainnet deploy would produce) rejects the
-instruction at the runtime `cfg!` gate.
+## Status: 2a shipped (2026-04-25)
 
-This doc explains what Phase 2 adds, why it's required, and what the
-actual work looks like.
+Real ZK-bound `adapt_execute` is live on devnet. Cross-mint attack closed
+via circuit constraints. The previous `adapt_execute_devnet` stub has been
+replaced; no feature flag, no runtime cfg gate. Three sigs proving the
+full path (shield → real Groth16 adapt proof → unshield) on devnet are in
+the README.
 
----
+What changed:
 
-## The concrete hole in `adapt_execute_devnet`
+- `circuits/adapt.circom` — extends transact with `adapter_id`,
+  `action_hash`, `expected_out_value`, `expected_out_mint` (4 added
+  public inputs, 23 total). Constraints: `outTokenMint === expectedOutMint`,
+  `actionHash === Poseidon_3(adaptBindTag, keccak(action_payload), expectedOutMint)`,
+  `inSum === publicAmountIn + relayerFee`, `outSum === expectedOutValue`.
+- `b402_verifier_adapt` (program ID `3Y2tyhNS…`) — Groth16 verifier with the
+  baked-in adapt VK from a throwaway ceremony.
+- `programs/b402-pool/src/instructions/adapt_execute.rs` — full handler:
+  parses 23 public inputs, binds adapter program / action hash / mints to
+  pool state, verifies proof via verifier_adapt CPI, burns input nullifiers,
+  pool-signed transfer to adapter, post-CPI delta invariant, appends output
+  commitments, optional relayer fee transfer.
+- `packages/prover/src/adapt.ts` — `AdaptProver` mirroring `TransactProver`.
 
-The handler does:
-
-1. Registry check — adapter program ID + instruction discriminator must
-   be allowlisted.
-2. Pool-signed transfer of `in_amount` from `in_vault` → `adapter_in_ta`.
-3. CPI the adapter with caller-supplied raw instruction data.
-4. Post-CPI invariant: `out_vault.amount` delta ≥ `min_out_amount`.
-5. Append caller-supplied `output_commitment` (32 bytes) to the tree.
-
-Step 5 is the hole. The caller hands the pool an opaque 32-byte
-commitment. The pool doesn't verify that the commitment is
-`Poseidon(expected_out_mint, actual_delta, random, caller_spendingPub)`
-— it just appends the bytes.
-
-### Example attack (requires the feature flag to be on)
-
-- Alice: shields 50 USDC. USDC vault balance: 50.
-- Carol: shields 100 USDC. USDC vault balance: 150.
-- Alice calls `adapt_execute_devnet` with `in_mint=USDC`, `out_mint=wSOL`,
-  `in_amount=10`. Adapter delivers 0.01 wSOL. Delta check passes.
-- Alice's output commitment field is her choice. She constructs
-  `Poseidon(USDC_mint, 1000, random, alice_spendingPub)` — a 1,000-USDC
-  commitment, not the wSOL commitment the swap actually produced.
-- Pool appends it. USDC vault now holds 140 (10 went through the adapter).
-- Later, Alice unshields the note with a real Groth16 proof claiming
-  `mint=USDC, value=1000, owner=alice`. The proof verifies (the commitment
-  IS in the tree) and the pool pays out from the USDC vault — draining up
-  to its current balance.
-
-Alice burned 10 USDC to extract 140 USDC (her 50 + Carol's 100 − 10
-sent through adapter). Net +80 USDC stolen from Carol.
-
-### Why this doesn't reach mainnet today
-
-1. The handler is only compiled when `--features adapt-devnet` is passed
-   to `cargo build-sbf`. Mainnet builds omit the feature.
-2. Even if the feature were compiled in, the runtime `cfg!` check in
-   `lib.rs` is a second gate.
-3. The one chain where the feature is on (b402's own devnet) uses
-   ephemeral test mints — each `pnpm e2e` run creates a fresh mint, so
-   there's no persistent Carol-equivalent balance to drain.
-
-The feature flag is the primary defense; the test-mint convention is a
-secondary safety net.
+What 2a still does NOT ship: the production-grade trusted setup. The
+current adapt VK is from a single-contributor throwaway ceremony — same
+class as the transact VK on devnet. Mainnet needs the multi-party
+ceremony described below.
 
 ---
 
-## Milestone 2a — working adapt circuit (≈ 1 focused day)
+## What was in 2a (now done)
 
 This is the "same cadence as Phase 1" milestone. Goal: replace
 `adapt_execute_devnet` with a real ZK-bound `adapt_execute` handler,

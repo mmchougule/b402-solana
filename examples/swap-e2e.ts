@@ -1,279 +1,380 @@
 /**
- * swap-e2e — localnet end-to-end: shield → private swap → unshield.
+ * swap-e2e — full end-to-end with REAL ZK proofs:
+ *   shield → adapt_execute (with real Groth16 adapt proof) → unshield.
  *
- * What this proves:
- *   1. Pool's `adapt_execute_devnet` handler is wired correctly (registry
- *      lookup, vault pre-snapshot, adapter CPI, post-delta invariant,
- *      commitment append).
- *   2. SDK can build an adapt_execute tx against any adapter (we use the
- *      mock adapter here; Jupiter is the same shape).
- *   3. The output commitment produced by the swap is a valid shielded
- *      note — we unshield it afterward using the standard flow.
+ * Proves the full Phase 2 pipeline:
+ *   - transact circuit (shield + unshield)
+ *   - adapt circuit + b402_verifier_adapt (composable private execution)
+ *   - b402-pool: registry check, adapter_id binding, action_hash binding,
+ *     nullifier burn, vault transfer, adapter CPI, delta invariant, tree append
  *
- * What this does NOT prove (known Phase 1 gaps):
- *   - No adapt circuit. Output commitment is trusted from caller.
- *   - No nullifier burn on the input side. Input tokens are moved to
- *     adapter_in_ta without proving we own any particular shielded note.
- *   - SDK privateSwap is Jupiter-shaped; here we bypass it and build the
- *     pool ix directly (the mock adapter uses Jupiter's unified ABI, so
- *     everything the SDK does is exercised in the direct build path).
+ * Uses mock adapter as a stand-in (unified ABI matches Jupiter adapter;
+ * Jupiter mainnet-fork version adds AMM routing on top).
+ *
+ * Usage:
+ *   ./ops/local-validator.sh --reset          # terminal 1
+ *   pnpm swap-e2e                             # terminal 2
  */
 
 import {
+  AddressLookupTableAccount, AddressLookupTableProgram,
   ComputeBudgetProgram, Connection, Keypair, LAMPORTS_PER_SOL, PublicKey,
-  SystemProgram, Transaction, TransactionInstruction, sendAndConfirmTransaction,
+  SystemProgram, Transaction, TransactionInstruction,
+  TransactionMessage, VersionedTransaction, sendAndConfirmTransaction,
 } from '@solana/web3.js';
 import {
   TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID,
   createMint, mintTo, getOrCreateAssociatedTokenAccount, getAccount,
 } from '@solana/spl-token';
 import { randomBytes as nodeRandomBytes } from 'node:crypto';
-import path from 'node:path';
+import { keccak_256 } from '@noble/hashes/sha3';
 import fs from 'node:fs';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
   adapterRegistryPda, buildWallet, poolConfigPda, shield, tokenConfigPda,
-  treasuryPda, treeStatePda, unshield, vaultPda, fetchTreeState,
-  proveMostRecentLeaf, buildZeroCache,
-  instructionDiscriminator, concat, u32Le, u64Le, vecU8,
-  poseidon, noteEnc,
+  treeStatePda, unshield, vaultPda, fetchTreeState, proveMostRecentLeaf,
+  buildZeroCache, instructionDiscriminator, concat, u16Le, u32Le, u64Le, vecU8,
+  poseidon, noteEnc, nullifierShardPda, shardPrefix,
 } from '@b402ai/solana';
 import { leToFrReduced } from '@b402ai/solana-shared';
-import { TransactProver } from '@b402ai/solana-prover';
+import { TransactProver, AdaptProver, type AdaptWitness } from '@b402ai/solana-prover';
 
-const { commitmentHash } = poseidon;
+const { commitmentHash, nullifierHash, poseidonTagged, feeBindHash } = poseidon;
 const { encryptNote } = noteEnc;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const RPC_URL = process.env.RPC_URL ?? 'http://127.0.0.1:8899';
 
-// Program IDs — same declare_id! as Anchor.toml + ops/local-validator.sh.
-const POOL_ID            = new PublicKey('42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y');
-const VERIFIER_ID        = new PublicKey('Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK');
-const MOCK_ADAPTER_ID    = new PublicKey('89kw33YDcbXfiayVNauz599LaDm51EuU8amWydpjYKgp');
+const POOL_ID         = new PublicKey('42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y');
+const VERIFIER_T_ID   = new PublicKey('Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK');
+const VERIFIER_A_ID   = new PublicKey('3Y2tyhNSaUiW5AcZcmFGRyTMdnroxHxc5GqFQPcMTZae');
+const MOCK_ADAPTER_ID = new PublicKey('89kw33YDcbXfiayVNauz599LaDm51EuU8amWydpjYKgp');
 
 const CIRCUITS_BUILD = path.resolve(__dirname, '../circuits/build');
+const EXECUTE_DISC   = instructionDiscriminator('execute');
 
-// Execute ix discriminator (sha256("global:execute")[0..8]).
-const EXECUTE_DISC = instructionDiscriminator('execute');
+const P = 21888242871839275222246405745257275088548364400416034343698204186575808495617n;
+function domainTagFr(tag: string): bigint {
+  let acc = 0n;
+  for (let i = 0; i < tag.length; i++) acc = (acc << 8n) | BigInt(tag.charCodeAt(i));
+  return acc % P;
+}
 
 async function main() {
   console.log(`▶ RPC ${RPC_URL}`);
   const connection = new Connection(RPC_URL, 'confirmed');
 
+  // Localnet: airdrop fresh keypairs. Devnet: use CLI wallet as admin (it's
+  // the pool's admin_multisig, set at deploy). Override via ADMIN_KEYPAIR.
   const isLocal = RPC_URL.includes('127.0.0.1');
-  let admin: Keypair, relayer: Keypair, depositor: Keypair;
+  let admin: Keypair;
+  const alice   = Keypair.generate();
+  const charlie = Keypair.generate();
+
   if (isLocal) {
     admin = Keypair.fromSeed(new Uint8Array(32).fill(7));
-    relayer = Keypair.generate();
-    depositor = Keypair.generate();
-    for (const kp of [admin, relayer, depositor]) {
+    for (const kp of [admin, alice, charlie]) {
       const sig = await connection.requestAirdrop(kp.publicKey, 5 * LAMPORTS_PER_SOL);
       await connection.confirmTransaction(sig, 'confirmed');
     }
   } else {
     const walletPath = process.env.ADMIN_KEYPAIR
       ?? path.join(process.env.HOME ?? '', '.config/solana/id.json');
-    const secret = new Uint8Array(JSON.parse(fs.readFileSync(walletPath, 'utf8')));
-    admin = Keypair.fromSecretKey(secret);
-    relayer = admin; depositor = admin;
+    admin = Keypair.fromSecretKey(new Uint8Array(JSON.parse(fs.readFileSync(walletPath, 'utf8'))));
+    // Fund alice + charlie from admin so we don't hit devnet airdrop limits.
+    // Alice pays rent for 2 nullifier shards (~0.07 SOL each) + tx fees,
+    // so fund generously. Charlie just needs an ATA for the unshield.
+    const fund = new Transaction()
+      .add(SystemProgram.transfer({ fromPubkey: admin.publicKey, toPubkey: alice.publicKey,   lamports: 0.5 * LAMPORTS_PER_SOL }))
+      .add(SystemProgram.transfer({ fromPubkey: admin.publicKey, toPubkey: charlie.publicKey, lamports: 0.05 * LAMPORTS_PER_SOL }));
+    await sendAndConfirmTransaction(connection, fund, [admin]);
+    const bal = await connection.getBalance(admin.publicKey);
+    console.log(`▶ using CLI wallet ${admin.publicKey.toBase58().slice(0, 8)}… (${(bal / LAMPORTS_PER_SOL).toFixed(3)} SOL)`);
   }
-  console.log(`▶ admin=${admin.publicKey.toBase58().slice(0, 8)}… depositor=${depositor.publicKey.toBase58().slice(0, 8)}…`);
 
-  // ---- init_pool (skip if already initialized) ----
+  const aliceWallet = await buildWallet(alice.secretKey.slice(0, 32));
+
+  // --- init pool + token configs + adapter registry ---
   const cfgAcct = await connection.getAccountInfo(poolConfigPda(POOL_ID));
-  if (!cfgAcct) {
-    await initPool(connection, admin);
-    console.log('▶ init_pool ok');
-  } else {
-    console.log('▶ pool already initialized');
-  }
+  if (!cfgAcct) { await initPool(connection, admin); console.log('▶ init_pool ok'); }
 
-  // ---- Mints: in = synthetic "USDC-like", out = synthetic "SOL-like" ----
   const inMint  = await createMint(connection, admin, admin.publicKey, null, 6);
   const outMint = await createMint(connection, admin, admin.publicKey, null, 9);
-  console.log(`▶ in_mint  = ${inMint.toBase58()}`);
-  console.log(`▶ out_mint = ${outMint.toBase58()}`);
+  console.log(`▶ in_mint=${inMint.toBase58().slice(0,8)}…  out_mint=${outMint.toBase58().slice(0,8)}…`);
 
   await addTokenConfig(connection, admin, inMint);
   await addTokenConfig(connection, admin, outMint);
-  console.log('▶ token configs ok');
-
-  // ---- Register mock adapter with execute discriminator allowlisted ----
   await registerAdapter(connection, admin, MOCK_ADAPTER_ID, EXECUTE_DISC);
-  console.log('▶ mock adapter registered');
 
-  // ---- Fund depositor with in_mint + mint adapter's scratch out_ta ----
-  const depositorAta = await getOrCreateAssociatedTokenAccount(
-    connection, admin, inMint, depositor.publicKey,
-  );
-  await mintTo(connection, admin, inMint, depositorAta.address, admin, 100);
-  console.log('▶ minted 100 in_mint to depositor');
+  const aliceInAta = await getOrCreateAssociatedTokenAccount(connection, admin, inMint, alice.publicKey);
+  await mintTo(connection, admin, inMint, aliceInAta.address, admin, 100);
 
   const adapterAuthority = PublicKey.findProgramAddressSync(
     [new TextEncoder().encode('b402/v1'), new TextEncoder().encode('adapter')],
     MOCK_ADAPTER_ID,
   )[0];
+  const adapterInTa  = await getOrCreateAssociatedTokenAccount(connection, admin, inMint,  adapterAuthority, true);
+  const adapterOutTa = await getOrCreateAssociatedTokenAccount(connection, admin, outMint, adapterAuthority, true);
+  await mintTo(connection, admin, outMint, adapterOutTa.address, admin, 100_000);
+  console.log(`▶ setup: adapter scratch TAs + adapter_out_ta pre-funded with 100_000 out_mint`);
 
-  const adapterOutTa = await getOrCreateAssociatedTokenAccount(
-    connection, admin, outMint, adapterAuthority, true,
-  );
-  await mintTo(connection, admin, outMint, adapterOutTa.address, admin, 10_000);
-  console.log(`▶ adapter_out_ta pre-funded with 10_000 out_mint`);
-
-  const adapterInTa = await getOrCreateAssociatedTokenAccount(
-    connection, admin, inMint, adapterAuthority, true,
-  );
-  console.log(`▶ adapter_in_ta created`);
-
-  // ---- SDK wallet + prover ----
-  const wallet = await buildWallet(depositor.secretKey.slice(0, 32));
-  const prover = new TransactProver({
+  const transactProver = new TransactProver({
     wasmPath: path.join(CIRCUITS_BUILD, 'transact_js/transact.wasm'),
     zkeyPath: path.join(CIRCUITS_BUILD, 'ceremony/transact_final.zkey'),
   });
+  const adaptProver = new AdaptProver({
+    wasmPath: path.join(CIRCUITS_BUILD, 'adapt_js/adapt.wasm'),
+    zkeyPath: path.join(CIRCUITS_BUILD, 'ceremony/adapt_final.zkey'),
+  });
 
-  // ---- Shield 100 in_mint ----
-  console.log('▶ shielding 100 in_mint…');
+  // --- 1. Alice shields 100 in_mint ---
+  const SHIELD_AMOUNT = 100n;
+  console.log(`▶ alice shielding ${SHIELD_AMOUNT} in_mint…`);
   const shieldRes = await shield({
-    connection, poolProgramId: POOL_ID, verifierProgramId: VERIFIER_ID,
-    prover, wallet, mint: inMint, depositorAta: depositorAta.address,
-    depositor, relayer, amount: 100n,
+    connection, poolProgramId: POOL_ID, verifierProgramId: VERIFIER_T_ID,
+    prover: transactProver, wallet: aliceWallet, mint: inMint,
+    depositorAta: aliceInAta.address, depositor: alice, relayer: alice,
+    amount: SHIELD_AMOUNT,
   });
   console.log(`  sig = ${shieldRes.signature}`);
-  console.log(`  leafIndex = ${shieldRes.leafIndex}`);
 
-  // ---- Swap: adapt_execute_devnet via mock adapter ----
-  //
-  // We take 50 of the shielded in_mint, the mock delivers 100 out_mint
-  // (min_out = 100, delta = 0). Output commitment for recipient = us.
-  const IN_AMOUNT = 50n;
-  const MIN_OUT   = 100n;
-  const OUT_AMT   = 100n;
+  // --- 2. Build adapt witness + generate real proof ---
+  // fee=0 keeps the tx lean and skips the fee-recipient ATA account.
+  const PUBLIC_AMOUNT_IN = 100n;
+  const RELAYER_FEE      = 0n;
+  const EXPECTED_OUT     = 200n;
+  const OUT_NOTE_VAL     = 200n;
 
-  const outMintFr = leToFrReduced(outMint.toBytes());
-  const outRandom = leToFrReduced(new Uint8Array(nodeRandomBytes(32)));
-  const outCommitment = await commitmentHash(outMintFr, OUT_AMT, outRandom, wallet.spendingPub);
-  const outEncrypted = await encryptNote(
-    { tokenMint: outMintFr, value: OUT_AMT, random: outRandom, spendingPub: wallet.spendingPub },
-    wallet.viewingPub, 0n,
-  );
+  const actionPayload = new Uint8Array(8); // mock adapter's delta=0
 
-  // Adapter ix data: disc || u64 in_amount || u64 min_out || vec(payload=i64 delta LE)
-  const payload = new Uint8Array(8); // delta = 0
   const rawAdapterIxData = concat(
     EXECUTE_DISC,
-    u64Le(IN_AMOUNT),
-    u64Le(MIN_OUT),
-    vecU8(payload),
+    u64Le(PUBLIC_AMOUNT_IN),
+    u64Le(EXPECTED_OUT),
+    vecU8(actionPayload),
   );
-
-  // Pool ix data: disc || AdaptExecuteDevnetArgs
-  //   u64 in_amount, u64 min_out, Vec<u8> raw_adapter_ix_data,
-  //   [u8;32] output_commitment, EncryptedNote(89+32+2)
-  const poolIxData = concat(
-    instructionDiscriminator('adapt_execute_devnet'),
-    u64Le(IN_AMOUNT),
-    u64Le(MIN_OUT),
-    vecU8(rawAdapterIxData),
-    fr32Le(outCommitment),
-    outEncrypted.ciphertext,
-    outEncrypted.ephemeralPub,
-    outEncrypted.viewingTag,
-  );
-
-  const swapIx = new TransactionInstruction({
-    programId: POOL_ID,
-    keys: [
-      { pubkey: depositor.publicKey,                     isSigner: true,  isWritable: true  },
-      { pubkey: poolConfigPda(POOL_ID),                  isSigner: false, isWritable: false },
-      { pubkey: adapterRegistryPda(POOL_ID),             isSigner: false, isWritable: false },
-      { pubkey: tokenConfigPda(POOL_ID, inMint),         isSigner: false, isWritable: false },
-      { pubkey: tokenConfigPda(POOL_ID, outMint),        isSigner: false, isWritable: false },
-      { pubkey: vaultPda(POOL_ID, inMint),               isSigner: false, isWritable: true  },
-      { pubkey: vaultPda(POOL_ID, outMint),              isSigner: false, isWritable: true  },
-      { pubkey: treeStatePda(POOL_ID),                   isSigner: false, isWritable: true  },
-      { pubkey: MOCK_ADAPTER_ID,                         isSigner: false, isWritable: false },
-      { pubkey: adapterAuthority,                        isSigner: false, isWritable: false },
-      { pubkey: adapterInTa.address,                     isSigner: false, isWritable: true  },
-      { pubkey: adapterOutTa.address,                    isSigner: false, isWritable: true  },
-      { pubkey: TOKEN_PROGRAM_ID,                        isSigner: false, isWritable: false },
-    ],
-    data: Buffer.from(poolIxData),
-  });
-
-  const cuIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 });
-  const swapTx = new Transaction().add(cuIx, swapIx);
-
-  console.log('▶ swapping 50 in_mint → 100 out_mint via mock adapter…');
-  const swapStart = Date.now();
-  const swapSig = await sendAndConfirmTransaction(connection, swapTx, [depositor]);
-  console.log(`  sig = ${swapSig} (${Date.now() - swapStart}ms)`);
-
-  // ---- Verify swap state changes ----
-  const inVaultAcct  = await getAccount(connection, vaultPda(POOL_ID, inMint));
-  const outVaultAcct = await getAccount(connection, vaultPda(POOL_ID, outMint));
-  if (inVaultAcct.amount  !== 50n)  throw new Error(`in_vault=${inVaultAcct.amount} != 50`);
-  if (outVaultAcct.amount !== 100n) throw new Error(`out_vault=${outVaultAcct.amount} != 100`);
-  console.log(`▶ in_vault = ${inVaultAcct.amount} ✓  out_vault = ${outVaultAcct.amount} ✓`);
 
   const tree = await fetchTreeState(connection, treeStatePda(POOL_ID));
-  const swapLeafIndex = tree.leafCount - 1n;
-  console.log(`▶ output commitment appended at leaf ${swapLeafIndex}`);
-
-  // ---- Unshield the output note ----
   const zeroCache = await buildZeroCache();
   const zeroCacheLe = zeroCache.map(v => fr32Le(v));
-  const rootBig = (() => {
-    let v = 0n;
-    for (let i = 31; i >= 0; i--) v = (v << 8n) | BigInt(tree.currentRoot[i]);
-    return v;
-  })();
+  const rootBig = leToBigintBE(tree.currentRoot);
   const merkleProof = proveMostRecentLeaf(
-    outCommitment, swapLeafIndex, rootBig, tree.frontier, zeroCacheLe,
+    shieldRes.commitment, shieldRes.leafIndex, rootBig, tree.frontier, zeroCacheLe,
   );
 
-  const recipient = Keypair.generate();
-  const recipientAta = await getOrCreateAssociatedTokenAccount(
-    connection, admin, outMint, recipient.publicKey,
+  const outMintFr  = leToFrReduced(outMint.toBytes());
+  const inMintFr   = leToFrReduced(inMint.toBytes());
+  const outRandom  = leToFrReduced(new Uint8Array(nodeRandomBytes(32)));
+  const outCommitment = await commitmentHash(outMintFr, OUT_NOTE_VAL, outRandom, aliceWallet.spendingPub);
+  const encryptedNote = await encryptNote(
+    { tokenMint: outMintFr, value: OUT_NOTE_VAL, random: outRandom, spendingPub: aliceWallet.spendingPub },
+    aliceWallet.viewingPub, tree.leafCount,
   );
-  console.log(`▶ recipient ATA = ${recipientAta.address.toBase58()}`);
 
-  const outNote = {
-    tokenMint: outMintFr,
-    value: OUT_AMT,
-    random: outRandom,
-    spendingPub: wallet.spendingPub,
-    commitment: outCommitment,
-    leafIndex: swapLeafIndex,
-    spendingPriv: wallet.spendingPriv,
-    encryptedBytes: outEncrypted.ciphertext,
-    ephemeralPub: outEncrypted.ephemeralPub,
-    viewingTag: outEncrypted.viewingTag,
+  const adapterIdFr      = leToFrReduced(keccak_256(MOCK_ADAPTER_ID.toBytes()) as Uint8Array);
+  const payloadKeccakFr  = leToFrReduced(keccak_256(actionPayload) as Uint8Array);
+  const adaptBindTagFr   = domainTagFr('b402/v1/adapt-bind');
+  const actionHash       = await poseidonTagged('adaptBind', payloadKeccakFr, outMintFr);
+
+  const nullifierVal = await nullifierHash(aliceWallet.spendingPriv, shieldRes.leafIndex);
+  const nullifierLe  = fr32Le(nullifierVal);
+  const nullPrefix   = shardPrefix(nullifierLe);
+  const dummyPrefix  = (nullPrefix + 1) & 0xffff;
+
+  const feeBind = await feeBindHash(0n, 0n);
+  const recipientBindVal = await poseidonTagged('recipientBind', 0n, 0n);
+
+  const witness: AdaptWitness = {
+    merkleRoot: rootBig,
+    nullifier: [nullifierVal, 0n],
+    commitmentOut: [outCommitment, 0n],
+    publicAmountIn: PUBLIC_AMOUNT_IN,
+    publicAmountOut: 0n,
+    publicTokenMint: inMintFr,
+    relayerFee: RELAYER_FEE,
+    relayerFeeBind: feeBind,
+    rootBind: 0n,
+    recipientBind: recipientBindVal,
+    commitTag:        domainTagFr('b402/v1/commit'),
+    nullTag:          domainTagFr('b402/v1/null'),
+    mkNodeTag:        domainTagFr('b402/v1/mk-node'),
+    spendKeyPubTag:   domainTagFr('b402/v1/spend-key-pub'),
+    feeBindTag:       domainTagFr('b402/v1/fee-bind'),
+    recipientBindTag: domainTagFr('b402/v1/recipient-bind'),
+    adapterId: adapterIdFr,
+    actionHash,
+    expectedOutValue: EXPECTED_OUT,
+    expectedOutMint: outMintFr,
+    adaptBindTag: adaptBindTagFr,
+    inTokenMint:    [inMintFr, 0n],
+    inValue:        [SHIELD_AMOUNT, 0n],
+    inRandom:       [shieldRes.note.random, 0n],
+    inSpendingPriv: [aliceWallet.spendingPriv, 1n],
+    inLeafIndex:    [shieldRes.leafIndex, 0n],
+    inSiblings:     [merkleProof.siblings, zeroCache.slice(0, 26)],
+    inPathBits:     [merkleProof.pathBits, Array(26).fill(0)],
+    inIsDummy:      [0, 1],
+    outValue:       [OUT_NOTE_VAL, 0n],
+    outRandom:      [outRandom, 0n],
+    outSpendingPub: [aliceWallet.spendingPub, 0n],
+    outIsDummy:     [0, 1],
+    relayerFeeRecipient: 0n,
+    recipientOwnerLow: 0n,
+    recipientOwnerHigh: 0n,
+    actionPayloadKeccakFr: payloadKeccakFr,
   };
 
-  console.log('▶ unshielding 100 out_mint to fresh recipient…');
-  const unshieldStart = Date.now();
-  const unshieldRes = await unshield({
-    connection, poolProgramId: POOL_ID, verifierProgramId: VERIFIER_ID,
-    prover, wallet, mint: outMint, note: outNote, merkleProof,
-    recipientTokenAccount: recipientAta.address,
-    recipientOwner: recipient.publicKey, relayer,
+  console.log(`▶ generating adapt proof…`);
+  const proveStart = Date.now();
+  const proof = await adaptProver.prove(witness);
+  console.log(`  done in ${Date.now() - proveStart}ms (${proof.publicInputsLeBytes.length} public inputs)`);
+
+  // --- 3. Build pool ix ---
+  // fee=0 still needs a TokenAccount in that slot (Anchor constraint).
+  // Use a dedicated ATA (not `in_vault`) to avoid the same pubkey appearing
+  // twice as writable in the tx — Solana's runtime rejects with
+  // "Overlapping copy" when a writable account meta duplicates.
+  const feeAtaSentinel = (await getOrCreateAssociatedTokenAccount(
+    connection, admin, inMint, admin.publicKey,
+  )).address;
+
+  const shardPda0 = nullifierShardPda(POOL_ID, nullPrefix);
+  const shardPda1 = nullifierShardPda(POOL_ID, dummyPrefix);
+
+  const poolIxData = concat(
+    instructionDiscriminator('adapt_execute'),
+    vecU8(proof.proofBytes),
+    proof.publicInputsLeBytes[0],   // merkle_root
+    proof.publicInputsLeBytes[1],   // nullifier[0]
+    proof.publicInputsLeBytes[2],   // nullifier[1]
+    proof.publicInputsLeBytes[3],   // commitment_out[0]
+    proof.publicInputsLeBytes[4],   // commitment_out[1]
+    u64Le(PUBLIC_AMOUNT_IN),
+    u64Le(0n),                       // public_amount_out
+    inMint.toBytes(),                // public_token_mint
+    u64Le(RELAYER_FEE),
+    proof.publicInputsLeBytes[9],    // relayer_fee_bind
+    proof.publicInputsLeBytes[10],   // root_bind
+    proof.publicInputsLeBytes[11],   // recipient_bind
+    proof.publicInputsLeBytes[18],   // adapter_id
+    proof.publicInputsLeBytes[19],   // action_hash
+    u64Le(EXPECTED_OUT),
+    outMint.toBytes(),               // expected_out_mint
+    // Omit encrypted_notes to save ~127B of ix data so the tx fits with
+    // shards inline (shards in ALT cause an init_if_needed error — leaving
+    // them inline here). Scanner auto-discovery is covered by scanner-e2e.ts;
+    // this script tests the adapt handler itself.
+    u32Le(0),                        // encrypted_notes vec len = 0
+    new Uint8Array([0b10]),          // in_dummy_mask
+    new Uint8Array([0b10]),          // out_dummy_mask
+    u16Le(nullPrefix), u16Le(dummyPrefix),
+    alice.publicKey.toBytes(),       // relayer_fee_recipient (unused when fee=0)
+    vecU8(rawAdapterIxData),
+    vecU8(actionPayload),
+  );
+
+  const poolIxKeys = [
+    { pubkey: alice.publicKey,                        isSigner: true,  isWritable: true  },
+    { pubkey: poolConfigPda(POOL_ID),                 isSigner: false, isWritable: false },
+    { pubkey: adapterRegistryPda(POOL_ID),            isSigner: false, isWritable: false },
+    { pubkey: tokenConfigPda(POOL_ID, inMint),        isSigner: false, isWritable: false },
+    { pubkey: tokenConfigPda(POOL_ID, outMint),       isSigner: false, isWritable: false },
+    { pubkey: vaultPda(POOL_ID, inMint),              isSigner: false, isWritable: true  },
+    { pubkey: vaultPda(POOL_ID, outMint),             isSigner: false, isWritable: true  },
+    { pubkey: treeStatePda(POOL_ID),                  isSigner: false, isWritable: true  },
+    { pubkey: VERIFIER_A_ID,                          isSigner: false, isWritable: false },
+    { pubkey: MOCK_ADAPTER_ID,                        isSigner: false, isWritable: false },
+    { pubkey: adapterAuthority,                       isSigner: false, isWritable: false },
+    { pubkey: adapterInTa.address,                    isSigner: false, isWritable: true  },
+    { pubkey: adapterOutTa.address,                   isSigner: false, isWritable: true  },
+    // relayer_fee_ta: any TA in IN mint owned by relayer_fee_recipient. Fee=0
+    // here, so we pass alice's IN ATA as a sentinel (handler skips owner check).
+    { pubkey: aliceInAta.address,                     isSigner: false, isWritable: true  },
+    { pubkey: shardPda0,                              isSigner: false, isWritable: true  },
+    { pubkey: shardPda1,                              isSigner: false, isWritable: true  },
+    { pubkey: TOKEN_PROGRAM_ID,                       isSigner: false, isWritable: false },
+    { pubkey: SystemProgram.programId,                isSigner: false, isWritable: false },
+  ];
+  const poolIx = new TransactionInstruction({
+    programId: POOL_ID,
+    keys: poolIxKeys,
+    data: Buffer.from(poolIxData),
   });
-  console.log(`  sig = ${unshieldRes.signature} (${Date.now() - unshieldStart}ms)`);
+  const cuIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 });
 
-  const recipientAcct = await getAccount(connection, recipientAta.address);
-  if (recipientAcct.amount !== 100n) throw new Error(`recipient=${recipientAcct.amount} != 100`);
-  console.log(`▶ recipient balance = ${recipientAcct.amount} ✓`);
+  // ALT packs the 12 stable accounts so the v0 tx fits the 1232 B cap.
+  const alt = await createTestAlt(connection, admin, [
+    poolConfigPda(POOL_ID),
+    adapterRegistryPda(POOL_ID),
+    vaultPda(POOL_ID, outMint),
+    treeStatePda(POOL_ID),
+    VERIFIER_A_ID,
+    MOCK_ADAPTER_ID,
+    adapterAuthority,
+    adapterInTa.address,
+    adapterOutTa.address,
+    aliceInAta.address,
+    TOKEN_PROGRAM_ID,
+    SystemProgram.programId,
+  ]);
 
-  const outVaultFinal = await getAccount(connection, vaultPda(POOL_ID, outMint));
-  if (outVaultFinal.amount !== 0n) throw new Error(`out_vault after unshield=${outVaultFinal.amount} != 0`);
-  console.log(`▶ out_vault after unshield = 0 ✓`);
+  console.log(`▶ adapt_execute…`);
+  const adaptStart = Date.now();
+  const blockhash = (await connection.getLatestBlockhash('confirmed')).blockhash;
+  const msg = new TransactionMessage({
+    payerKey: alice.publicKey,
+    recentBlockhash: blockhash,
+    instructions: [cuIx, poolIx],
+  }).compileToV0Message([alt]);
+  const vtx = new VersionedTransaction(msg);
+  vtx.sign([alice]);
+  const swapSig = await connection.sendRawTransaction(vtx.serialize(), { skipPreflight: true });
+  await connection.confirmTransaction(swapSig, 'confirmed');
+  console.log(`  sig = ${swapSig} (${Date.now() - adaptStart}ms)`);
 
-  console.log('\n✅ shield → private swap → unshield successful');
+  // --- Verify vault state ---
+  const inVaultAcct  = await getAccount(connection, vaultPda(POOL_ID, inMint));
+  const outVaultAcct = await getAccount(connection, vaultPda(POOL_ID, outMint));
+  if (inVaultAcct.amount  !== 0n)   throw new Error(`in_vault=${inVaultAcct.amount} != 0`);
+  if (outVaultAcct.amount !== 200n) throw new Error(`out_vault=${outVaultAcct.amount} != 200`);
+  console.log(`▶ in_vault=0, out_vault=200 ✓`);
+
+  const treeAfter = await fetchTreeState(connection, treeStatePda(POOL_ID));
+  const swapLeafIndex = treeAfter.leafCount - 1n;
+
+  // --- Unshield the adapt output ---
+  const zeroCacheAfterLe = (await buildZeroCache()).map(v => fr32Le(v));
+  const rootAfterBig = leToBigintBE(treeAfter.currentRoot);
+  const outProof = proveMostRecentLeaf(
+    outCommitment, swapLeafIndex, rootAfterBig, treeAfter.frontier, zeroCacheAfterLe,
+  );
+  const charlieAta = await getOrCreateAssociatedTokenAccount(connection, admin, outMint, charlie.publicKey);
+  const outNote = {
+    tokenMint: outMintFr, value: OUT_NOTE_VAL, random: outRandom,
+    spendingPub: aliceWallet.spendingPub, commitment: outCommitment,
+    leafIndex: swapLeafIndex, spendingPriv: aliceWallet.spendingPriv,
+    encryptedBytes: encryptedNote.ciphertext,
+    ephemeralPub: encryptedNote.ephemeralPub,
+    viewingTag: encryptedNote.viewingTag,
+  };
+  console.log(`▶ unshielding ${OUT_NOTE_VAL} out_mint to charlie…`);
+  const unshieldRes = await unshield({
+    connection, poolProgramId: POOL_ID, verifierProgramId: VERIFIER_T_ID,
+    prover: transactProver, wallet: aliceWallet, mint: outMint, note: outNote,
+    merkleProof: outProof,
+    recipientTokenAccount: charlieAta.address,
+    recipientOwner: charlie.publicKey, relayer: alice,
+  });
+
+  const charlieAcct = await getAccount(connection, charlieAta.address);
+  if (charlieAcct.amount !== OUT_NOTE_VAL) throw new Error(`charlie got ${charlieAcct.amount} != ${OUT_NOTE_VAL}`);
+  console.log(`▶ charlie balance = ${charlieAcct.amount} ✓`);
+
+  console.log('\n✅ shield → REAL-ZK adapt_execute → unshield successful');
   console.log(`   shield   ${shieldRes.signature}`);
-  console.log(`   swap     ${swapSig}`);
+  console.log(`   adapt    ${swapSig}`);
   console.log(`   unshield ${unshieldRes.signature}`);
 }
 
@@ -285,17 +386,51 @@ function fr32Le(v: bigint): Uint8Array {
   for (let i = 0; i < 32; i++) { out[i] = Number(x & 0xffn); x >>= 8n; }
   return out;
 }
+function leToBigintBE(b: Uint8Array): bigint {
+  let v = 0n;
+  for (let i = 31; i >= 0; i--) v = (v << 8n) | BigInt(b[i]);
+  return v;
+}
+
+async function createTestAlt(
+  connection: Connection, authority: Keypair, addresses: PublicKey[],
+): Promise<AddressLookupTableAccount> {
+  const slot = await connection.getSlot('finalized');
+  const [createIx, altKey] = AddressLookupTableProgram.createLookupTable({
+    authority: authority.publicKey,
+    payer: authority.publicKey,
+    recentSlot: slot,
+  });
+  await sendAndConfirmTransaction(connection, new Transaction().add(createIx), [authority]);
+  for (let i = 0; i < addresses.length; i += 20) {
+    const batch = addresses.slice(i, i + 20);
+    const ext = AddressLookupTableProgram.extendLookupTable({
+      payer: authority.publicKey,
+      authority: authority.publicKey,
+      lookupTable: altKey,
+      addresses: batch,
+    });
+    await sendAndConfirmTransaction(connection, new Transaction().add(ext), [authority]);
+  }
+  await new Promise(r => setTimeout(r, 500));
+  const fetched = await connection.getAddressLookupTable(altKey);
+  if (!fetched.value) throw new Error('ALT fetch failed');
+  return fetched.value;
+}
 
 async function initPool(connection: Connection, admin: Keypair): Promise<void> {
   const data = Buffer.concat([
     Buffer.from(instructionDiscriminator('init_pool')),
     admin.publicKey.toBuffer(),
     Buffer.from([1]),
-    VERIFIER_ID.toBuffer(),
-    VERIFIER_ID.toBuffer(),
-    VERIFIER_ID.toBuffer(),
+    VERIFIER_T_ID.toBuffer(),
+    VERIFIER_A_ID.toBuffer(),
+    VERIFIER_T_ID.toBuffer(),
     admin.publicKey.toBuffer(),
   ]);
+  const treasury = PublicKey.findProgramAddressSync(
+    [new TextEncoder().encode('b402/v1'), new TextEncoder().encode('treasury')], POOL_ID,
+  )[0];
   const ix = new TransactionInstruction({
     programId: POOL_ID,
     keys: [
@@ -303,7 +438,7 @@ async function initPool(connection: Connection, admin: Keypair): Promise<void> {
       { pubkey: poolConfigPda(POOL_ID),      isSigner: false, isWritable: true  },
       { pubkey: treeStatePda(POOL_ID),       isSigner: false, isWritable: true  },
       { pubkey: adapterRegistryPda(POOL_ID), isSigner: false, isWritable: true  },
-      { pubkey: treasuryPda(POOL_ID),        isSigner: false, isWritable: true  },
+      { pubkey: treasury,                    isSigner: false, isWritable: true  },
       { pubkey: SystemProgram.programId,     isSigner: false, isWritable: false },
     ],
     data,
@@ -315,7 +450,6 @@ async function initPool(connection: Connection, admin: Keypair): Promise<void> {
 async function addTokenConfig(connection: Connection, admin: Keypair, mint: PublicKey): Promise<void> {
   const existing = await connection.getAccountInfo(tokenConfigPda(POOL_ID, mint));
   if (existing) return;
-
   const data = Buffer.from(instructionDiscriminator('add_token_config'));
   const ix = new TransactionInstruction({
     programId: POOL_ID,
@@ -341,14 +475,19 @@ async function registerAdapter(
   connection: Connection, admin: Keypair,
   adapterProgramId: PublicKey, executeDisc: Uint8Array,
 ): Promise<void> {
-  // Args: AdapterRegistration { program_id: Pubkey, allowed_instructions: Vec<[u8;8]> }
+  const registryAcct = await connection.getAccountInfo(adapterRegistryPda(POOL_ID));
+  if (registryAcct && registryAcct.data.length > 12) {
+    const target = adapterProgramId.toBuffer();
+    for (let i = 12; i + 32 <= registryAcct.data.length; i++) {
+      if (registryAcct.data.slice(i, i + 32).equals(target)) return;
+    }
+  }
   const args = Buffer.concat([
     adapterProgramId.toBuffer(),
-    Buffer.from(u32Le(1)),       // 1 allowed instruction
-    Buffer.from(executeDisc),    // the execute discriminator
+    Buffer.from(u32Le(1)),
+    Buffer.from(executeDisc),
   ]);
   const data = Buffer.concat([Buffer.from(instructionDiscriminator('register_adapter')), args]);
-
   const ix = new TransactionInstruction({
     programId: POOL_ID,
     keys: [
@@ -362,5 +501,4 @@ async function registerAdapter(
   await sendAndConfirmTransaction(connection, new Transaction().add(cu, ix), [admin]);
 }
 
-void treasuryPda; // treasuryPda used indirectly via init_pool path; silence unused-import
 main().catch((e) => { console.error('\n❌ swap-e2e failed:', e); process.exit(1); });
