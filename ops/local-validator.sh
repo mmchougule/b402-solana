@@ -20,7 +20,7 @@ if [[ "${1:-}" == "--reset" ]]; then
 fi
 
 # Ensure .so files are built.
-for so in b402_verifier_transact b402_pool b402_jupiter_adapter b402_mock_adapter; do
+for so in b402_verifier_transact b402_verifier_adapt b402_pool b402_jupiter_adapter b402_mock_adapter; do
     if [[ ! -f "target/deploy/${so}.so" ]]; then
         echo "✗ missing target/deploy/${so}.so"
         echo "  run: cargo build-sbf --tools-version v1.54 --manifest-path programs/${so//_/-}/Cargo.toml"
@@ -30,20 +30,23 @@ done
 
 # Program IDs — must match `declare_id!` in each program source.
 POOL_ID=42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y
-VERIFIER_ID=Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK
+VERIFIER_TRANSACT_ID=Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK
+VERIFIER_ADAPT_ID=3Y2tyhNSaUiW5AcZcmFGRyTMdnroxHxc5GqFQPcMTZae
 ADAPTER_ID=3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7
 MOCK_ADAPTER_ID=89kw33YDcbXfiayVNauz599LaDm51EuU8amWydpjYKgp
 
 echo "→ starting solana-test-validator"
-echo "  pool     = $POOL_ID"
-echo "  verifier = $VERIFIER_ID"
-echo "  jupiter  = $ADAPTER_ID"
-echo "  mock     = $MOCK_ADAPTER_ID"
+echo "  pool             = $POOL_ID"
+echo "  verifier-transact = $VERIFIER_TRANSACT_ID"
+echo "  verifier-adapt    = $VERIFIER_ADAPT_ID"
+echo "  jupiter           = $ADAPTER_ID"
+echo "  mock              = $MOCK_ADAPTER_ID"
 echo ""
 
 exec solana-test-validator \
     $RESET \
-    --bpf-program "$VERIFIER_ID" target/deploy/b402_verifier_transact.so \
+    --bpf-program "$VERIFIER_TRANSACT_ID" target/deploy/b402_verifier_transact.so \
+    --bpf-program "$VERIFIER_ADAPT_ID" target/deploy/b402_verifier_adapt.so \
     --bpf-program "$POOL_ID" target/deploy/b402_pool.so \
     --bpf-program "$ADAPTER_ID" target/deploy/b402_jupiter_adapter.so \
     --bpf-program "$MOCK_ADAPTER_ID" target/deploy/b402_mock_adapter.so \
