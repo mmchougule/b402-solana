@@ -40,3 +40,5 @@ docs/SUBMISSION.md
 
 # Deploy authority keypairs — never commit, back up locally.
 ops/keypairs/
+BUILD-STATE.md
+ENGINEER-REVIEW.md

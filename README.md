@@ -24,19 +24,21 @@ viewing-key model; ported to Solana's account-centric runtime.
 - 71 tests across Rust crypto, verifier, Circom parity, prover, on-chain
   (litesvm), and SDK tx-size regression. See `docs/REPRODUCE.md`.
 
-**Devnet deployment (2026-04-23)**
+**Devnet deployment (2026-04-25)**
 
-| Program | ID | Feature |
-|---|---|---|
-| Pool | `42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y` | adapt-devnet |
-| Verifier | `Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK` | — |
-| Jupiter adapter | `3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7` | — |
-| b402 ALT | `9FPYufa1KDkrn1VgfjkR7R667hbnTA7CNtmy38QcsuNj` | 14 entries |
+| Program | ID |
+|---|---|
+| Pool | `42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y` |
+| Verifier (transact) | `Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK` |
+| Verifier (adapt) | `3Y2tyhNSaUiW5AcZcmFGRyTMdnroxHxc5GqFQPcMTZae` |
+| Jupiter adapter | `3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7` |
+| Mock adapter | `89kw33YDcbXfiayVNauz599LaDm51EuU8amWydpjYKgp` |
 
-**Live shield/unshield on devnet:**
+**Live end-to-end on devnet — shield → real Groth16 adapt swap → unshield:**
 
-- Shield: [`5XLaccuw…pmsLyZB`](https://explorer.solana.com/tx/5XLaccuw6tv6AWowMDKLK24zTSxD4Ej2nuRwSnpbLWZSHU19SPb7n8mNpx8G4fHEHxBMRo5GiYPyPj6G4pmsLyZB?cluster=devnet)
-- Unshield: [`38mKQXBP…G77PD`](https://explorer.solana.com/tx/38mKQXBPuwtYhM5JvbyJA2se9cehMvw1mUbevhERAkZdni7a6VTYdYNx66nZ5KqzbgUng1SsbCiQEJX2F3XG77PD?cluster=devnet)
+- Shield: [`59ahVAQN…Qyk3u`](https://explorer.solana.com/tx/59ahVAQNKGce4d5QRcfZuxYcGsPuXXrgbGqSTQpi4ByCuAtJtPyipypb8jLJwiqQf64suYjWHz625ynPNcQyk3u?cluster=devnet)
+- Adapt (real ZK proof, 23 public inputs): [`5AVK983L…vzBf`](https://explorer.solana.com/tx/5AVK983LcxXN3851GpAiZG58cUGncRjfDYKLU1oziWyWVps8YYTnaDW2r27cYb65NUcYUSVYstPZNqq8RZMEvzBf?cluster=devnet)
+- Unshield: [`e9KvuQn8…CEv6u`](https://explorer.solana.com/tx/e9KvuQn8F2iN9Gr8gzdVtKSHXjVPWyA623kUbqRAhYWhvwQP1GVsJwZfP1NCB8rGswmrVfgvxgmhVRzgRZCEv6u?cluster=devnet)
 
 See `docs/TX-WALKTHROUGH.md` for a layer-by-layer anatomy of both, and
 `docs/REPRODUCE.md` for the exact commands to re-run everything locally.
@@ -47,7 +49,8 @@ See `docs/TX-WALKTHROUGH.md` for a layer-by-layer anatomy of both, and
 |---|---|---|---|
 | Shield | 1,157 B | 239,224 CU | 5,000 lamports (~$0.001) |
 | Unshield | ~1,150 B | ~350k CU | 5,000 lamports |
-| Private swap (mainnet-fork, SolFi V2) | 1,231 B | ~60k + Jupiter route CU | 5,000 lamports |
+| Adapt swap (mock adapter, real Groth16) | 1,214 B | ~600k CU | 5,000 lamports |
+| Adapt swap (mainnet-fork, real Jupiter SolFi V2) | 1,231 B | ~660k CU | 5,000 lamports |
 
 Proof verification fits in one instruction (under Solana's 1.4M CU budget),
 so no multi-tx split required — cheaper and simpler than the EVM
@@ -56,23 +59,27 @@ counterpart.
 ## What's implemented
 
 ### Programs (`programs/`)
-- `b402-pool` — init/shield/unshield/transact + admin (pause, register adapter) + `adapt_execute_devnet` feature-gated handler. **That handler trusts the caller's output commitment and claims no security property** — devnet-only; see `docs/PHASE-2.md` for what the full `adapt_execute` circuit closes.
-- `b402-verifier-transact` — Groth16 verifier wrapping `Lightprotocol/groth16-solana`, VK baked from ceremony at build time
+- `b402-pool` — init/shield/unshield/transact + `adapt_execute` (composable private execution with full ZK binding to adapter ID, action hash, expected mint and value) + admin (pause, set verifier, register adapter)
+- `b402-verifier-transact` — Groth16 verifier for the 18-input transact circuit, VK baked from ceremony at build time
+- `b402-verifier-adapt` — Groth16 verifier for the 23-input adapt circuit (transact's bindings + adapter ID + action hash + expected out mint/value)
 - `b402-jupiter-adapter` — CPI adapter forwarding `action_payload` to Jupiter V6
 - `b402-mock-adapter` — test-only adapter for balance-delta invariant tests
 
 ### Circuits (`circuits/`)
 - `transact.circom` — 2-in / 2-out shielded transaction, 17,259 R1CS constraints, 18 public inputs
+- `adapt.circom` — adapt circuit, 17,582 R1CS constraints, 23 public inputs (transact's 18 + adapter binding fields)
 - Sub-circuits for commitment, nullifier, spending-key derivation, merkle path
-- Tests: primitives, Rust ↔ TS parity, witness generation, end-to-end snarkjs prove-verify
+- Tests: primitives, Rust ↔ TS parity, witness generation, end-to-end snarkjs prove-verify (37 total)
 
 ### SDK (`packages/sdk/`)
 - `shield(params)` — build + submit a shield tx
 - `unshield(params)` — build + submit an unshield tx, supports merkle-proof override or `ClientMerkleTree`
-- `privateSwap(params)` — compose a shielded swap via `adapt_execute_devnet` (Phase 1, devnet-gated)
-- `buildPrivateSwapTx(inputs)` — pure v0-tx builder for size-regression tests
 - `Scanner` — log-subscription + viewtag-filtered note discovery
 - `ClientMerkleTree`, `buildWallet`, `NoteStore` — client-side crypto primitives
+
+### Prover (`packages/prover/`)
+- `TransactProver` — generates Groth16 proofs for transact (18 public inputs)
+- `AdaptProver` — generates Groth16 proofs for adapt (23 public inputs); composable swap demonstrated in `examples/swap-e2e.ts`
 
 ### Ops (`ops/`)
 - `local-validator.sh` — boots solana-test-validator with all 4 programs pre-deployed
@@ -94,6 +101,7 @@ cd ../crypto && cargo test
 
 # 2. Build programs for BPF
 cargo build-sbf --tools-version v1.54 --manifest-path programs/b402-verifier-transact/Cargo.toml
+cargo build-sbf --tools-version v1.54 --manifest-path programs/b402-verifier-adapt/Cargo.toml
 cargo build-sbf --tools-version v1.54 --manifest-path programs/b402-pool/Cargo.toml --features test-mock
 cargo build-sbf --tools-version v1.54 --manifest-path programs/b402-jupiter-adapter/Cargo.toml
 cargo build-sbf --tools-version v1.54 --manifest-path programs/b402-mock-adapter/Cargo.toml
@@ -111,9 +119,13 @@ cd examples && pnpm e2e                   # terminal 2 — runs shield → unshi
 # 6. Same e2e against devnet (uses CLI wallet + deployed programs)
 RPC_URL=https://api.devnet.solana.com pnpm --filter=@b402ai/solana-examples e2e
 
-# 7. Private swap on localnet (shield → mock adapter → unshield)
+# 7. Private swap on localnet (shield → real Groth16 adapt proof → mock adapter → unshield)
 ./ops/local-validator.sh --reset          # terminal 1
 cd examples && pnpm swap-e2e              # terminal 2
+
+# 7b. Same private swap, but on devnet against deployed programs.
+#     Funded CLI wallet pays rent for fresh nullifier shards (~0.07 SOL each).
+RPC_URL=https://api.devnet.solana.com pnpm --filter=@b402ai/solana-examples swap-e2e
 
 # 7a. Scanner auto-discovery: Alice privately sends to Bob, Bob's scanner
 #     discovers the note from public logs, Bob unshields to Charlie.
@@ -180,20 +192,19 @@ b402-solana/
 
 ## What's intentionally stubbed
 
-See `ENGINEER-REVIEW.md` for the full "please flag in review" list. Summary:
-
-- **Full `adapt_execute` (with ZK)** — the devnet path (`adapt_execute_devnet`,
-  feature-gated) validates pool-side plumbing + balance-delta invariant.
-  The adapt circuit + `b402_verifier_adapt` program are Phase 2.
 - **Relayer / indexer service** — `Scanner` handles the indexer side from
   the client. A Fastify HTTP relayer matching our EVM conventions is not
   written.
 - **Stealth-address bech32 encoding** — primitives exist; the `b402sol1q…`
   encode/decode layer is not written.
 - **Production trusted setup** — current VK is from a throwaway
-  single-contributor ceremony. Mainnet needs Phase-2 ceremony per PRD-08.
+  single-contributor ceremony. Mainnet needs a multi-party ceremony per
+  PRD-08.
 - **Admin multisig** — v1 uses single-key admin; PRD-03 §9 specifies
   full multisig co-signer pattern.
+- **Beyond Jupiter** — Kamino, Drift, Orca adapters are scoped in
+  PRD-05 but not yet implemented. The same circuit + per-protocol adapter
+  pattern applies.
 
 ## License
 
