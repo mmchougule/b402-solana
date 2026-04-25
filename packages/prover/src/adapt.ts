@@ -1,10 +1,9 @@
 /**
- * @b402ai/solana-prover — Groth16 proof generation for the b402 transact circuit.
+ * AdaptProver — Groth16 proof generation for the b402 adapt circuit.
  *
- * Wraps snarkjs with the byte-format conversions required by the on-chain
- * `b402-verifier-transact` program. Output is a 256-byte `proof` buffer
- * (A-negated 64 || B 128 || C 64) + an array of 16 32-byte LE public inputs
- * suitable for direct inclusion in the pool program's instruction data.
+ * Sibling of TransactProver, different witness shape + VK. Output has 23
+ * public inputs (18 transact-layout + 5 adapt-specific: adapterId,
+ * actionHash, expectedOutValue, expectedOutMint, adaptBindTag).
  */
 
 // @ts-expect-error — snarkjs lacks types
@@ -12,41 +11,42 @@ import * as snarkjs from 'snarkjs';
 import fs from 'node:fs';
 
 import {
-  g1JacFromSnarkjs,
-  g2JacFromSnarkjs,
-  g1ToBytes64,
-  g1ToBytes64ProofA,
-  g2ToBytes128,
+  g1JacFromSnarkjs, g2JacFromSnarkjs,
+  g1ToBytes64, g1ToBytes64ProofA, g2ToBytes128,
   decToBeBytes32,
 } from './g1g2.js';
-import { TRANSACT_PUBLIC_INPUT_COUNT } from '@b402ai/solana-shared';
 
-export {
-  AdaptProver,
-  ADAPT_PUBLIC_INPUT_COUNT,
-  type AdaptWitness,
-  type AdaptProof,
-} from './adapt.js';
+/** Adapt circuit has 23 public inputs per circuits/adapt.circom. */
+export const ADAPT_PUBLIC_INPUT_COUNT = 23;
 
-export interface TransactWitness {
+export interface AdaptWitness {
+  // First 18 — identical to transact layout.
   merkleRoot: bigint;
   nullifier: [bigint, bigint];
   commitmentOut: [bigint, bigint];
   publicAmountIn: bigint;
-  publicAmountOut: bigint;
-  publicTokenMint: bigint;
+  publicAmountOut: bigint;        // adapt requires 0
+  publicTokenMint: bigint;         // IN mint as Fr
   relayerFee: bigint;
   relayerFeeBind: bigint;
   rootBind: bigint;
   recipientBind: bigint;
-  // Domain tags
+
   commitTag: bigint;
   nullTag: bigint;
   mkNodeTag: bigint;
   spendKeyPubTag: bigint;
   feeBindTag: bigint;
   recipientBindTag: bigint;
-  // Private inputs
+
+  // Adapt-specific — 5 more.
+  adapterId: bigint;
+  actionHash: bigint;
+  expectedOutValue: bigint;
+  expectedOutMint: bigint;         // OUT mint as Fr
+  adaptBindTag: bigint;
+
+  // Private inputs.
   inTokenMint: [bigint, bigint];
   inValue: [bigint, bigint];
   inRandom: [bigint, bigint];
@@ -55,14 +55,20 @@ export interface TransactWitness {
   inSiblings: [bigint[], bigint[]];
   inPathBits: [number[], number[]];
   inIsDummy: [0 | 1, 0 | 1];
-  outTokenMint: [bigint, bigint];
+
+  // Note: adapt circuit derives outTokenMint from expectedOutMint, so the
+  // witness does NOT carry outTokenMint.
   outValue: [bigint, bigint];
   outRandom: [bigint, bigint];
   outSpendingPub: [bigint, bigint];
   outIsDummy: [0 | 1, 0 | 1];
+
   relayerFeeRecipient: bigint;
   recipientOwnerLow: bigint;
   recipientOwnerHigh: bigint;
+
+  /** keccak256(action_payload) reduced mod p. */
+  actionPayloadKeccakFr: bigint;
 }
 
 export interface ProverArtifacts {
@@ -71,34 +77,33 @@ export interface ProverArtifacts {
   vkeyPath?: string;
 }
 
-export interface TransactProof {
+export interface AdaptProof {
   /** 256 bytes: proofA(64, y-negated) || proofB(128) || proofC(64). */
   proofBytes: Uint8Array;
-  /** 16 × 32 bytes LE, matches Solana program instruction layout. */
+  /** 23 × 32 bytes LE. */
   publicInputsLeBytes: Uint8Array[];
-  /** Decimal strings, for debugging / SDK cross-check. */
+  /** Decimal strings. */
   publicSignals: string[];
 }
 
-export class TransactProver {
+export class AdaptProver {
   constructor(private readonly artifacts: ProverArtifacts) {
     for (const p of [artifacts.wasmPath, artifacts.zkeyPath]) {
       if (!fs.existsSync(p)) {
-        throw new Error(`prover artifact missing: ${p}`);
+        throw new Error(`adapt prover artifact missing: ${p}`);
       }
     }
   }
 
-  /** Generate a proof for a transact witness. Does NOT verify locally. */
-  async prove(witness: TransactWitness): Promise<TransactProof> {
+  async prove(witness: AdaptWitness): Promise<AdaptProof> {
     const input = witnessToSnarkjsInput(witness);
     const { proof, publicSignals } = await snarkjs.groth16.fullProve(
       input, this.artifacts.wasmPath, this.artifacts.zkeyPath,
     );
 
-    if (publicSignals.length !== TRANSACT_PUBLIC_INPUT_COUNT) {
+    if (publicSignals.length !== ADAPT_PUBLIC_INPUT_COUNT) {
       throw new Error(
-        `public signal count mismatch: got ${publicSignals.length}, expected ${TRANSACT_PUBLIC_INPUT_COUNT}`,
+        `adapt public signal count mismatch: got ${publicSignals.length}, expected ${ADAPT_PUBLIC_INPUT_COUNT}`,
       );
     }
 
@@ -116,7 +121,6 @@ export class TransactProver {
     proofBytes.set(cBytes, 192);
 
     const publicInputsBe = (publicSignals as string[]).map(decToBeBytes32);
-    // Solana program expects LE — reverse each.
     const publicInputsLeBytes = publicInputsBe.map((be) => {
       const le = new Uint8Array(32);
       for (let i = 0; i < 32; i++) le[i] = be[31 - i];
@@ -129,22 +133,9 @@ export class TransactProver {
       publicSignals: publicSignals as string[],
     };
   }
-
-  /** Verify locally with snarkjs — useful for SDK tests before submitting on-chain. */
-  async verifyLocal(proof: TransactProof): Promise<boolean> {
-    if (!this.artifacts.vkeyPath) throw new Error('vkeyPath not provided');
-    const vKey = JSON.parse(fs.readFileSync(this.artifacts.vkeyPath, 'utf-8'));
-    // Reconstruct snarkjs-style proof from our bytes by re-using the
-    // original signals — in practice SDK will call prove() + immediately
-    // use the bytes, and verifyLocal is a belt-and-suspenders helper that
-    // re-proves cheaply from cached snarkjs output. For the production SDK
-    // path, we rely on the on-chain verify. This helper is test-only.
-    const _ = vKey;
-    throw new Error('verifyLocal: not implemented on proof bytes; call snarkjs.groth16.verify directly in tests');
-  }
 }
 
-function witnessToSnarkjsInput(w: TransactWitness): Record<string, unknown> {
+function witnessToSnarkjsInput(w: AdaptWitness): Record<string, unknown> {
   const tostr = (x: bigint) => x.toString();
   return {
     merkleRoot: tostr(w.merkleRoot),
@@ -163,6 +154,11 @@ function witnessToSnarkjsInput(w: TransactWitness): Record<string, unknown> {
     spendKeyPubTag: tostr(w.spendKeyPubTag),
     feeBindTag: tostr(w.feeBindTag),
     recipientBindTag: tostr(w.recipientBindTag),
+    adapterId: tostr(w.adapterId),
+    actionHash: tostr(w.actionHash),
+    expectedOutValue: tostr(w.expectedOutValue),
+    expectedOutMint: tostr(w.expectedOutMint),
+    adaptBindTag: tostr(w.adaptBindTag),
     inTokenMint: w.inTokenMint.map(tostr),
     inValue: w.inValue.map(tostr),
     inRandom: w.inRandom.map(tostr),
@@ -171,7 +167,6 @@ function witnessToSnarkjsInput(w: TransactWitness): Record<string, unknown> {
     inSiblings: w.inSiblings.map((row) => row.map(tostr)),
     inPathBits: w.inPathBits.map((row) => row.map(String)),
     inIsDummy: w.inIsDummy.map(String),
-    outTokenMint: w.outTokenMint.map(tostr),
     outValue: w.outValue.map(tostr),
     outRandom: w.outRandom.map(tostr),
     outSpendingPub: w.outSpendingPub.map(tostr),
@@ -179,5 +174,6 @@ function witnessToSnarkjsInput(w: TransactWitness): Record<string, unknown> {
     relayerFeeRecipient: tostr(w.relayerFeeRecipient),
     recipientOwnerLow: tostr(w.recipientOwnerLow),
     recipientOwnerHigh: tostr(w.recipientOwnerHigh),
+    actionPayloadKeccakFr: tostr(w.actionPayloadKeccakFr),
   };
 }

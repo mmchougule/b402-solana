@@ -3,6 +3,9 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "e2e": "tsx e2e.ts",
     "swap-e2e": "tsx swap-e2e.ts",
@@ -14,6 +17,7 @@
     "@b402ai/solana": "workspace:*",
     "@b402ai/solana-shared": "workspace:*",
     "@b402ai/solana-prover": "workspace:*",
+    "@noble/hashes": "^1.5.0",
     "@solana/web3.js": "^1.95.8",
     "@solana/spl-token": "^0.4.9"
   },
