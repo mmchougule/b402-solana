@@ -59,6 +59,14 @@ pub mod b402_pool {
         instructions::admin::unpause(ctx, which)
     }
 
+    pub fn set_verifier(
+        ctx: Context<AdminAction>,
+        kind: instructions::admin::VerifierKind,
+        new_id: Pubkey,
+    ) -> Result<()> {
+        instructions::admin::set_verifier(ctx, kind, new_id)
+    }
+
     pub fn register_adapter(ctx: Context<RegisterAdapter>, info: AdapterRegistration) -> Result<()> {
         instructions::admin::register_adapter(ctx, info)
     }
@@ -90,7 +98,7 @@ pub mod b402_pool {
     /// `instructions/adapt_execute.rs`.
     pub fn adapt_execute<'info>(
         ctx: Context<'_, '_, '_, 'info, AdaptExecute<'info>>,
-        args: AdaptExecuteArgs,
+        args: Box<AdaptExecuteArgs>,
     ) -> Result<()> {
         instructions::adapt_execute::handler(ctx, args)
     }
