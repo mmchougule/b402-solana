@@ -50,40 +50,42 @@ pub const KAMINO_LEND_PROGRAM_ID: Pubkey = anchor_lang::pubkey!(
 
 // Anchor instruction discriminators — first 8 bytes of sha256("global:<name>").
 //
-// TODO(verify): unverified; pre-mainnet, run against live mainnet-fork to
+// IDL: verified 2026-04-26 against Kamino-Finance/klend master.
 // confirm against the on-chain IDL. Kamino uses Anchor framing per PRD-09 §2,
 // so the discriminator scheme matches Anchor's standard.
 
 /// `init_obligation` discriminator (Kamino).
-/// TODO(verify): regenerate from live IDL pre-mainnet.
+/// IDL: verified 2026-04-26 (Kamino-Finance/klend master).
 pub const KAMINO_IX_INIT_OBLIGATION: [u8; 8] = [251, 10, 231, 76, 27, 11, 159, 96];
 
 /// `refresh_reserve` discriminator (Kamino).
-/// TODO(verify): regenerate from live IDL pre-mainnet.
+/// IDL: verified 2026-04-26 (Kamino-Finance/klend master).
 pub const KAMINO_IX_REFRESH_RESERVE: [u8; 8] = [2, 218, 138, 235, 79, 201, 25, 102];
 
 /// `refresh_obligation` discriminator (Kamino).
-/// TODO(verify): regenerate from live IDL pre-mainnet.
+/// IDL: verified 2026-04-26 (Kamino-Finance/klend master).
 pub const KAMINO_IX_REFRESH_OBLIGATION: [u8; 8] = [33, 132, 147, 228, 151, 192, 72, 89];
 
 /// `deposit_reserve_liquidity_and_obligation_collateral` discriminator.
 /// Combined op preferred for CU per PRD-09 §3 / task brief §3.
-/// TODO(verify): regenerate from live IDL pre-mainnet.
+/// IDL: verified 2026-04-26 (Kamino-Finance/klend master).
 pub const KAMINO_IX_DEPOSIT_RESERVE_LIQUIDITY_AND_OBLIGATION_COLLATERAL: [u8; 8] =
     [129, 199, 4, 2, 222, 39, 26, 46];
 
 /// `withdraw_obligation_collateral_and_redeem_reserve_collateral` discriminator.
-/// TODO(verify): regenerate from live IDL pre-mainnet.
+/// IDL: verified 2026-04-26 vs Kamino-Finance/klend master via
+/// sha256("global:withdraw_obligation_collateral_and_redeem_reserve_collateral")[..8].
 pub const KAMINO_IX_WITHDRAW_OBLIGATION_COLLATERAL_AND_REDEEM_RESERVE_COLLATERAL: [u8; 8] =
-    [75, 93, 47, 209, 91, 72, 27, 158];
+    [75, 93, 93, 220, 34, 150, 218, 196];
 
 /// `borrow_obligation_liquidity` discriminator.
-/// TODO(verify): regenerate from live IDL pre-mainnet.
+/// IDL: verified 2026-04-26 vs Kamino-Finance/klend master via
+/// sha256("global:borrow_obligation_liquidity")[..8].
 pub const KAMINO_IX_BORROW_OBLIGATION_LIQUIDITY: [u8; 8] =
-    [121, 127, 18, 204, 62, 134, 50, 233];
+    [121, 127, 18, 204, 73, 245, 225, 65];
 
 /// `repay_obligation_liquidity` discriminator.
-/// TODO(verify): regenerate from live IDL pre-mainnet.
+/// IDL: verified 2026-04-26 (Kamino-Finance/klend master).
 pub const KAMINO_IX_REPAY_OBLIGATION_LIQUIDITY: [u8; 8] =
     [145, 178, 13, 225, 76, 240, 147, 72];
 
