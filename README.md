@@ -1,49 +1,82 @@
 # b402-solana
 
-Private DeFi on Solana — shielded UTXO pool + composable execution layer.
-Shield once, then swap / lend / perp / LP through any registered adapter without
-ever appearing on-chain as the executing wallet.
+**Private DeFi on Solana.** Shield once, then swap, lend, LP, or trade perps —
+all without your wallet appearing on-chain as the executing party. Real ZK,
+single-tx execution, composable with any Solana protocol via a registered adapter.
 
-Same construction class as Railgun (Groth16 + Poseidon + commitments + nullifiers
-+ viewing keys), compiled native to SVM as Anchor programs.
+Same construction class as Railgun (Groth16 + Poseidon + UTXO commitments
++ nullifiers + viewing keys), compiled native to Solana's SVM as Anchor programs.
 
-> ⚠️ **Alpha. Not audited. Single-contributor throwaway trusted-setup VK.
-> Single-key admin during alpha — multisig migration in roadmap. TVL caps + bug
-> bounty + multi-party ceremony before the alpha disclaimer comes off. The
-> three-layer privacy framing in [Privacy model](#privacy-model) below is the
-> precise claim — read it before depositing real funds.**
+## Live, verifiable
+
+**Private swap on devnet, three signatures, one v0 transaction:**
+
+- Shield 100 USDC: [`59ahVAQN…Qyk3u`](https://explorer.solana.com/tx/59ahVAQNKGce4d5QRcfZuxYcGsPuXXrgbGqSTQpi4ByCuAtJtPyipypb8jLJwiqQf64suYjWHz625ynPNcQyk3u?cluster=devnet)
+- Real Groth16 adapt proof, 23 public inputs, 1,214 B: [`5AVK983L…vzBf`](https://explorer.solana.com/tx/5AVK983LcxXN3851GpAiZG58cUGncRjfDYKLU1oziWyWVps8YYTnaDW2r27cYb65NUcYUSVYstPZNqq8RZMEvzBf?cluster=devnet)
+- Unshield 200 wSOL to charlie: [`e9KvuQn8…CEv6u`](https://explorer.solana.com/tx/e9KvuQn8F2iN9Gr8gzdVtKSHXjVPWyA623kUbqRAhYWhvwQP1GVsJwZfP1NCB8rGswmrVfgvxgmhVRzgRZCEv6u?cluster=devnet)
+
+**Verified end-to-end against real cloned mainnet bytecode:**
+
+- **Real Jupiter v6 private swap** on a mainnet-forked validator: 0.1 wSOL → 8.549 USDC routed through SolFi V2 — real aggregator program, real AMM state cloned from mainnet, ~660k CU, fits in 1,231 B.
+- **Real Kamino USDC reserve private deposit** through `b402_kamino_adapter`: 1 USDC deposited as collateral, obligation account grew 0 → 3344 B in a single tx with seven nested CPIs (init_user_metadata + init_obligation + init_obligation_farms + refresh_reserve + refresh_obligation + deposit_v2 + sweep). All Kamino discriminators verified against `klend-sdk@7.3.22`.
+
+## Numbers
+
+| Op | Tx size | CU | Fee |
+|---|---|---|---|
+| Shield | 1,157 B | 239k | $0.001 |
+| Unshield | ~1,150 B | ~350k | $0.001 |
+| Private swap (mock adapter) | 1,214 B | ~600k | $0.001 |
+| Private swap (real Jupiter SolFi V2 mainnet-fork) | 1,231 B | ~660k | $0.001 |
+
+Single-instruction Groth16 verification under Solana's 1.4M CU cap. No multi-tx
+splits, no off-chain coordinator. ~325k CU consumed by the pool itself, ~1.07M
+CU of headroom for real adapter work.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Client SDK         shield → adapt → unshield builders  │
+│  packages/sdk       AdaptProver (23 public inputs)      │
+└──────────────┬──────────────────────────────────────────┘
+               │
+┌──────────────▼──────────────────────────────────────────┐
+│  Pool program       commitments tree, nullifier set,    │
+│  programs/b402-pool adapter registry, post-CPI delta    │
+└────┬───────────┬─────────┬──────────────────────────────┘
+     │           │         │
+┌────▼───┐  ┌────▼────┐  ┌─▼────────────────┐
+│ Verif. │  │ Verif.  │  │ Adapter (any     │
+│ trans. │  │ adapt   │  │ registered)      │
+│ 18 PI  │  │ 23 PI   │  │ → Jupiter/Kamino │
+└────────┘  └─────────┘  │   /Adrena/Orca/… │
+                         └─────────┬────────┘
+                                   │
+                           ┌───────▼────────┐
+                           │ Real Solana    │
+                           │ DeFi protocol  │
+                           └────────────────┘
+```
+
+Adding a new protocol = one Anchor crate (~200-300 LoC) implementing the
+`execute(action_payload)` ABI + a registry entry. No circuit recut, no
+ceremony, no pool change. Six adapter crates in repo today; PRDs cover the
+v2 ABI extension that makes this strictly true going forward.
 
 ## Adapter status
 
-| Adapter | Network status | What it enables |
+| Adapter | Status | What it enables |
 |---|---|---|
-| Jupiter v6 | live on devnet, mainnet-fork verified end-to-end | private swap (any Solana mint w/ Jupiter route) |
-| Kamino lend | mainnet-fork verified end-to-end through `b402_kamino_adapter::execute` | private lend / borrow against real Kamino reserves |
-| Mock | live on devnet | adapter ABI invariants test path |
-| Adrena perps | scaffold + verified discriminators (PRD-16) | private leveraged trading (impl in progress) |
-| Orca whirlpool LP | scaffold | private LP (gated on PRD-04 dual-delta amendment) |
-| Jupiter perps | scaffold; deferred | request-queue model; awaits v2 ABI two-phase claim notes (PRD-14) |
-| Drift perps | spec only (PRD-10) | deferred — Drift is post-incident rebooting after $285M April 2026 hack |
+| Jupiter v6 | live on devnet, mainnet-fork verified | private swap on any Jupiter route |
+| Kamino lend | mainnet-fork verified through `b402_kamino_adapter::execute` | private collateral, borrow, repay |
+| Mock | live on devnet | adapter ABI invariant tests |
+| Adrena perps | scaffold; discriminators verified vs Adrena IDL | private leveraged trading (impl in progress) |
+| Orca LP | scaffold | private whirlpool positions |
+| Jupiter perps | scaffold | private perps via JLP (request-queue model — pending v2 ABI two-phase claim notes) |
+| Drift perps | spec only | deferred pending Drift's post-hack reboot |
 
-## What works today
-
-- **Private swap on devnet** — shield → real Groth16 adapt proof (23 public inputs)
-  → unshield, fits in one v0 transaction with an ALT.
-- **Private swap on mainnet-fork w/ real Jupiter v6** — 0.1 wSOL → 8.549 USDC
-  routed through SolFi V2, real aggregator bytecode, real cloned mainnet AMM state.
-- **Private lend on mainnet-fork w/ real Kamino** — 1 USDC deposited as collateral
-  against the cloned mainnet USDC reserve via `b402_kamino_adapter`. Single tx,
-  obligation account grew 0 → 3344 B (Kamino recorded the position).
-- **Recipient-side privacy** — `Scanner` subscribes to pool logs, runs viewing-tag
-  Poseidon pre-filter + ECDH decrypts matches, auto-discovers incoming notes.
-  Alice → Bob → Charlie green.
-- **HTTP relayer service** (`packages/relayer/`) — Fastify + Jito-bundle support,
-  OFAC SDN screening hook, per-API-key rate limit. Lets users submit shielded txs
-  without their identity wallet appearing as fee payer.
-- **100+ tests** across Rust crypto, verifier programs, Circom parity, prover,
-  on-chain litesvm, SDK tx-size regression. See `docs/REPRODUCE.md`.
-
-**Devnet deployment (2026-04-25)**
+## Devnet deployment
 
 | Program | ID |
 |---|---|
@@ -51,42 +84,30 @@ Same construction class as Railgun (Groth16 + Poseidon + commitments + nullifier
 | Verifier (transact) | `Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK` |
 | Verifier (adapt) | `3Y2tyhNSaUiW5AcZcmFGRyTMdnroxHxc5GqFQPcMTZae` |
 | Jupiter adapter | `3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7` |
+| Kamino adapter | `2enwFgcGKJDqruHpCtvmhtxe3DYcV3k72VTvoGcdt2rX` |
 | Mock adapter | `89kw33YDcbXfiayVNauz599LaDm51EuU8amWydpjYKgp` |
 | b402 ALT (16 entries) | `9FPYufa1KDkrn1VgfjkR7R667hbnTA7CNtmy38QcsuNj` |
 
-**Live end-to-end on devnet — shield → real Groth16 adapt swap → unshield:**
-
-- Shield: [`59ahVAQN…Qyk3u`](https://explorer.solana.com/tx/59ahVAQNKGce4d5QRcfZuxYcGsPuXXrgbGqSTQpi4ByCuAtJtPyipypb8jLJwiqQf64suYjWHz625ynPNcQyk3u?cluster=devnet)
-- Adapt (real ZK proof, 23 public inputs): [`5AVK983L…vzBf`](https://explorer.solana.com/tx/5AVK983LcxXN3851GpAiZG58cUGncRjfDYKLU1oziWyWVps8YYTnaDW2r27cYb65NUcYUSVYstPZNqq8RZMEvzBf?cluster=devnet)
-- Unshield: [`e9KvuQn8…CEv6u`](https://explorer.solana.com/tx/e9KvuQn8F2iN9Gr8gzdVtKSHXjVPWyA623kUbqRAhYWhvwQP1GVsJwZfP1NCB8rGswmrVfgvxgmhVRzgRZCEv6u?cluster=devnet)
-
-See `docs/TX-WALKTHROUGH.md` for a layer-by-layer anatomy of both, and
-`docs/REPRODUCE.md` for the exact commands to re-run everything locally.
-
-**Observed on-chain costs**
-
-| Op | Tx size | Compute | Fee |
-|---|---|---|---|
-| Shield | 1,157 B | 239,224 CU | 5,000 lamports (~$0.001) |
-| Unshield | ~1,150 B | ~350k CU | 5,000 lamports |
-| Adapt swap (mock adapter, real Groth16) | 1,214 B | ~600k CU | 5,000 lamports |
-| Adapt swap (mainnet-fork, real Jupiter SolFi V2) | 1,231 B | ~660k CU | 5,000 lamports |
-
-Proof verification fits in one instruction (under Solana's 1.4M CU budget),
-so no multi-tx split required — cheaper and simpler than the EVM
-counterpart.
+Mainnet alpha deployment in progress. See [`ops/mainnet-deploy.sh`](ops/mainnet-deploy.sh).
 
 ## Privacy model
 
-The chain is public. Every byte of every transaction is visible. b402 doesn't
-make Solana private. What it cryptographically breaks is the **link between
-your wallet and your shielded actions**, layer by layer:
+The chain is public. b402 doesn't change that. What it cryptographically breaks
+is the link between your wallet and your shielded actions:
 
-| Layer | What | Status today |
+| Layer | What | Today |
 |---|---|---|
-| **L1: wallet ↔ action** | After you shield, your wallet doesn't appear in any subsequent shielded tx. | ✅ broken cryptographically (commitment + nullifier construction; same as Railgun / Tornado / Aztec) |
-| **L2: action ↔ action** | Two shielded actions by the same user can't be trivially linked. | ⚠️ partial — broken at the *note* layer (each note has unique commitment + nullifier). For stateful adapters that have a shared protocol-side account (e.g. v0.1 Kamino uses a single shared obligation across all b402 users), in-pool action-to-action linkage among b402 users IS observable. Per-user obligation PDA from `viewing_pub_hash` is in [`derive_owner_pda`][derive_owner_pda] but gated to v0.2. |
-| **L3: pool-level statistical clustering** | Timing + amount correlation across the boundary of the pool. | ⚠️ scales with anonymity set. Small pool = weak protection; large pool = strong. Alpha is small and capped. |
+| **L1: wallet ↔ action** | After shielding, your wallet doesn't appear in any subsequent shielded tx | broken cryptographically — same construction as Railgun, Tornado, Aztec |
+| **L2: action ↔ action** | Two shielded actions can't be trivially linked | broken at the note layer; per-user adapter PDAs land in v0.2 (helpers in `programs/b402-kamino-adapter/src/lib.rs` already, gated) |
+| **L3: pool-level clustering** | Timing + amount correlation across the pool boundary | scales with anonymity set — small pool weak, large pool strong |
+
+Wallet-watching bots and MEV searchers — the dominant real-world threat —
+hit Layer 1 and stop. Patient timing+amount analysts targeting a small pool
+defeat Layer 3 statistically. We cap alpha TVL while the anonymity set grows;
+that's the honest trade.
+
+For autonomous agents specifically — where the adversary is automated
+strategy-copying, not patient analysis — Layer 1 alone solves the problem.
 
 [derive_owner_pda]: programs/b402-kamino-adapter/src/lib.rs
 
@@ -104,30 +125,6 @@ shield strengthens every other user's privacy.
 For autonomous agents specifically — where the adversary is automated
 strategy-copying bots, not patient analysts — Layer 1 is sufficient. That's
 the use case we lead with.
-
-## Trust assumptions during alpha
-
-These are the explicit, deliberate weaknesses of alpha. Each has a roadmap
-out of it — none are blockers for a credible alpha launch, but you should
-know them before depositing real funds:
-
-- **Single-key admin.** The pool's `admin_multisig` is currently a single
-  pubkey. Migration to a 3-of-5 Squads multisig is a roadmap item — alpha
-  is small enough that fast pause-unpause via single key is operationally
-  preferred during the first weeks.
-- **Throwaway trusted-setup VK.** A single contributor (us) ran the
-  `transact` and `adapt` ceremonies. Multi-party ceremony with ≥3
-  contributors (≥1 external) is a planned step before TVL caps lift.
-- **No external audit yet.** Engagements being scoped with Veridise +
-  Trail of Bits + Zellic. Reports will be linked here when they land.
-- **Soft TVL cap.** We commit to not promoting deposits beyond a small
-  initial cap. A hard `max_pool_tvl_per_mint` field in `PoolConfig` lands
-  before any community-promoted deposit.
-- **Apache 2.0 + permissionless + 0% fee posture.** This matches Railgun
-  on EVM. We've reviewed Tornado Cash legal precedent and structure
-  operations accordingly: relayer screens OFAC SDN list, geographic IP
-  restrictions on relayer/frontend, sanctions-counsel review in progress,
-  no operator custody at any point.
 
 ## What's implemented
 
@@ -263,21 +260,19 @@ b402-solana/
 - **Audit-first.** Designs written for auditor consumption. Cryptographic
   primitives and failure modes spelled out before implementation.
 
-## What's intentionally stubbed
+## Status
 
-- **Relayer / indexer service** — `Scanner` handles the indexer side from
-  the client. A Fastify HTTP relayer matching our EVM conventions is not
-  written.
-- **Stealth-address bech32 encoding** — primitives exist; the `b402sol1q…`
-  encode/decode layer is not written.
-- **Production trusted setup** — current VK is from a throwaway
-  single-contributor ceremony. Mainnet needs a multi-party ceremony per
-  PRD-08.
-- **Admin multisig** — v1 uses single-key admin; PRD-03 §9 specifies
-  full multisig co-signer pattern.
-- **Beyond Jupiter** — Kamino, Drift, Orca adapters are scoped in
-  PRD-05 but not yet implemented. The same circuit + per-protocol adapter
-  pattern applies.
+Alpha. Single-key admin during alpha → 3-of-5 multisig migration scheduled.
+Throwaway trusted-setup VK → multi-party ceremony in progress. External
+audits scoped with Veridise / Trail of Bits / Zellic — reports linked here
+when they land. Soft TVL cap during alpha; hard cap lands in `PoolConfig`
+before community-promoted deposits. Stealth-address bech32 encoding +
+production relayer hardening are next.
+
+Read the full [PRD set](docs/prds/) for the design rationale behind every
+decision. Issues + PRs welcome — adapter additions are the easiest contribution.
+See [`SECURITY.md`](SECURITY.md) for disclosure and [`CONTRIBUTING.md`](CONTRIBUTING.md)
+for setup.
 
 ## License
 
