@@ -192,6 +192,26 @@ pub enum DriftAction { OpenPerp, ClosePerp, SettlePnl }
 
 ### 3.4 Per-user Drift account
 
+> **SUPERSEDED 2026-04-25 by PRD-10 §4** — see `docs/prds/PRD-10-drift-adapter.md`.
+>
+> The original 0.1 draft picked option (b), a shared adapter-PDA `User` account
+> with off-chain position accounting. PRD-10 reverses that decision in favor
+> of a deterministic per-user `User` PDA derived from
+> `(adapter_authority, viewing_pub_hash, market_index)`, with the binding
+> proven in-circuit via the new `drift_user_binding` public input gated by
+> the `AllowedInstruction.circuit_binding_flags` field added in PRD-04 §7.2.
+>
+> Reason for the reversal: option (b) turned the adapter into a fund —
+> one user's loss could eat all users' collateral, breaking the privacy-
+> product framing. PRD-09's Kamino spec independently arrived at the
+> same per-user-PDA conclusion (PRD-09 §7), so the pattern is
+> consistent across all margin/obligation-based adapters.
+>
+> The original (b) text is preserved below for historical context only;
+> implementers must follow PRD-10.
+
+---
+
 Drift requires a per-user account (`User` PDA). Options:
 
 **(a) Per-shield Drift account.** Adapter creates a fresh Drift user account for each adapt call. Expensive (rent + account creation CU).

@@ -190,20 +190,52 @@ There is no "partial reshield" path. Atomic or nothing.
 
 ## 7. Adapter registry semantics
 
-From PRD-03 §3.4:
+From PRD-03 §3.4 (with PRD-09 / PRD-10 amendments to support delta-zero ops + per-instruction circuit-binding flags):
 
 ```rust
 pub struct AdapterInfo {
     pub adapter_id: [u8; 32],              // Poseidon(program_id_as_Fr)
     pub program_id: Pubkey,
-    pub allowed_instructions: Vec<[u8; 8]>, // instruction discriminators whitelisted
+    pub allowed_instructions: Vec<AllowedInstruction>,
     pub enabled: bool,
+}
+
+pub struct AllowedInstruction {
+    pub discriminator: [u8; 8],
+    pub allows_delta_zero: bool,           // §7.1 — see below
+    pub circuit_binding_flags: u32,        // §7.2 — bitmask of optional public inputs
 }
 ```
 
 `allowed_instructions` is a finer-grain check. An adapter program may expose multiple entrypoints (`execute_swap`, `execute_deposit`, etc.). Registry records which discriminators are approved. Pool extracts the CPI instruction discriminator before invoking and rejects unknown ones.
 
 **Why:** reduces blast radius if an adapter exposes an unsafe entrypoint that slips past audit. Registry whitelist is a second line of defense.
+
+### 7.1 Delta-zero adapt actions (added 2026-04-25)
+
+Some adapter operations move no tokens — e.g. `cancel_perp_order`, `settle_perp_pnl` (when no realization), `claim_rewards` with zero accrual, `update_position` for in-protocol-only state changes. Forcing fake token motion to satisfy the standard post-CPI delta invariant is ugly and burns CU.
+
+When `allowed_instructions[i].allows_delta_zero == true`, the pool's `adapt_execute` skips the post-CPI `out_vault.amount` delta check **iff** the proof's `expected_out_mint == Pubkey::default()` AND `expected_out_value == 0`. Otherwise the standard delta check applies.
+
+Setting the flag is an admin governance action. The exemption is per-discriminator, not per-adapter — so an adapter exposing both `place_order` (delta > 0) and `cancel_order` (delta = 0) can have the flag selectively enabled.
+
+**Security:** the proof still binds `adapter_id`, `action_hash`, and `actionPayloadKeccak`. A delta-zero op without a meaningful side-effect is wasted CU but cannot drain the pool — `in_vault → adapter_in_ta` transfer also goes to zero (because the proof's `publicAmountIn = 0` in delta-zero ops).
+
+### 7.2 Per-instruction circuit-binding flags (added 2026-04-25)
+
+PRD-10 (Drift) introduces two new optional public inputs to the adapt circuit:
+
+- `drift_user_binding` — Poseidon(viewing_pub_hash, market_index) — proves the per-user `User` PDA the adapter uses is the one this proof's owner controls.
+- `note_aux_binding` — generic auxiliary binding for protocols that need to bind a per-protocol piece of metadata (e.g. obligation pubkey for Kamino).
+
+These are gated by `circuit_binding_flags` in the registry. A `bit 0 = drift_user_binding` and `bit 1 = note_aux_binding` set on a particular `AllowedInstruction` causes:
+
+1. The circuit's component instantiation includes those inputs in the public-input vector position.
+2. The pool's `adapt_execute` handler recomputes the expected value from on-chain state (e.g. derives the user PDA from `(adapter_authority, viewing_pub_hash)`) and asserts it matches the proof's binding.
+
+Adapters that don't need per-user PDAs (Jupiter, mock) leave the flags clear; the public inputs default to zero and the circuit's constraint becomes a no-op (multiplied by the gate flag, sound). This keeps Jupiter/mock proofs at the same constraint count.
+
+**Trade:** ~60 added constraints per gate, behind feature-flagged components. Single circuit, multiple-adapter parameterization.
 
 ---
 
@@ -269,6 +301,7 @@ Checklist lives at `b402-solana/ops/adapter-review.md`; each adapter PR must fil
 | Version | Date | Author | Changes |
 |---|---|---|---|
 | 0.1 | 2026-04-23 | b402 core | Initial draft |
+| 0.2 | 2026-04-25 | b402 core | Phase 2a shipped: real ZK adapt_execute live on devnet (replaces the devnet stub). Amend §7 with `AllowedInstruction { discriminator, allows_delta_zero, circuit_binding_flags }` to support delta-zero ops (PRD-10) and per-instruction circuit-binding flags for Drift's `drift_user_binding` + Kamino's `note_aux_binding` (PRD-09 / PRD-10). Both extensions are backwards-compatible — flags off = pre-2026-04-25 behavior. |
 
 ---
 
