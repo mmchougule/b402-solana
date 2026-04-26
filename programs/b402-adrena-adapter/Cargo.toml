@@ -1,0 +1,21 @@
+[package]
+name = "b402-adrena-adapter"
+version.workspace = true
+edition.workspace = true
+description = "b402 Adrena perpetuals adapter (per PRD-16)"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "b402_adrena_adapter"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+
+[dependencies]
+anchor-lang.workspace = true
+anchor-spl.workspace = true
+indexmap = { version = "=2.9.0" }
