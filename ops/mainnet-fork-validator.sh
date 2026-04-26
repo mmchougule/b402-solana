@@ -29,6 +29,7 @@ cd "$(dirname "$0")/.."
 
 CLONE_FILES=()
 RESET=""
+WARP_SLOT=""
 MAINNET_URL="${MAINNET_URL:-https://api.mainnet-beta.solana.com}"
 
 while (( $# )); do
@@ -38,6 +39,11 @@ while (( $# )); do
     --clone|--route) CLONE_FILES+=("$2"); shift 2 ;;
     --reset)         RESET="--reset"; shift ;;
     --url)           MAINNET_URL="$2"; shift 2 ;;
+    # Pin the fork's slot above the cloned state's last_update slots.
+    # Required for protocols (e.g. Kamino) that compute current_slot -
+    # last_update.slot — without warp the subtraction underflows because
+    # cloned slots are from mainnet (~400M) and the fork starts at slot 1.
+    --warp-slot)     WARP_SLOT="$2"; shift 2 ;;
     *) echo "unknown arg $1"; exit 1 ;;
   esac
 done
@@ -111,8 +117,16 @@ for a in "${DATA_ACCOUNTS[@]}"; do
   CLONE_ARGS+=(--maybe-clone "$a")
 done
 
+WARP_ARGS=()
+if [[ -n "$WARP_SLOT" ]]; then
+  WARP_ARGS+=(--warp-slot "$WARP_SLOT")
+  echo "  warp slot         = $WARP_SLOT"
+  echo ""
+fi
+
 exec solana-test-validator $RESET \
   --url "$MAINNET_URL" \
+  "${WARP_ARGS[@]}" \
   "${CLONE_ARGS[@]}" \
   --bpf-program "$VERIFIER_T_ID"   target/deploy/b402_verifier_transact.so \
   --bpf-program "$VERIFIER_A_ID"   target/deploy/b402_verifier_adapt.so \
