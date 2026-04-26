@@ -28,6 +28,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CLONE_FILES=()
+ACCOUNT_PAIRS=()
 RESET=""
 WARP_SLOT=""
 MAINNET_URL="${MAINNET_URL:-https://api.mainnet-beta.solana.com}"
@@ -39,6 +40,11 @@ while (( $# )); do
     --clone|--route) CLONE_FILES+=("$2"); shift 2 ;;
     --reset)         RESET="--reset"; shift ;;
     --url)           MAINNET_URL="$2"; shift 2 ;;
+    # Pre-inject account state via --account <PUBKEY> <FILE>. Used to fund
+    # synthetic test wallets with whitelisted-mint balances without needing
+    # a real whale's keypair. Pass in pairs:
+    #   --account <PUBKEY> <FILE>  --account <PUBKEY> <FILE>  ...
+    --account)      ACCOUNT_PAIRS+=("$2" "$3"); shift 3 ;;
     # Pin the fork's slot above the cloned state's last_update slots.
     # Required for protocols (e.g. Kamino) that compute current_slot -
     # last_update.slot — without warp the subtraction underflows because
@@ -124,9 +130,18 @@ if [[ -n "$WARP_SLOT" ]]; then
   echo ""
 fi
 
+ACCOUNT_ARGS=()
+for ((i=0; i<${#ACCOUNT_PAIRS[@]}; i+=2)); do
+  ACCOUNT_ARGS+=(--account "${ACCOUNT_PAIRS[$i]}" "${ACCOUNT_PAIRS[$((i+1))]}")
+done
+if (( ${#ACCOUNT_PAIRS[@]} > 0 )); then
+  echo "  injected accounts = $(( ${#ACCOUNT_PAIRS[@]} / 2 ))"
+fi
+
 exec solana-test-validator $RESET \
   --url "$MAINNET_URL" \
   "${WARP_ARGS[@]}" \
+  "${ACCOUNT_ARGS[@]}" \
   "${CLONE_ARGS[@]}" \
   --bpf-program "$VERIFIER_T_ID"   target/deploy/b402_verifier_transact.so \
   --bpf-program "$VERIFIER_A_ID"   target/deploy/b402_verifier_adapt.so \
