@@ -115,6 +115,17 @@ pub mod b402_pool {
     ) -> Result<()> {
         instructions::adapt_execute::handler(ctx, args)
     }
+
+    /// v2 ABI variant of `adapt_execute`. Adds vector token bindings (PRD-11),
+    /// content-addressed action_hash (PRD-12), shadow PDA binding (PRD-13),
+    /// and `deadline_slot` (PRD-15). Coexists with v1; v1 is unchanged.
+    /// See `instructions/adapt_execute_v2.rs`.
+    pub fn adapt_execute_v2<'info>(
+        ctx: Context<'_, '_, '_, 'info, AdaptExecuteV2<'info>>,
+        args: Box<AdaptExecuteV2Args>,
+    ) -> Result<()> {
+        instructions::adapt_execute_v2::handler(ctx, args)
+    }
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]

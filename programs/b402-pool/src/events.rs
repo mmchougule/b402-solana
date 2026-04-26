@@ -85,3 +85,18 @@ pub struct AdaptExecuted {
     pub relayer_fee: u64,
     pub slot: u64,
 }
+
+/// v2 sibling of `AdaptExecuted`. Emitted by `adapt_execute_v2`.
+/// Mints are vector slots (M=4 / N=4); zero-address slot signals unused.
+#[event]
+pub struct AdaptExecutedV2 {
+    pub adapter_program: Pubkey,
+    pub in_mints: [Pubkey; 4],
+    pub out_mints: [Pubkey; 4],
+    pub public_amount_in: u64,
+    pub out_delta_total: u64,
+    pub expected_out_value: u64,
+    pub relayer_fee: u64,
+    pub deadline_slot: u64,
+    pub slot: u64,
+}

@@ -18,12 +18,13 @@
   },
   "dependencies": {
     "@b402ai/solana-shared": "workspace:*",
+    "@noble/hashes": "^1.5.0",
+    "circomlibjs": "^0.1.7",
     "ffjavascript": "^0.3.1",
     "snarkjs": "^0.7.6"
   },
   "devDependencies": {
     "@types/node": "^22.9.0",
-    "circomlibjs": "^0.1.7",
     "typescript": "^5.6.3",
     "vitest": "^2.1.4"
   }

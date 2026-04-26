@@ -4,6 +4,7 @@ members = [
     "programs/b402-pool",
     "programs/b402-verifier-transact",
     "programs/b402-verifier-adapt",
+    "programs/b402-verifier-adapt-v2",
     "programs/b402-jupiter-adapter",
     "programs/b402-jupiter-perps-adapter",
     "programs/b402-mock-adapter",

@@ -83,4 +83,16 @@ pub enum PoolError {
     AccountSizeMismatch = 1901,
     #[msg("rent not covered")]
     RentNotCovered = 1902,
+
+    // v2 ABI errors (PRD-11/12/13/15).
+    #[msg("deadline slot has passed")]
+    DeadlineExceeded = 2000,
+    #[msg("vector slot canonicalization violated")]
+    SlotCanonicalizationFailed = 2001,
+    #[msg("accounts hash mismatch")]
+    AccountsHashMismatch = 2002,
+    #[msg("scope tag mismatch")]
+    ScopeTagMismatch = 2003,
+    #[msg("shadow pda binding mismatch")]
+    ShadowBindingMismatch = 2004,
 }

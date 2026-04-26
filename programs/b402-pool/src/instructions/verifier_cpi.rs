@@ -16,6 +16,8 @@ use crate::error::PoolError;
 
 pub const PUBLIC_INPUT_COUNT: usize = 18;
 pub const PUBLIC_INPUT_COUNT_ADAPT: usize = 23;
+/// adapt v2 — PRD-11/12/13/15.
+pub const PUBLIC_INPUT_COUNT_ADAPT_V2: usize = 38;
 
 /// sha256("global:verify")[0..8]. Pre-computed to avoid hashing at runtime.
 /// Must match the Anchor-generated discriminator for `pub fn verify(...)` in
@@ -88,6 +90,40 @@ pub fn invoke_verify_adapt<'info>(
     }
 
     let inner_len = 1 + 256 + 32 * PUBLIC_INPUT_COUNT_ADAPT;
+    let mut inner: Vec<u8> = Vec::with_capacity(inner_len);
+    inner.push(0x01);
+    inner.extend_from_slice(proof);
+    for fr in public_inputs.iter() {
+        inner.extend_from_slice(fr);
+    }
+
+    let mut data: Vec<u8> = Vec::with_capacity(8 + 4 + inner_len);
+    data.extend_from_slice(&VERIFY_DISCRIMINATOR);
+    data.extend_from_slice(&(inner_len as u32).to_le_bytes());
+    data.extend_from_slice(&inner);
+
+    let ix = Instruction {
+        program_id: *verifier_program.key,
+        accounts: vec![],
+        data,
+    };
+
+    invoke(&ix, &[verifier_program.clone()])
+        .map_err(|_| error!(PoolError::ProofVerificationFailed))?;
+    Ok(())
+}
+
+/// Sibling for the v2 adapt verifier (PRD-11/12/13/15) — 38 public inputs.
+pub fn invoke_verify_adapt_v2<'info>(
+    verifier_program: &AccountInfo<'info>,
+    proof: &[u8; 256],
+    public_inputs: &[[u8; 32]],
+) -> Result<()> {
+    if public_inputs.len() != PUBLIC_INPUT_COUNT_ADAPT_V2 {
+        return err!(PoolError::ProofPublicInputMismatch);
+    }
+
+    let inner_len = 1 + 256 + 32 * PUBLIC_INPUT_COUNT_ADAPT_V2;
     let mut inner: Vec<u8> = Vec::with_capacity(inner_len);
     inner.push(0x01);
     inner.extend_from_slice(proof);

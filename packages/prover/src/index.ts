@@ -28,6 +28,18 @@ export {
   type AdaptProof,
 } from './adapt.js';
 
+export {
+  AdaptV2Prover,
+  ADAPT_V2_PUBLIC_INPUT_COUNT,
+  computeActionHashV2,
+  computeShadowPdaBinding,
+  computeAccountsHashFr,
+  tagToFr as adaptV2TagToFr,
+  type AdaptV2Witness,
+  type AdaptV2Proof,
+  type CanonAccountMeta,
+} from './adapt_v2.js';
+
 export interface TransactWitness {
   merkleRoot: bigint;
   nullifier: [bigint, bigint];
