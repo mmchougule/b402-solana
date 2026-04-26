@@ -575,6 +575,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "b402-kamino-adapter"
+version = "0.0.1"
+dependencies = [
+ "anchor-lang",
+ "anchor-spl",
+]
+
+[[package]]
 name = "b402-mock-adapter"
 version = "0.0.1"
 dependencies = [
