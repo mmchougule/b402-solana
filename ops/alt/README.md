@@ -13,10 +13,11 @@ tx-size cap. See PRD-04 §5.2.
 
 ## What's in the ALT
 
-Mint-agnostic seed set (14 accounts):
+Mint-agnostic seed set (16 accounts as of 2026-04-25):
 
-- **Programs (7):** Jupiter V6, b402_pool, b402_verifier_transact,
-  b402_jupiter_adapter, Token, ATA, System.
+- **Programs (9):** Jupiter V6, b402_pool, b402_verifier_transact,
+  b402_verifier_adapt, b402_jupiter_adapter, b402_mock_adapter,
+  Token, ATA, System.
 - **b402 PDAs (3):** PoolConfig, TreeState, Jupiter adapter authority.
 - **Common mints (2):** wSOL, USDC (mainnet addr — harmless dead weight
   on devnet, zero cost).
