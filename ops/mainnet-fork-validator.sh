@@ -27,58 +27,77 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-ROUTE_FILE=""
+CLONE_FILES=()
 RESET=""
 MAINNET_URL="${MAINNET_URL:-https://api.mainnet-beta.solana.com}"
 
 while (( $# )); do
   case "$1" in
-    --route)  ROUTE_FILE="$2"; shift 2 ;;
-    --reset)  RESET="--reset"; shift ;;
-    --url)    MAINNET_URL="$2"; shift 2 ;;
+    # Each --clone / --route file contributes its .programs[] and .data[]
+    # arrays to the union we'll clone. Both flags are aliases.
+    --clone|--route) CLONE_FILES+=("$2"); shift 2 ;;
+    --reset)         RESET="--reset"; shift ;;
+    --url)           MAINNET_URL="$2"; shift 2 ;;
     *) echo "unknown arg $1"; exit 1 ;;
   esac
 done
 
-if [[ -z "$ROUTE_FILE" || ! -f "$ROUTE_FILE" ]]; then
-  echo "✗ missing --route <file> (run ops/jup-quote.ts first)"
+if (( ${#CLONE_FILES[@]} == 0 )); then
+  echo "✗ missing --clone <file> (run ops/jup-quote.ts or ops/kamino-clone.ts first)"
+  echo "  multiple --clone flags are accepted; programs + data unioned across all files"
   exit 1
 fi
+for f in "${CLONE_FILES[@]}"; do
+  if [[ ! -f "$f" ]]; then echo "✗ $f does not exist"; exit 1; fi
+done
 
 # b402 program IDs — match declare_id! in each crate.
 POOL_ID=42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y
-VERIFIER_ID=Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK
-ADAPTER_ID=3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7
+VERIFIER_T_ID=Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK
+VERIFIER_A_ID=3Y2tyhNSaUiW5AcZcmFGRyTMdnroxHxc5GqFQPcMTZae
+JUP_ADAPTER_ID=3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7
 MOCK_ADAPTER_ID=89kw33YDcbXfiayVNauz599LaDm51EuU8amWydpjYKgp
+KAMINO_ADAPTER_ID=2enwFgcGKJDqruHpCtvmhtxe3DYcV3k72VTvoGcdt2rX
 
-# Require the pool .so to be built with --features adapt-devnet.
-for so in b402_verifier_transact b402_pool b402_jupiter_adapter b402_mock_adapter; do
+for so in b402_verifier_transact b402_verifier_adapt b402_pool b402_jupiter_adapter b402_mock_adapter b402_kamino_adapter; do
   if [[ ! -f "target/deploy/${so}.so" ]]; then
     echo "✗ missing target/deploy/${so}.so"
+    echo "  run: cargo build-sbf --tools-version v1.54 --manifest-path programs/${so//_/-}/Cargo.toml"
     exit 1
   fi
 done
 
-# Extract programs + data accounts from the route JSON.
-# `.programs` was added to jup-quote.ts output — it's the executable-true
-# accounts that need --clone-upgradeable-program. `.data` is the rest.
+# Union .programs[] and .data[] across all --clone files (macOS bash 3.2
+# has no associative arrays — concat then sort -u).
+PROGRAMS_RAW=""
+DATA_RAW=""
+for f in "${CLONE_FILES[@]}"; do
+  PROGRAMS_RAW="$PROGRAMS_RAW"$'\n'"$(jq -r '.programs[]?' "$f")"
+  DATA_RAW="$DATA_RAW"$'\n'"$(jq -r '.data[]?' "$f")"
+  # Back-compat: jup-route style with only `.clone[]` and a swap ix.
+  if jq -e '.clone? and .swap?' "$f" >/dev/null 2>&1; then
+    DATA_RAW="$DATA_RAW"$'\n'"$(jq -r '.clone[]' "$f")"
+    PROGRAMS_RAW="$PROGRAMS_RAW"$'\n'"$(jq -r '.swap.swapInstruction.programId' "$f")"
+  fi
+done
 PROGRAMS=()
-while IFS= read -r line; do PROGRAMS+=("$line"); done < <(jq -r '.programs[]?' "$ROUTE_FILE")
+while IFS= read -r line; do
+  [[ -n "$line" ]] && PROGRAMS+=("$line")
+done < <(echo "$PROGRAMS_RAW" | grep -v '^$' | sort -u)
 DATA_ACCOUNTS=()
-while IFS= read -r line; do DATA_ACCOUNTS+=("$line"); done < <(jq -r '.data[]?' "$ROUTE_FILE")
-
-# Back-compat: older route files had only .clone — treat as data.
-if [[ ${#PROGRAMS[@]} -eq 0 && ${#DATA_ACCOUNTS[@]} -eq 0 ]]; then
-  while IFS= read -r line; do DATA_ACCOUNTS+=("$line"); done < <(jq -r '.clone[]' "$ROUTE_FILE")
-  PROGRAMS=("$(jq -r '.swap.swapInstruction.programId' "$ROUTE_FILE")")
-fi
+while IFS= read -r line; do
+  [[ -n "$line" ]] && DATA_ACCOUNTS+=("$line")
+done < <(echo "$DATA_RAW" | grep -v '^$' | sort -u)
 
 echo "▶ forking mainnet state from $MAINNET_URL"
-echo "  ${#PROGRAMS[@]} program(s), ${#DATA_ACCOUNTS[@]} data account(s) to clone"
+echo "  ${#CLONE_FILES[@]} clone-spec file(s), ${#PROGRAMS[@]} program(s), ${#DATA_ACCOUNTS[@]} data account(s)"
 echo ""
-echo "  pool     = $POOL_ID"
-echo "  verifier = $VERIFIER_ID"
-echo "  adapter  = $ADAPTER_ID"
+echo "  pool             = $POOL_ID"
+echo "  verifier_transact = $VERIFIER_T_ID"
+echo "  verifier_adapt    = $VERIFIER_A_ID"
+echo "  jupiter adapter   = $JUP_ADAPTER_ID"
+echo "  kamino adapter    = $KAMINO_ADAPTER_ID"
+echo "  mock adapter      = $MOCK_ADAPTER_ID"
 echo ""
 
 # Programs must be cloned as upgradeable so the BPF loader registers them.
@@ -95,8 +114,10 @@ done
 exec solana-test-validator $RESET \
   --url "$MAINNET_URL" \
   "${CLONE_ARGS[@]}" \
-  --bpf-program "$VERIFIER_ID" target/deploy/b402_verifier_transact.so \
-  --bpf-program "$POOL_ID" target/deploy/b402_pool.so \
-  --bpf-program "$ADAPTER_ID" target/deploy/b402_jupiter_adapter.so \
+  --bpf-program "$VERIFIER_T_ID"   target/deploy/b402_verifier_transact.so \
+  --bpf-program "$VERIFIER_A_ID"   target/deploy/b402_verifier_adapt.so \
+  --bpf-program "$POOL_ID"         target/deploy/b402_pool.so \
+  --bpf-program "$JUP_ADAPTER_ID"  target/deploy/b402_jupiter_adapter.so \
   --bpf-program "$MOCK_ADAPTER_ID" target/deploy/b402_mock_adapter.so \
+  --bpf-program "$KAMINO_ADAPTER_ID" target/deploy/b402_kamino_adapter.so \
   --log
