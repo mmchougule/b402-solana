@@ -88,3 +88,59 @@ fn tampered_proof_rejected() {
     let r = verify_proof_be(&pa, &pb, &pc, &pis);
     assert!(r.is_err(), "tampered proof must be rejected");
 }
+
+/// Helper: load fixture, mutate a single public-input byte, assert verify fails.
+/// Public-input layout (BE here, LE on chain) per `programs/b402-pool/src/instructions/transact.rs`:
+///   0  merkle_root        5  public_amount_in   10 root_bind         15 spend_key_pub_tag
+///   1  nullifier[0]       6  public_amount_out  11 recipient_bind    16 fee_bind_tag
+///   2  nullifier[1]       7  public_token_mint  12 commit_tag        17 recipient_bind_tag
+///   3  commitment_out[0]  8  relayer_fee        13 nullifier_tag
+///   4  commitment_out[1]  9  relayer_fee_bind   14 mk_node_tag
+fn assert_tamper_rejected(idx: usize, byte: usize, mask: u8, what: &str) {
+    let (a, b, c, pi) = load_fixture();
+    let mut pa = [0u8; 64]; pa.copy_from_slice(&a);
+    let mut pb = [0u8; 128]; pb.copy_from_slice(&b);
+    let mut pc = [0u8; 64]; pc.copy_from_slice(&c);
+    let mut pis = [[0u8; 32]; PUBLIC_INPUT_COUNT];
+    for i in 0..PUBLIC_INPUT_COUNT { pis[i] = pi[i]; }
+
+    pis[idx][byte] ^= mask;
+
+    let r = verify_proof_be(&pa, &pb, &pc, &pis);
+    assert!(r.is_err(), "tampered {what} (pi[{idx}]) must be rejected");
+}
+
+#[test]
+fn tampered_root_bind_rejected() {
+    // pi[10] = root_bind. Binds the merkle_root into the proof so a relayer
+    // can't substitute a fresher root + replay an old proof.
+    assert_tamper_rejected(10, 31, 0x01, "root_bind");
+}
+
+#[test]
+fn tampered_recipient_bind_rejected() {
+    // pi[11] = recipient_bind = Poseidon_3(tag, ownerLow, ownerHigh).
+    // Tampering = redirect-funds attack from a malicious relayer.
+    assert_tamper_rejected(11, 31, 0x01, "recipient_bind");
+}
+
+#[test]
+fn tampered_relayer_fee_bind_rejected() {
+    // pi[9] = relayer_fee_bind. Binds (fee, recipient) into the proof so the
+    // relayer can't inflate its fee or redirect it to a different ATA.
+    assert_tamper_rejected(9, 31, 0x01, "relayer_fee_bind");
+}
+
+#[test]
+fn tampered_nullifier_rejected() {
+    // pi[1] = nullifier[0]. The double-spend guard — flipping a bit yields
+    // an unconsumed nullifier and the proof must reject (else replay attack).
+    assert_tamper_rejected(1, 31, 0x01, "nullifier[0]");
+}
+
+#[test]
+fn tampered_commitment_out_rejected() {
+    // pi[3] = commitment_out[0]. Output note commitment is bound to the
+    // input notes' value via the circuit — tampering breaks the binding.
+    assert_tamper_rejected(3, 31, 0x01, "commitment_out[0]");
+}
