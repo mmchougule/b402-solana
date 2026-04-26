@@ -1,0 +1,249 @@
+---
+title: Threat Model
+description: "Adversaries we defend against, adversaries we don't, and where each line is."
+---
+
+Each adversary below is marked `defended`, `partial`, `not defended at small
+TVL`, or `out of scope`. The lines are concrete, not aspirational.
+
+## 1. Wallet-watching bot
+
+**Status: defended.**
+
+A bot that subscribes to Solana blockspace, watches every transaction, and
+clusters per-wallet activity for surveillance, MEV targeting, or
+behavioral profiling.
+
+Defense surface: when a user shields, their wallet pubkey appears as the
+depositor — that's public. When the same user later unshields or
+adapt-executes, the relayer signs as fee payer; the user's wallet pubkey
+does not appear on the tx. The link from the original shield commitment
+to the spent nullifier is cryptographically broken via Poseidon
+one-wayness.
+
+**Caveat:** the bot can still cluster *shields* together by wallet. The
+break is shield → spend.
+
+## 2. MEV searcher / sandwich attacker
+
+**Status: defended for shielded actions; mitigated for relayer-submitted
+txs.**
+
+Searcher tries to sandwich a user's swap by inserting a buy before and a
+sell after the user's transaction.
+
+Defense surface for shielded swaps:
+
+- The proof's `expectedOutValue` is a hard floor. If the searcher
+  manipulates the AMM state to reduce output, the post-CPI delta check
+  fails and the entire tx reverts. The user's notes are not spent.
+- Tx submission via [Jito bundles](https://www.jito.network/) bypasses
+  the public mempool entirely on supported relayers. The relayer
+  service supports `JITO_BUNDLE_URL` config.
+- The proof's `actionHash` binds the specific Jupiter route. A searcher
+  cannot rewrite the route to a worse path; the on-chain `keccak256`
+  recomputation rejects.
+
+Residual risk: a searcher who is *also* the relayer can hold a user's
+proof and decide when to submit, which is a form of timing attack. This
+is mitigated by relayer competition (any user can switch) and self-submission
+fallback (a user can pay their own SOL for fee).
+
+## 3. Patient analyst with timing + amount clustering
+
+**Status: not defended at small TVL — flagged honestly.**
+
+An analyst with infinite patience, full chain history, and statistical
+tooling. They look for "shield 1.234567 wSOL → 30 seconds → unshield
+1.234562 wSOL" patterns and infer the user from amount + timing
+correlation.
+
+This is a known limit of all pool-based privacy designs. It applies to
+Tornado, Railgun, Privacy.cash, and b402 equally. **The defense is
+high pool throughput.** At thin TVL, this attack works; at thick TVL,
+the analyst's signal-to-noise ratio degrades sharply.
+
+Mitigations the SDK exposes:
+
+- `status.anonymitySet` per token mint — counts active commitments
+  whose mint matches.
+- Documentation guidance: "wait for N more shields of comparable size
+  before unshielding."
+
+What we **do not** do:
+
+- Force users to wait. No protocol-level rate limit.
+- Fragment the pool with fixed denominations (rejected per PRD-01 §8).
+- Lie about the protection. Thin pool = thin privacy. Stated honestly.
+
+The Kamino L2 issue (single shared obligation) compounds this for
+Kamino-routed actions specifically; see
+[Privacy Model](/concepts/privacy-model).
+
+## 4. State-level adversary
+
+**Status: out of scope.**
+
+A nation-state with full traffic intercept, validator-set compromise
+capability, side-channel access to user devices, or BN254
+quantum-computer attacks.
+
+We do not claim to defend against this. Specifically:
+
+- BN254 falls to a sufficiently large quantum computer. Migration to a
+  PQ-safe proof system is post-NIST standardization and not in v1.
+- A state actor with an unrolled validator set can censor specific
+  pool transactions. Mitigation depends on Solana's overall
+  censorship-resistance posture, not anything b402-specific.
+- Side-channel attacks on prover machines (browser timing, EMI,
+  acoustic) are user-side concerns. Run the prover offline if your
+  threat model demands it.
+
+This is the standard out-of-scope for any zkSNARK protocol. Stating it
+explicitly so the doc isn't read as overclaiming.
+
+## 5. Validator censorship
+
+**Status: out of scope.**
+
+Solana validators can censor by refusing to include specific
+transactions. This is not a b402-specific issue; it applies to every
+Solana program. Standard mitigations (multiple RPC providers, Jito's
+private blockspace lane, eventual leader rotation) apply at the Solana
+layer, not the protocol layer.
+
+We don't add anything here.
+
+## 6. Relayer front-running
+
+**Status: partially mitigated via Jito bundles.**
+
+A malicious relayer holds a user's submitted proof in the request
+queue, builds their own front-run tx, and submits both. The user's
+swap executes at a worse price; the relayer captures the difference.
+
+Mitigations actually in code:
+
+- **`actionHash` binding.** The relayer cannot alter the swap path
+  embedded in the action payload — the on-chain keccak recomputation
+  rejects.
+- **`expectedOutValue` floor.** The relayer cannot accept a worse
+  price than the user proved against; the post-CPI check rejects.
+- **Jito bundle submission.** Relayer's `JITO_BUNDLE_URL` config sends
+  via Jito's private mempool. A relayer that *is* a Jito searcher can
+  still bundle their own front-run, but at that point the user is
+  trusting a specific entity; the protocol-level defense is "switch
+  relayers."
+
+What's still possible: the relayer holds the proof for a few slots
+before submitting, racing their own info. This is the residual risk;
+self-submission is the user-side defense.
+
+## 7. Compromised admin key
+
+**Status: bounded by program code.**
+
+Per [Trust Assumptions](/concepts/trust-assumptions), a compromised
+admin can pause shields, whitelist a malicious adapter (within the
+72-hour timelock), or rotate admin keys. They **cannot** forge spends,
+modify notes, change the verifier, or change the protocol fee.
+
+Within the 72-hour upgrade timelock, the community has a window to
+detect and respond. After upgrade authority is revoked at the 12-month
+mark, even this is moot.
+
+## 8. Compromised user spending key
+
+**Status: bounded to that user.**
+
+If a user's `spendingPriv` is compromised, the attacker can spend
+**that user's notes only**. Other users are unaffected. There is no
+shared-spending-key vulnerability.
+
+The spending key is never sent to any relayer or service. SDK clients
+hold it locally; agents derive it deterministically from a seed via
+HKDF-Poseidon.
+
+## 9. Compromised viewing key
+
+**Status: bounded to viewing-only.**
+
+A compromised viewing key reveals the corresponding note set to the
+holder. **No spend authority** — viewing keys cannot authorize
+spends, by design. This is the key separation point: viewing-key
+disclosure is a feature for opt-in compliance, not a back door for
+spending.
+
+## 10. Compromised trusted setup
+
+**Status: catastrophic; mainnet-blocked on multi-party ceremony.**
+
+If the participant who held the toxic waste from the Phase-2 ceremony
+retained it, they can forge proofs that pass verification. Pool is
+drainable.
+
+The current devnet VK is from a **single-contributor throwaway** ceremony.
+The single contributor is the b402 team. **The pool is forgeable on
+devnet by design.** This is acceptable for devnet; it is not acceptable
+for mainnet.
+
+Mainnet plan per PRD-08 / PRD-02 §7:
+
+- Reuse PPoT Phase-1 (75+ contributors).
+- Run Phase-2 with ≥3 contributors, ≥1 external organization.
+- Air-gapped contribution, public hash-chained transcript.
+- Final attestation published before mainnet deploy.
+
+This is the largest unmitigated risk in the alpha. It is also the
+cleanest to mitigate — the engineering exists; we need the calendar.
+
+## 11. Verifier program bug
+
+**Status: mitigated by reuse.**
+
+We do not roll our own Groth16 verifier. The two verifier programs wrap
+[`Lightprotocol/groth16-solana`](https://github.com/Lightprotocol/groth16-solana),
+which is itself audited. Verifier programs are immutable at deploy.
+
+A bug in `groth16-solana` would affect the entire Solana ZK ecosystem,
+not just b402. We pin a specific audited release.
+
+## 12. Adapter program bug
+
+**Status: bounded blast radius by design.**
+
+A buggy adapter can fail to deliver expected output. The pool's
+post-CPI delta check rejects under-delivery; the whole tx reverts;
+user notes are not spent.
+
+A buggy adapter cannot:
+
+- Drain the vault (the pool's PDA is the only signer for vault
+  transfers, and the proof binds the maximum release).
+- Mint commitments of the wrong mint (`expected_out_mint` is bound in
+  circuit and checked against `token_config_out`).
+- Cause cross-user damage (each adapter call is independent for
+  Jupiter / mock; for Kamino single-obligation, see Privacy Model L2
+  caveat).
+
+Emergency disable is single-sig; re-enable is multisig. Asymmetry on
+purpose.
+
+## Summary table
+
+| Adversary | Status |
+|---|---|
+| Wallet-watching bot | defended |
+| MEV searcher | defended for shielded actions |
+| Patient timing/volume analyst | not defended at small TVL |
+| State-level adversary | out of scope |
+| Validator censorship | out of scope |
+| Relayer front-running | partially mitigated (Jito + binding) |
+| Compromised admin key | bounded by program code |
+| Compromised user spending key | bounded to that user |
+| Compromised viewing key | bounded to viewing-only |
+| Compromised trusted setup | catastrophic on devnet today; mainnet-blocked on ceremony |
+| Verifier bug | mitigated by reusing `groth16-solana` |
+| Adapter bug | bounded blast radius |
+
+Stating these straight is more useful than a marketing matrix.

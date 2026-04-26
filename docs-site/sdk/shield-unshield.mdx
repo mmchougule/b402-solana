@@ -1,0 +1,174 @@
+---
+title: Shield & Unshield
+description: "The two base SDK operations and their underlying instruction shape."
+---
+
+`shield` deposits a public token amount into the pool and emits a
+shielded note. `unshield` spends one or more shielded notes and emits a
+public token transfer to a clear recipient ATA.
+
+These are the only two operations that exchange shielded ↔ public state.
+Everything else (`transact`, `adapt_execute`) keeps state shielded.
+
+## `shield`
+
+```typescript
+import { shield, type ShieldParams } from '@b402ai/solana';
+
+const result = await shield({
+  connection,
+  wallet,                // buildWallet(seed) result
+  pool,                  // pool program ID
+  verifierTransact,      // verifier_transact program ID
+  prover,                // TransactProver instance
+  mint,                  // SPL mint to shield
+  amount,                // bigint, in mint base units
+  depositor,             // Keypair (signer)
+  relayer,               // Keypair (fee payer; can be same as depositor)
+  recipient,             // {spendingPub, viewingPub} for the future note
+  noteRandom,            // optional: 32-byte CSPRNG; SDK generates if omitted
+});
+```
+
+Returns:
+
+```typescript
+type ShieldResult = {
+  signature: string;
+  leafIndex: bigint;
+  commitment: Uint8Array;     // 32 bytes
+  encryptedNote: EncryptedNote;
+  treeRootAfter: Uint8Array;
+};
+```
+
+### What happens under the hood
+
+1. SDK fetches the current `merkle_root` from `TreeState` PDA.
+2. SDK builds a `Note { tokenMint, value: amount, random, spendingPub:
+   recipient.spendingPub }`.
+3. Computes `commitment = Poseidon_5("b402/v1/commit", ...)`.
+4. Encrypts the note with ChaCha20-Poly1305 against
+   `recipient.viewingPub`. Computes the 2-byte viewing tag.
+5. Calls `TransactProver.prove(witness)` with the shield-shape
+   public/private inputs. Wall time ~800 ms in snarkjs WASM.
+6. Builds the `Shield` instruction (Anchor discriminator + Borsh args)
+   and submits via the chosen relayer (or self-submits if no relayer).
+
+### Source
+
+- High-level: [`packages/sdk/src/actions/shield.ts`](https://github.com/b402-ai/b402-solana/blob/main/packages/sdk/src/actions/shield.ts)
+- Low-level wallet: [`packages/sdk/src/wallet.ts`](https://github.com/b402-ai/b402-solana/blob/main/packages/sdk/src/wallet.ts)
+- Prover: [`packages/prover/src/index.ts`](https://github.com/b402-ai/b402-solana/blob/main/packages/prover/src/index.ts)
+
+## `unshield`
+
+```typescript
+import { unshield } from '@b402ai/solana';
+
+const result = await unshield({
+  connection,
+  wallet,
+  pool,
+  verifierTransact,
+  prover,
+  inputNotes,            // [Note, ...] — the user's spendable notes
+  merkleProofs,           // optional override; ClientMerkleTree if absent
+  recipientTokenAccount,  // where the unshielded tokens land
+  publicAmountOut,        // total leaving the pool
+  relayerFee,             // amount routed to relayer fee recipient
+  relayerFeeRecipient,    // pubkey of relayer's fee ATA owner
+  changeRecipient,        // {spendingPub, viewingPub} for change note (optional)
+});
+```
+
+Returns:
+
+```typescript
+type UnshieldResult = {
+  signature: string;
+  spentNullifiers: Uint8Array[];
+  changeCommitment?: Uint8Array;
+  encryptedChangeNote?: EncryptedNote;
+};
+```
+
+### What happens
+
+1. SDK assembles 2 input slots from `inputNotes` (dummies fill empty
+   slots). Computes nullifiers via `Poseidon_3("b402/v1/null",
+   spendingPriv, leafIndex)` per note.
+2. Computes a change note for `Σ inputs - publicAmountOut - relayerFee`
+   if non-zero. Encrypts to `changeRecipient.viewingPub`.
+3. Computes `recipient_bind = Poseidon_3("b402/v1/recipient-bind",
+   recipient_owner_low, recipient_owner_high)` from the
+   recipientTokenAccount's owner pubkey, split into two 128-bit halves.
+4. Computes `relayer_fee_bind = Poseidon_3("b402/v1/fee-bind",
+   relayer_fee_recipient_Fr, relayer_fee)`.
+5. Generates merkle inclusion proofs for each non-dummy input. Default
+   is `ClientMerkleTree.proveLeaf(leafIndex)`; override with
+   `merkleProofs` if you've reconstructed the tree externally.
+6. Calls `TransactProver.prove` with public + private inputs.
+7. Builds the `Unshield` ix, includes the right `NullifierShard`
+   accounts (one per nullifier prefix), submits.
+
+### Self-submission vs relayer
+
+The SDK supports both:
+
+```typescript
+// Self-submit (user pays SOL fee, no relayer fee)
+await unshield({
+  ...,
+  relayerFee: 0n,
+  relayerFeeRecipient: depositor.publicKey,
+  // 'relayer' parameter on the tx defaults to depositor
+});
+
+// Relayer-submit
+const relayerClient = new RelayerHttpClient('http://...');
+await relayerClient.submitUnshield({ ix, accountKeys, ... });
+```
+
+For the relayer client surface, see [Relayer](/sdk/relayer).
+
+## Note storage
+
+The SDK does not persist notes for you. Storage is the consumer's
+responsibility:
+
+```typescript
+import { NoteStore } from '@b402ai/solana';
+
+const store = new NoteStore();
+store.add(note, { leafIndex, commitment });
+// ... later:
+const myNotes = store.spendable();
+```
+
+`NoteStore` is in-memory by default; persistence (IndexedDB, SQLite,
+filesystem) is left to the application. The Scanner emits notes
+into a `NoteStore` automatically — see [Scanner](/sdk/scanner).
+
+## Wallet derivation
+
+`buildWallet(seed)` derives a deterministic wallet from a 32-byte seed:
+
+```typescript
+import { buildWallet } from '@b402ai/solana';
+
+const wallet = buildWallet(seed); // seed: Uint8Array(32)
+// wallet.spendingPriv  : Fr
+// wallet.spendingPub   : Fr
+// wallet.viewingPriv   : Curve25519 scalar
+// wallet.viewingPub    : Curve25519 public key
+```
+
+For agent use, derive `seed` deterministically from the agent's seed
+phrase (`m/44'/501'/0'/0'/b402'`). For human users, the SDK supports
+BIP-39 mnemonics via the same derivation path.
+
+The Rust crate `b402-crypto` (`packages/crypto`) is the parity
+reference — both must produce byte-identical wallets given the same
+seed. Tested in 128 fuzzed runs per
+[`reports/invariant-summary.md`](https://github.com/b402-ai/b402-solana-assurance/blob/main/reports/invariant-summary.md).

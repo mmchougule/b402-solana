@@ -1,0 +1,199 @@
+---
+title: Trust Assumptions
+description: "What you need to trust for b402-solana to be safe; what you don't."
+---
+
+Trust assumptions sorted from "standard cryptographic assumption everyone uses"
+to "operational policy specific to this protocol."
+
+## Cryptographic assumptions
+
+These are the same assumptions any Groth16-on-BN254 system makes.
+
+### BN254 hardness
+
+`b402-solana` uses BN254 (alt_bn128) for both the Groth16 proof system
+and the Poseidon hash. BN254 provides ~100 bits of classical security
+under standard discrete-log assumptions on its pairing-friendly curve.
+
+This is below the 128-bit floor cryptographers prefer for new designs,
+but it is the curve Solana has native syscalls for (`sol_alt_bn128_*`).
+Migration to BLS12-381 or a PQ-safe curve is post-NIST and out of scope.
+
+### Poseidon soundness and parameters
+
+We use Poseidon over BN254 with `x^5` S-box, parameters from
+[`iden3/circomlib v2.4.0`](https://github.com/iden3/circomlib) — the
+canonical reference set with a published security analysis. Round
+constants and MDS matrix are pinned at the circomlib commit.
+
+Parity tests in `b402-solana-assurance/vectors/poseidon-primitives.json`
+verify that the Rust crate (`packages/crypto`), the TypeScript
+implementation (`packages/sdk/src/poseidon.ts`), and the Circom template
+all produce byte-identical output across 35 test cases. Mismatch on any
+of these is a regression.
+
+### Groth16 soundness with honest setup
+
+If at least one Phase-2 ceremony participant discarded their toxic
+waste, breaking Groth16 soundness reduces to discrete log on BN254.
+Soundness is **conditional on honest setup**.
+
+The current devnet VK is from a **single-contributor throwaway**
+ceremony. This is not honest setup in any meaningful sense — the
+ceremony coordinator could forge proofs. **Do not use the devnet VK on
+mainnet.** This is the single largest unmitigated risk in v1.
+
+The mainnet plan from
+[`PRD-02 §7`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-02-crypto-spec.md):
+
+- **Phase 1:** reuse the Perpetual Powers of Tau (PPoT) ceremony.
+  75+ contributors including named public organizations. Pinned
+  transcript hash baked into the verifier program.
+- **Phase 2:** circuit-specific. Minimum 3 contributors, at least one
+  external organization with no formal b402 relationship. Air-gapped
+  contribution machines, public hash-chained transcript, final
+  attestation published before mainnet deploy.
+
+This work is **not started**. It is a 2–3 week calendar item dominated
+by contributor scheduling.
+
+### `Lightprotocol/groth16-solana`
+
+We do not roll our own Groth16 verifier. The `b402_verifier_transact`
+and `b402_verifier_adapt` programs wrap
+[`Lightprotocol/groth16-solana`](https://github.com/Lightprotocol/groth16-solana),
+an audited and widely-deployed verifier crate. The verifier programs
+are immutable at deploy: no upgrade authority. Mainnet reuses the same
+crate after pinning a specific audited release.
+
+## Solana runtime assumptions
+
+### `alt_bn128` syscalls
+
+`sol_alt_bn128_addition`, `sol_alt_bn128_multiplication`, and
+`sol_alt_bn128_pairing` have been on Solana mainnet since 1.18+ in 2024.
+We trust their correctness. A bug here would be a Solana-wide consensus
+issue, not a b402 issue.
+
+### `sol_poseidon` syscall
+
+Provided by Solana 1.18+ (Light Protocol's contribution).
+Costs ~100k CU per hash; used on the tree-append path and nullifier
+prefix derivation. Same trust posture as the other syscalls.
+
+### Solana consensus
+
+Same as any Solana program. We do not make additional consensus
+assumptions. We do not assume Firedancer-vs-Agave parity beyond what
+Solana's normal validator-set acceptance tests provide.
+
+## Protocol-level assumptions
+
+### Pool admin (3-of-5 multisig, 12-month sunset)
+
+Per [`PRD-01 §4`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-01-architecture.md),
+the admin can:
+
+- Pause new shields during emergency.
+- Whitelist additional SPL token mints (each gets its own sub-pool).
+- Whitelist additional adapter programs.
+- Rotate admin keys.
+
+The admin **cannot** change the verifier key, change Poseidon
+parameters, change merkle depth, change the 0% protocol fee, unshield
+user funds to a different address, read note contents, or pause
+unshields. These are hard-coded in the program with no admin-gated path.
+
+Upgrade authority is a 3-of-5 multisig with a **72-hour timelock** for
+all upgrades. After 12 months post-mainnet, the upgrade authority is
+permanently revoked (`set_authority(None)`). This is irreversible.
+
+V1 ships with single-key admin in code; PRD-03 §9 specifies the full
+multisig co-signer pattern. **Multisig is not yet implemented.**
+
+### Verifier programs are immutable
+
+`b402_verifier_transact` and `b402_verifier_adapt` are deployed with
+`upgrade_authority = None`. They cannot be patched. A bug found
+post-deploy requires a fresh program ID and a user-initiated migration
+flow (per `PRD-01 §4.4`). This is intentional: it eliminates an attack
+surface where an attacker compromising the admin key could swap the
+verifier for a permissive one.
+
+### Adapter programs are individually trusted
+
+Each adapter is a separate program. The admin registers adapters via
+`register_adapter`, with a per-instruction discriminator allowlist.
+
+A buggy adapter has **bounded blast radius**: it can fail to deliver,
+but it cannot drain the pool. This is enforced by the post-CPI
+`out_vault.amount` delta check (see [Composability](/concepts/composability)).
+The pool reads vault balance directly, never trusting adapter return
+values.
+
+Emergency disable is a single-sig admin operation; re-enable requires
+multisig. This asymmetry is on purpose — kill-switch fast, restore
+careful.
+
+### Relayer
+
+A relayer is a normal Solana keypair that pays the SOL fee for a tx and
+gets a proof-bound fee in return. Trust assumptions on the relayer:
+
+- **Cannot forge a transaction.** The proof binds amount, mint,
+  recipient, fee.
+- **Cannot front-run in a way that invalidates user intent.** The
+  proof's `recipient_bind` constrains the destination ATA owner; the
+  relayer can't redirect funds.
+- **Can censor by refusing to submit.** Mitigation: any user can run
+  their own relayer or self-submit (paying SOL themselves).
+- **Sees the user's IP** (absent Tor / VPN). Network-layer privacy is
+  out of scope.
+- **Sees the proof bytes and the public inputs.** This is the same
+  information any chain observer sees post-confirmation. The proof
+  reveals nothing about which past commitment was the source.
+
+The current default is the b402-operated relayer. There is no relayer
+allowlist; anyone can run one. Operator-side, see
+[Running a Relayer](/operations/running-a-relayer).
+
+### Trusted setup re-running
+
+If a circuit ever changes, **a new ceremony is mandatory**. There are
+no "trust me" upgrades on the verifier. PRD-01 §4.4 specifies the
+migration flow:
+
+1. Deploy a new pool with a new program ID and new verifier.
+2. Provide a "migration unshield" path: prove ownership in old pool,
+   shield-into-new-pool atomically.
+3. Leave the old pool operational indefinitely so users can always
+   exit.
+
+## What you do not need to trust
+
+- **Other users' opsec.** Each user's keys are their own. A compromised
+  spending key affects only that user's notes.
+- **The b402 team's good behavior.** Admin scope is bounded by the
+  verifier's immutability; the team cannot drain the pool or modify
+  notes.
+- **Any specific relayer.** Switch relayers freely; they are
+  interchangeable.
+- **The encrypted-note ciphertext format.** If the ciphertext is
+  malformed or the ephemeral pubkey is corrupted, funds are recoverable
+  out-of-band — sender retransmits the cleartext note, recipient
+  re-derives the commitment.
+
+## What we don't know yet
+
+These are honest unknowns:
+
+- The full set of issues a Solana-native ZK pool exposes that EVM
+  Railgun does not. Account model, parallelism, ALT semantics — all of
+  these are different. Audits will surface things.
+- Empirical Phase-2 ceremony participation. Recruiting external
+  contributors is a calendar item.
+- How the per-user-PDA upgrade for Kamino interacts with Kamino's own
+  obligation rent and upgrade flows.
+
+We document unknowns rather than paper over them.

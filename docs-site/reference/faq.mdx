@@ -1,0 +1,222 @@
+---
+title: FAQ
+description: "Common questions, especially the privacy and operational ones."
+---
+
+## Privacy
+
+### Is b402-solana actually private?
+
+Yes for **L1 (wallet → action)** linkage. Partially for **L2
+(action → action)** — Jupiter and mock are L2-private; Kamino in
+v0.1 is **not L2-private** because of single shared obligation.
+Scales with adoption for **L3 (pool clustering)**.
+
+See [Privacy Model](/concepts/privacy-model) for the precise framing
+and what's a v0.2 fix vs out of scope.
+
+### Can the b402 team unshield my funds?
+
+No. Admin scope is bounded by the verifier's immutability. Spending
+requires the `spendingPriv` preimage, which is in-circuit and never
+on chain.
+
+The admin can pause new shields, whitelist mints/adapters, and
+upgrade the program (under a 72-hour timelock for 12 months, then
+permanently revoked). They cannot freeze, redirect, or read user
+notes.
+
+### What happens if the trusted setup is compromised?
+
+The pool becomes forgeable — an attacker who retained toxic waste
+can produce valid-looking proofs that the verifier accepts. The
+attacker can drain the pool.
+
+The current devnet VK is from a **single-contributor throwaway**
+ceremony, so this is a real concern on devnet (the b402 team holds
+the key). Mainnet ships only after a multi-party Phase-2 ceremony
+with ≥ 3 contributors, ≥ 1 external organization, public
+hash-chained transcript, and air-gapped contribution machines per
+[`PRD-08`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-08-audit-launch.md).
+
+### Why isn't there a relayer allowlist?
+
+By design. Privacy.cash uses a CipherOwl-screened single relayer.
+b402's stance, per [`PRD-01 §7.3`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-01-architecture.md):
+permissionless, no KYT, no mandatory screening. Any Solana keypair
+can act as a relayer; users can switch freely or self-submit.
+
+### Can a relayer steal my funds?
+
+No, even if malicious. The proof's `recipient_bind` constrains the
+destination ATA owner; the proof's `relayer_fee_bind` constrains the
+fee. A malicious relayer can refuse to submit (censorship) but cannot
+re-route funds.
+
+The residual risk is a relayer who delays submission to front-run on
+the order book. Mitigated by Jito private bundle submission and by
+the user's ability to switch relayers.
+
+### Will my deposit be linked to my withdrawal?
+
+If you deposit X and withdraw X within minutes when no other shields
+of comparable amount happen, an analyst can correlate the two. This
+is a property of all pool-based privacy designs. The SDK exposes an
+`anonymitySet` hint per token; wait for thicker pools before
+unshielding for stronger privacy.
+
+### What about Tor / VPN?
+
+Network-layer privacy is **out of scope**. The relayer sees your IP
+unless you tunnel through Tor or a VPN. The protocol does not
+anonymize the network layer.
+
+## Operational
+
+### How long does a shield take?
+
+End-to-end ~1.3 seconds from user action to `confirmed` commitment:
+
+```
+SDK assembles witness:           ~5 ms
+Merkle root fetch from RPC:      ~30 ms
+Groth16 proof generation:        ~800 ms  (snarkjs WASM, dominant)
+Instruction encoding:            ~1 ms
+Tx signing:                      ~2 ms
+RPC submit:                      ~50 ms
+Validator processes:             ~30 ms
+Confirmed commitment:            ~400 ms (1 slot + gossip)
+```
+
+Numbers from [TX-WALKTHROUGH.md](https://github.com/b402-ai/b402-solana/blob/main/docs/TX-WALKTHROUGH.md).
+
+### How much does it cost?
+
+| Op | Solana fee | Other |
+|---|---|---|
+| Shield | 5,000 lamports (~$0.001 @ $200/SOL) | None (relayer-paid; user shielded amount unaffected) |
+| Unshield | 5,000 lamports | Optional in-kind relayer fee (market rate) |
+| Adapt | 5,000 lamports | In-kind relayer fee + downstream protocol fees (Jupiter, Kamino, etc.) |
+| New nullifier shard rent | ~0.07 SOL | Paid by relayer, recovered via fee. One-time per shard (65,536 shards max protocol-wide) |
+
+**Protocol fee: 0%, immutable.** The pool program has no fee-collection
+code path. Adding one would require deploying a new program. See
+[`PRD-01 §11`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-01-architecture.md).
+
+### Why does `adapt_execute` need so many accounts?
+
+Because Solana's CPI semantics require every account the downstream
+program touches to be passed through up front. A 2-hop Jupiter route
+typically needs ~26 accounts; a 3-hop route ~32.
+
+The b402 ALT
+(`9FPYufa1KDkrn1VgfjkR7R667hbnTA7CNtmy38QcsuNj`) packs 16 commonly-used
+accounts. Without it, longer routes overflow Solana's 1,232-byte tx
+size cap.
+
+### Why is the relayer needed?
+
+It's not strictly needed — users can self-submit by paying their own
+SOL. The relayer exists to break the L1 wallet → unshield link.
+
+If you self-submit an unshield from wallet A (with A as fee payer),
+A's pubkey is on-chain as the fee payer for that tx. That doesn't
+identify A as the *spender* (the proof hides that), but it does say
+"A submitted a b402 unshield." For some threat models that's fine;
+for others, route through a relayer.
+
+### What if my note's ciphertext is malformed?
+
+Funds are not lost. The 32-byte commitment is on chain; the sender
+knows `(tokenMint, value, random, spendingPub)` if they built the note
+honestly. Out-of-band recovery: sender retransmits the cleartext;
+recipient re-derives the commitment and spends as normal.
+
+### Can I shield arbitrary amounts?
+
+Yes. Notes hold any `u64` value. Tornado-style fixed denominations
+are explicitly rejected per
+[`PRD-01 §8`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-01-architecture.md#8-anonymity-set-design)
+because they fragment the anonymity set.
+
+### Can I shield SPL tokens other than USDC and wSOL?
+
+Yes once admin runs `add_token_config(mint)`. The circuit treats
+`tokenMint` as a runtime variable; adding a token does not require a
+program upgrade or a circuit change.
+
+V1 launches with USDC + wSOL whitelisted; additional mints are added
+as adoption demands.
+
+## Comparison to other Solana privacy projects
+
+### How does b402-solana compare to Privacy.cash?
+
+| | b402-solana | Privacy.cash |
+|---|---|---|
+| Atomic DeFi composability | yes | no (unshield + reshield wrapper) |
+| Protocol fee | 0% | 0.35% |
+| Compliance | user-sovereign opt-in | mandatory CipherOwl screening |
+| Audits | not yet | 18 + Veridise FV |
+| Adapter ecosystem | growing (Jupiter live, Kamino verified, Adrena/Orca scaffolded) | none |
+
+Privacy.cash leads on audit count and operational maturity. b402-solana
+differentiates on permissionlessness and DeFi composability.
+
+### How does b402-solana compare to Umbra (Arcium)?
+
+Different trust model. b402 uses ZK over BN254 with a multi-party
+trusted setup. Umbra uses MPC. They are complementary; not strictly
+competing. b402 plans to address Solana-native sealed-bid / confidential-NAV
+primitives via Arcium adapters in a future PRD.
+
+### How does b402-solana compare to Token-2022 Confidential Transfer?
+
+Token-2022 CT requires the ZK ElGamal program, which is currently
+disabled on Solana mainnet pending audit. When it re-enables, b402
+will consider a Confidential-Transfer-aware mode. For v1, CT is a
+non-goal.
+
+## Engineering
+
+### Where do I find canonical examples?
+
+- [`examples/swap-e2e-jupiter.ts`](https://github.com/b402-ai/b402-solana/blob/main/examples/swap-e2e-jupiter.ts)
+  — real Jupiter swap on mainnet-fork.
+- [`examples/scanner-e2e.ts`](https://github.com/b402-ai/b402-solana/blob/main/examples/scanner-e2e.ts)
+  — Alice → Bob → Charlie auto-discovery.
+- [`examples/kamino-adapter-fork-deposit.ts`](https://github.com/b402-ai/b402-solana/blob/main/examples/kamino-adapter-fork-deposit.ts)
+  — Kamino deposit through the adapter (mainnet-fork verified).
+
+### Where do I find the canonical tests?
+
+- Rust crypto: `cargo test -p b402-crypto`
+- Verifier: `cargo test -p b402-verifier-transact`
+- Circuits: `cd circuits && RUN_PARITY=1 RUN_CIRCUIT_TESTS=1 pnpm vitest run`
+- Prover: `cd packages/prover && RUN_PROVER=1 RUN_VERIFIER=1 pnpm vitest run`
+- On-chain (litesvm): `cd tests/onchain && cargo test`
+- SDK: `pnpm --filter=@b402ai/solana test`
+
+### What's the upgrade authority on the pool?
+
+For 12 months post-mainnet: 3-of-5 multisig with 72-hour timelock.
+After 12 months: permanently revoked (`set_authority(None)`). This
+is a hard lock — once revoked, even the multisig cannot upgrade.
+
+### Why Anchor?
+
+Mature framework, well-audited account macros, idiomatic event/error
+patterns. The decision is in [`PRD-01 §5`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-01-architecture.md);
+alternatives (raw Solana programs, native account discrimination)
+were rejected for code-review surface.
+
+### Can I run a private mainnet?
+
+Yes — the program code is Apache 2.0. You'd need to:
+
+1. Deploy your own pool, verifier, and adapter programs.
+2. Run your own Phase-2 trusted-setup ceremony.
+3. Audit (or accept the unaudited risk yourself).
+
+The b402-deployed mainnet uses a specific multi-party ceremony and
+audit pipeline; running your own means you take that responsibility.

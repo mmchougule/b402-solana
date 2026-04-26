@@ -1,0 +1,210 @@
+---
+title: Kamino Adapter
+description: "Private lend / withdraw / borrow / repay on Kamino Lend, with the v0.1 single-obligation caveat documented honestly."
+---
+
+`b402-kamino-adapter` integrates Kamino Lend for private deposit,
+withdraw, borrow, and repay. It is the first b402 adapter with
+non-trivial protocol state — Kamino's `Obligation` PDA tracks per-user
+collateral and debt — and how that state is owned is the most
+important architectural decision in this adapter.
+
+Devnet ID: `2enwFgcGKJDqruHpCtvmhtxe3DYcV3k72VTvoGcdt2rX`.
+
+Source: [`programs/b402-kamino-adapter/src/lib.rs`](https://github.com/b402-ai/b402-solana/blob/main/programs/b402-kamino-adapter/src/lib.rs).
+Spec: [`PRD-09`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-09-kamino-adapter.md).
+
+## Status
+
+| Op | Status |
+|---|---|
+| `Deposit` | **Verified GREEN** against cloned klend mainnet bytecode 2026-04-26 |
+| `Withdraw` | Coded with v1 ix set + refresh sequence; mainnet-fork verification pending |
+| `Borrow` | Same |
+| `Repay` | Same |
+
+The deposit gate is what proves the wiring works end-to-end. See
+[`examples/kamino-fork-deposit.ts`](https://github.com/b402-ai/b402-solana/blob/main/examples/kamino-fork-deposit.ts)
+for the verified flow.
+
+## Action variants
+
+```rust
+pub enum KaminoAction {
+    Deposit  { reserve: Pubkey, in_amount: u64, min_kt_out: u64 },
+    Withdraw { reserve: Pubkey, kt_in: u64, min_underlying_out: u64 },
+    Borrow   { reserve: Pubkey, amount_out: u64, max_collateral_used_bps: u16 },
+    Repay    { reserve: Pubkey, amount_in: u64 },
+}
+```
+
+Borsh-serialized as the `action_payload` to `adapt_execute`.
+
+| Op | IN mint | OUT mint | Effect |
+|---|---|---|---|
+| `Deposit` | underlying (e.g. USDC) | reserve.collateral_mint (kUSDC) | Mint shielded cToken-equivalent note |
+| `Withdraw` | reserve.collateral_mint (kUSDC) | underlying (USDC) | Burn cToken note, receive underlying |
+| `Borrow` | cToken (proof of position; passes through) | borrowed asset (e.g. SOL) | Receive borrowed asset as new shielded note |
+| `Repay` | borrowed asset | underlying (refund vault) | Reduce debt; refund excess |
+
+## Per-op refresh sequence
+
+Every Kamino op is preceded by `refresh_reserve` and `refresh_obligation`
+CPIs, which consume the Pyth/Switchboard oracle data and update the
+reserve's accrued interest before any state-changing call. If oracle
+data is stale, `refresh_reserve` fails and the entire adapt tx
+reverts cleanly — no partial state.
+
+For `Deposit` only, three additional lazy-init CPIs run if the relevant
+accounts don't yet exist:
+
+1. `init_user_metadata` — creates Kamino's user metadata PDA.
+2. `init_obligation` — creates the Vanilla obligation PDA.
+3. `init_obligation_farms_for_reserve` — enrolls the obligation in the
+   reserve's collateral farm (only if the reserve has a farm attached).
+
+These rent-fund the corresponding accounts; the relayer pays SOL and is
+recovered via the in-kind fee.
+
+## v0.1: the single-obligation caveat
+
+<Warning>
+  **In the current implementation, all b402 shielded users share one
+  Kamino obligation.** L2 unlinkability among Kamino users does not hold
+  in v0.1. See [Privacy Model — Layer 2](/concepts/privacy-model#l2-action-action-cross-action-linkability)
+  for the full caveat.
+</Warning>
+
+From [`programs/b402-kamino-adapter/src/lib.rs:23-46`](https://github.com/b402-ai/b402-solana/blob/main/programs/b402-kamino-adapter/src/lib.rs):
+
+> For the v0.1 test-gate landing we ship (2). The Deposit / Withdraw /
+> Borrow / Repay handlers all use `adapter_authority` as the Kamino
+> obligation owner.
+
+What this means for an observer:
+
+- Every b402-Kamino state change writes to a single obligation PDA.
+- The observer cannot link a specific b402-Kamino action to a wallet
+  pubkey (L1 still holds).
+- The observer **can** group every b402-Kamino action as "from the same
+  obligation" — collapsing L2 unlinkability.
+
+For a deposit-only flow where the user immediately receives a shielded
+cToken note and never interacts with their position again, this is
+fine. For active use (deposit + borrow + repeated repay/withdraw),
+this leaks usage patterns by aggregate.
+
+### Why v0.1 ships this way
+
+The per-user obligation design (PRD-09 §7.2 Option B) requires:
+
+- A circuit constraint that binds `viewing_pub_hash` to the obligation
+  PDA address, exposed as 2 new public inputs (`obligation_pubkey_lo`,
+  `obligation_pubkey_hi`).
+- A re-run of the trusted-setup ceremony for the new circuit shape.
+- Lazy `init_obligation` per (user, market) pair, costing ~0.005 SOL
+  rent each.
+- New `derive_owner_pda(viewing_pub_hash)` and
+  `derive_obligation_pda(...)` helpers (already exist in the source
+  code, **gated `#[allow(dead_code)]`** at line 833).
+
+These pieces are scaffolded but not connected. PRD-09's authors chose
+to ship v0.1 with shared obligation to validate the rest of the wiring
+end-to-end against real Kamino mainnet bytecode, then sequence the
+per-user upgrade alongside the v2 ABI work (PRD-13 shadow PDAs makes
+this generic).
+
+### v0.2 plan
+
+Per PRD-09 §7.2 and PRD-13:
+
+```
+shadow_pda = PDA([
+  b"b402-shadow",
+  KAMINO_ADAPTER_PROGRAM_ID,
+  b"kamino:obligation:v1",
+  viewing_key_commitment,
+])
+```
+
+Where `viewing_key_commitment` is the Poseidon hash of the user's
+viewing pubkey, which is **already** part of every shielded note's
+schema (it's the encryption target). Using it as a PDA seed adds zero
+new privacy leak — the viewing key was always public — but cleanly
+partitions each user's Kamino position.
+
+This is the canonical "per-user PDA pattern" PRD-13 generalizes for all
+adapters with per-user state (Drift, Marginfi, Adrena positions, etc.).
+
+## Account layout (deposit case)
+
+The pool passes 6 named accounts; `remaining_accounts` carries the
+Kamino-specific list. From `ra_deposit` in the adapter source:
+
+```
+remaining_accounts (Deposit):
+   0: reserve                                       (writable)
+   1: lending_market
+   2: lending_market_authority
+   3: reserve.liquidity_supply_vault                (writable)
+   4: reserve.collateral_mint                       (writable)
+   5: reserve.collateral_supply_vault               (writable)
+   6: oracle_pyth_or_sentinel
+   7: oracle_switchboard_price_or_sentinel
+   8: oracle_switchboard_twap_or_sentinel
+   9: oracle_scope_or_sentinel
+  10: reserve.liquidity_mint
+  11: farms_program
+  12: user_metadata                                 (lazy init)
+  13: obligation                                    (lazy init, writable)
+  14: obligation_farm_or_sentinel                   (lazy init if farm)
+  15: reserve_farm_state_or_sentinel
+  16: sysvar_instructions
+  17: system_program
+  18: rent_sysvar
+```
+
+The TS driver in `examples/kamino-adapter-fork-deposit.ts` is the
+canonical assembly site for this list — anything else is wrong.
+
+## Reproduction
+
+```bash
+# Boot a mainnet-fork validator with Kamino + reserves cloned
+./ops/kamino-fork-validator.sh --reset
+
+# Run shielded deposit
+cd examples && pnpm tsx kamino-adapter-fork-deposit.ts
+```
+
+Output confirms a successful deposit: shielded USDC → on-chain
+obligation gains collateral; b402 user receives a shielded kUSDC note.
+
+## Liquidation handling
+
+Per [`PRD-09 §8`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-09-kamino-adapter.md#8-liquidation-handling),
+v1 ships **Option L1: Accept liquidation; document the failure mode.**
+
+If a user's borrow position falls below the liquidation threshold,
+Kamino's liquidator can liquidate. The shielded cToken notes remain
+"valid" (they encode cToken units, not protocol-state pointers), but
+when the user attempts to withdraw, the obligation no longer holds the
+recorded collateral. The withdraw reverts.
+
+SDK's `status` endpoint will (post-implementation) cross-reference
+shielded balances against on-chain obligation state and surface "this
+position was liquidated; current redeemable: 0".
+
+In-circuit health-factor floor (Option L2) and insurance pool (Option
+L3) are deferred to future PRDs.
+
+## Continue reading
+
+<CardGroup cols={2}>
+  <Card title="Privacy Model" icon="user-secret" href="/concepts/privacy-model">
+    The L2 caveat in detail.
+  </Card>
+  <Card title="Adapter overview" icon="plug" href="/adapters/overview">
+    The general ABI all adapters implement.
+  </Card>
+</CardGroup>

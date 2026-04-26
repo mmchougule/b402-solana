@@ -1,0 +1,167 @@
+---
+title: Monitoring
+description: "Subscribing to pool events, on-chain metrics, and what to alert on."
+---
+
+The pool emits Anchor `emit!` events on every state change. Off-chain
+indexers / monitors / explorers consume these to track tree state,
+pool TVL, adapter usage, and incident response.
+
+## Events
+
+From `programs/b402-pool/src/events.rs`:
+
+```rust
+#[event] pub struct CommitmentAppended {
+    pub leaf_index: u64,
+    pub commitment: [u8; 32],
+    pub ciphertext: [u8; 89],
+    pub ephemeral_pub: [u8; 32],
+    pub viewing_tag: [u8; 2],
+    pub tree_root_after: [u8; 32],
+    pub slot: u64,
+}
+
+#[event] pub struct NullifierSpent {
+    pub nullifier: [u8; 32],
+    pub shard: u16,
+    pub slot: u64,
+}
+
+#[event] pub struct ShieldExecuted     { pub mint, pub amount, pub slot }
+#[event] pub struct UnshieldExecuted   { pub mint, pub amount, pub slot }
+#[event] pub struct AdaptExecuted {
+    pub adapter_program: Pubkey,
+    pub in_mint: Pubkey,
+    pub out_mint: Pubkey,
+    pub public_amount_in: u64,
+    pub out_delta: u64,
+    pub expected_out_value: u64,
+    pub relayer_fee: u64,
+    pub slot: u64,
+}
+```
+
+All events surface as base64 `Program data:` log lines. The SDK helper
+`parseProgramDataLog` decodes them.
+
+## Subscribing
+
+```typescript
+const sub = connection.onLogs(
+  poolProgramId,
+  (log) => {
+    for (const line of log.logs) {
+      const parsed = parseProgramDataLog(line);
+      if (parsed?.kind === 'CommitmentAppended') {
+        // ...
+      }
+    }
+  },
+  'confirmed',
+);
+```
+
+The `Scanner` SDK class handles this for client wallets; for an
+indexer or monitoring service, subscribe directly.
+
+## Useful aggregates
+
+### Pool TVL by mint
+
+Read the SPL token balance of `Vault[mint]` PDA — straightforward.
+Doesn't require event consumption:
+
+```typescript
+import { vaultPda } from '@b402ai/solana';
+
+const vault = vaultPda(pool, mint)[0];
+const balance = await connection.getTokenAccountBalance(vault);
+```
+
+### Anonymity-set size (commitments)
+
+Count `CommitmentAppended` events since the pool was initialized.
+Cheap to maintain incrementally — every event includes
+`tree_root_after` and `leaf_index`, so you reconstruct without RPC
+back-walks.
+
+For SDK consumers, a simpler signal:
+
+```typescript
+import { fetchTreeState } from '@b402ai/solana';
+
+const tree = await fetchTreeState(connection, pool);
+const totalCommitments = tree.leafCount;  // bigint
+```
+
+### Per-adapter usage rate
+
+Count `AdaptExecuted` events per `adapter_program` per time window.
+Useful for SDK clients to surface "adapter X is failing 40% — wait
+before using."
+
+### Per-mint flow
+
+`ShieldExecuted` and `UnshieldExecuted` give you a clean
+deposit/withdrawal volume signal per mint.
+
+## What to alert on (operations)
+
+For a relayer / indexer operator:
+
+- **Pool paused.** `paused_shields` or `paused_adapts` flipping is an
+  emergency signal. Read `PoolConfig` periodically.
+- **Adapter disabled.** `disable_adapter` is the kill switch; alerting
+  on this notifies clients to retry against a different adapter.
+- **Verifier mismatch.** `pool_config.verifier_*` should match the
+  expected program IDs. Alert on drift.
+- **Stale tree root.** If `tree_state.root_ring[ring_head]` hasn't
+  changed in N seconds, no shields/spends are landing — RPC issue or
+  protocol issue.
+- **Nullifier collision rate.** A `NullifierAlreadySpent` error rate
+  spike on `transact` / `unshield` / `adapt_execute` instructions
+  indicates either a buggy client (replaying spends) or — much more
+  importantly — a potential cryptographic issue. Page humans.
+- **Adapt delta-check failures.** `AdapterReturnedLessThanMin` errors
+  indicate either user-side slippage misconfig (expected) or adapter
+  malfunction (page humans).
+
+## Indexer reconstruction
+
+Building the full off-chain state from RPC replay:
+
+1. From slot 0 (or last checkpointed slot), iterate
+   `getSignaturesForAddress(poolProgramId)`.
+2. For each signature, `getTransaction(sig, { commitment:
+   'confirmed', maxSupportedTransactionVersion: 0 })`.
+3. Parse the `meta.logMessages` for `Program data:` lines.
+4. Reconstruct:
+   - The merkle tree (append in `leaf_index` order).
+   - The nullifier set (insert each `nullifier`).
+   - Per-mint TVL aggregates.
+   - Per-adapter usage.
+
+This is what the Scanner does for a single user's notes; an indexer
+does it for the whole pool. State is fully recoverable from chain —
+no off-chain dependencies.
+
+## RPC requirements
+
+For mainnet, **use a paid RPC.** Helius / Triton / Alchemy. The
+b402 EVM rule applies: free public RPC crashes Railgun-style flows
+because of subscription drops, archive request limits, and rate
+limits. From the user's memory: never free public RPC.
+
+Cloud Run note from `feedback_cloudrun_ipv4.md` and
+`feedback_cloudrun_cpu_throttling.md`:
+
+```
+NODE_OPTIONS=--dns-result-order=ipv4first
+--no-cpu-throttling --cpu-boost
+```
+
+## Reference
+
+- Events: [`programs/b402-pool/src/events.rs`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-pool/src)
+- Parser: [`packages/sdk/src/notes/scanner.ts`](https://github.com/b402-ai/b402-solana/tree/main/packages/sdk/src/notes/scanner.ts) (`parseProgramDataLog`)

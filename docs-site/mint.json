@@ -1,0 +1,116 @@
+{
+  "$schema": "https://mintlify.com/schema.json",
+  "name": "b402-solana",
+  "logo": {
+    "light": "/logo.svg",
+    "dark": "/logo.svg"
+  },
+  "favicon": "/favicon.svg",
+  "colors": {
+    "primary": "#a78bfa",
+    "light": "#c4b5fd",
+    "dark": "#7c3aed",
+    "background": {
+      "dark": "#0a0a0f"
+    },
+    "anchors": {
+      "from": "#a78bfa",
+      "to": "#7c3aed"
+    }
+  },
+  "theme": "venus",
+  "modeToggle": {
+    "default": "dark",
+    "isHidden": false
+  },
+  "topbarLinks": [
+    {
+      "name": "GitHub",
+      "url": "https://github.com/b402-ai/b402-solana"
+    }
+  ],
+  "topbarCtaButton": {
+    "name": "Run e2e",
+    "url": "/quickstart"
+  },
+  "navigation": [
+    {
+      "group": "Get Started",
+      "pages": [
+        "introduction",
+        "quickstart"
+      ]
+    },
+    {
+      "group": "Concepts",
+      "pages": [
+        "concepts/shielded-pool",
+        "concepts/composability",
+        "concepts/privacy-model",
+        "concepts/trust-assumptions",
+        "concepts/threat-model"
+      ]
+    },
+    {
+      "group": "Protocol",
+      "pages": [
+        "protocol/architecture",
+        "protocol/circuits",
+        "protocol/pool-program",
+        "protocol/verifier",
+        "protocol/nullifier-tree"
+      ]
+    },
+    {
+      "group": "Adapters",
+      "pages": [
+        "adapters/overview",
+        "adapters/jupiter",
+        "adapters/kamino",
+        "adapters/adrena",
+        "adapters/orca",
+        "adapters/building-an-adapter"
+      ]
+    },
+    {
+      "group": "SDK",
+      "pages": [
+        "sdk/installation",
+        "sdk/shield-unshield",
+        "sdk/private-actions",
+        "sdk/scanner",
+        "sdk/relayer"
+      ]
+    },
+    {
+      "group": "Operations",
+      "pages": [
+        "operations/running-a-relayer",
+        "operations/fork-testing",
+        "operations/monitoring"
+      ]
+    },
+    {
+      "group": "Assurance",
+      "pages": [
+        "assurance/methodology",
+        "assurance/parity-vectors",
+        "assurance/property-invariants",
+        "assurance/fuzzing",
+        "assurance/benchmarks"
+      ]
+    },
+    {
+      "group": "Reference",
+      "pages": [
+        "reference/program-ids",
+        "reference/instruction-reference",
+        "reference/error-codes",
+        "reference/faq"
+      ]
+    }
+  ],
+  "footerSocials": {
+    "github": "https://github.com/b402-ai/b402-solana"
+  }
+}

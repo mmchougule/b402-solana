@@ -1,0 +1,153 @@
+---
+title: Running a Relayer
+description: "Operational guide for running an @b402ai/solana-relayer service."
+---
+
+The relayer service (`@b402ai/solana-relayer`) is a Fastify HTTP server
+that takes user-built shielded instructions and submits them with the
+relayer as the fee payer. This page is the operator's guide.
+
+For the client-side surface, see [SDK → Relayer Client](/sdk/relayer).
+
+## Quick start
+
+```bash
+pnpm install
+pnpm --filter=@b402ai/solana-relayer build
+
+export RPC_URL=https://api.devnet.solana.com
+export RELAYER_KEYPAIR=$HOME/.config/solana/relayer.json
+export POOL_PROGRAM_ID=42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y
+export PORT=8080
+
+pnpm --filter=@b402ai/solana-relayer dev
+# or:  node packages/relayer/dist/index.js
+```
+
+```bash
+curl -s http://localhost:8080/health | jq
+```
+
+## Configuration
+
+| env | required | default | meaning |
+|---|---|---|---|
+| `RPC_URL` | yes | — | Solana JSON-RPC. Use Helius/Triton/Alchemy for mainnet. |
+| `RELAYER_KEYPAIR` | yes | — | Path to a Solana JSON keypair (64-byte array). |
+| `POOL_PROGRAM_ID` | yes | — | Whitelisted pool program (`b402-pool`). |
+| `JUPITER_ADAPTER_ID` | no | — | Allowed adapter for `/relay/adapt`. |
+| `MOCK_ADAPTER_ID` | no | — | Devnet test adapter. |
+| `EXTRA_ADAPTER_IDS` | no | — | Comma-separated extra adapter pubkeys. |
+| `JITO_BUNDLE_URL` | no | plain RPC | Switches submit to Jito sendBundle. |
+| `MIN_FEE_LAMPORTS` | no | `0` | Reject txs below this fee floor. |
+| `API_KEY_FILE` | no | `""` (auth off) | Path to JSON `{ "<keyId>": { ... } }`. |
+| `PORT` | no | `8080` | Listen port. |
+| `HOST` | no | `0.0.0.0` | Bind addr. |
+| `LOG_LEVEL` | no | `info` | pino level. |
+
+### API-key file shape
+
+```json
+{
+  "kp_3f9b1a2c0d4e6f78": { "rateLimitPerMin": 30, "label": "client-a" },
+  "kp_a1b2c3d4e5f60718": {
+    "rateLimitPerMin": 5,
+    "tokenAllowlist": ["EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"]
+  }
+}
+```
+
+Pass via `Authorization: Bearer kp_3f9b1a2c0d4e6f78` or
+`x-api-key: ...`. PII (auth headers) is redacted by pino in logs.
+
+## Docker
+
+```bash
+docker build -f packages/relayer/Dockerfile -t b402-solana-relayer .
+
+docker run --rm \
+  -e RPC_URL=$RPC_URL \
+  -e POOL_PROGRAM_ID=$POOL_PROGRAM_ID \
+  -e RELAYER_KEYPAIR=/secrets/relayer.json \
+  -e API_KEY_FILE=/secrets/api-keys.json \
+  -v $HOME/.config/solana:/secrets:ro \
+  -p 8080:8080 \
+  b402-solana-relayer
+```
+
+## Cloud Run
+
+Three settings that matter for a Solana RPC-heavy Node service:
+
+```
+--no-cpu-throttling --cpu-boost
+NODE_OPTIONS=--dns-result-order=ipv4first
+--min-instances=1
+```
+
+- **`--no-cpu-throttling --cpu-boost`** — CPU-throttled instances
+  serialize Helius/Triton outbound requests, which catastrophically
+  slows ZK proof flows that aren't even on this critical path. Disable
+  throttling.
+- **`NODE_OPTIONS=--dns-result-order=ipv4first`** — Helius and Triton
+  sometimes resolve to AAAA records first; Node 18+ picks the first
+  hit, which can hang outbound. Force IPv4 first.
+- **`--min-instances=1`** — cold starts cost ~3s for `web3.js` +
+  Fastify; not worth saving the cents.
+
+## Jito integration
+
+If `JITO_BUNDLE_URL` is set, the relayer submits via `sendBundle`
+instead of `sendTransaction`. This routes through Jito's private
+mempool, mitigating front-running risk on adapt-execute flows.
+
+The relayer does not implement bundle bidding strategy; it adds a
+fixed Jito tip that the operator configures separately. For bidding,
+operators can fork or run a sidecar.
+
+## Trust model the operator commits to
+
+By running the b402-default relayer config, the operator commits to:
+
+1. **No proof generation server-side.** All ZK proofs are produced
+   client-side. The relayer only forwards bytes.
+2. **No note custody.** The relayer never sees note randomness,
+   viewing keys, or spending keys.
+3. **No MEV extraction.** The relayer signs and submits exactly what
+   the client asked for, after policy checks. No reordering, no
+   sandwiching, no selective censorship.
+4. **No request logging beyond pino's default `info` events**
+   (signature + slot + duration). API keys and request bodies are
+   redacted.
+
+These commitments are policy, not protocol-enforced. A malicious
+operator could violate them. The protocol-level defense is "switch
+relayers" — anyone can run one.
+
+## Monitoring
+
+```bash
+curl -s http://localhost:8080/health
+```
+
+Returns relayer pubkey, current SOL balance, RPC slot, etc. Wire to
+your alerting stack:
+
+- Alert if `relayerLamports < N` (relayer needs to top up).
+- Alert if `rpcSlot` is stale relative to mainnet.
+- Track `5xx / total request rate`.
+
+## Tests
+
+```bash
+pnpm --filter=@b402ai/solana-relayer test
+```
+
+Covers auth + rate limiting, request validation + fee extraction, and
+tx assembly with a stubbed Connection. Optional integration test
+against `solana-test-validator` is gated behind `RELAYER_INT=1`.
+
+## Reference
+
+- Source: [`packages/relayer/src/`](https://github.com/b402-ai/b402-solana/tree/main/packages/relayer/src)
+- Operator README: [`packages/relayer/README.md`](https://github.com/b402-ai/b402-solana/blob/main/packages/relayer/README.md)

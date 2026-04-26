@@ -1,28 +1,47 @@
 # b402-solana
 
-Private DeFi on Solana — shielded pool for SPL tokens, composable execution path
-for Jupiter (and other adapters), gasless, 0% protocol fee, permissionless.
-Circom 2 + Groth16 + Anchor.
+Private DeFi on Solana — shielded UTXO pool + composable execution layer.
+Shield once, then swap / lend / perp / LP through any registered adapter without
+ever appearing on-chain as the executing wallet.
 
-Counterpart to the b402 Railgun fork on Base, Arbitrum, and BSC. Same UTXO +
-viewing-key model; ported to Solana's account-centric runtime.
+Same construction class as Railgun (Groth16 + Poseidon + commitments + nullifiers
++ viewing keys), compiled native to SVM as Anchor programs.
 
-> ⚠️ **Alpha, devnet only. Not audited. Trusted-setup ceremony is a single-contributor
-> throwaway — do not deploy real funds.**
+> ⚠️ **Alpha. Not audited. Single-contributor throwaway trusted-setup VK.
+> Single-key admin during alpha — multisig migration in roadmap. TVL caps + bug
+> bounty + multi-party ceremony before the alpha disclaimer comes off. The
+> three-layer privacy framing in [Privacy model](#privacy-model) below is the
+> precise claim — read it before depositing real funds.**
+
+## Adapter status
+
+| Adapter | Network status | What it enables |
+|---|---|---|
+| Jupiter v6 | live on devnet, mainnet-fork verified end-to-end | private swap (any Solana mint w/ Jupiter route) |
+| Kamino lend | mainnet-fork verified end-to-end through `b402_kamino_adapter::execute` | private lend / borrow against real Kamino reserves |
+| Mock | live on devnet | adapter ABI invariants test path |
+| Adrena perps | scaffold + verified discriminators (PRD-16) | private leveraged trading (impl in progress) |
+| Orca whirlpool LP | scaffold | private LP (gated on PRD-04 dual-delta amendment) |
+| Jupiter perps | scaffold; deferred | request-queue model; awaits v2 ABI two-phase claim notes (PRD-14) |
+| Drift perps | spec only (PRD-10) | deferred — Drift is post-incident rebooting after $285M April 2026 hack |
 
 ## What works today
 
-- Shield and unshield on Solana devnet with real Groth16 proofs.
-- `adapt_execute` composition path (feature-gated `adapt-devnet`) that
-  CPIs any registered adapter. Validated end-to-end against **real
-  Jupiter V6** on a mainnet-forked validator: 0.1 wSOL → 8.549 USDC
-  through SolFi V2, real aggregator bytecode, real pool state cloned
-  from mainnet.
-- Recipient-side privacy: a `Scanner` subscribes to pool logs, runs
-  viewing-tag pre-filter + ECDH decrypt, auto-discovers incoming notes.
-  Alice → Bob → Charlie is wired and green.
-- 71 tests across Rust crypto, verifier, Circom parity, prover, on-chain
-  (litesvm), and SDK tx-size regression. See `docs/REPRODUCE.md`.
+- **Private swap on devnet** — shield → real Groth16 adapt proof (23 public inputs)
+  → unshield, fits in one v0 transaction with an ALT.
+- **Private swap on mainnet-fork w/ real Jupiter v6** — 0.1 wSOL → 8.549 USDC
+  routed through SolFi V2, real aggregator bytecode, real cloned mainnet AMM state.
+- **Private lend on mainnet-fork w/ real Kamino** — 1 USDC deposited as collateral
+  against the cloned mainnet USDC reserve via `b402_kamino_adapter`. Single tx,
+  obligation account grew 0 → 3344 B (Kamino recorded the position).
+- **Recipient-side privacy** — `Scanner` subscribes to pool logs, runs viewing-tag
+  Poseidon pre-filter + ECDH decrypts matches, auto-discovers incoming notes.
+  Alice → Bob → Charlie green.
+- **HTTP relayer service** (`packages/relayer/`) — Fastify + Jito-bundle support,
+  OFAC SDN screening hook, per-API-key rate limit. Lets users submit shielded txs
+  without their identity wallet appearing as fee payer.
+- **100+ tests** across Rust crypto, verifier programs, Circom parity, prover,
+  on-chain litesvm, SDK tx-size regression. See `docs/REPRODUCE.md`.
 
 **Devnet deployment (2026-04-25)**
 
@@ -56,6 +75,59 @@ See `docs/TX-WALKTHROUGH.md` for a layer-by-layer anatomy of both, and
 Proof verification fits in one instruction (under Solana's 1.4M CU budget),
 so no multi-tx split required — cheaper and simpler than the EVM
 counterpart.
+
+## Privacy model
+
+The chain is public. Every byte of every transaction is visible. b402 doesn't
+make Solana private. What it cryptographically breaks is the **link between
+your wallet and your shielded actions**, layer by layer:
+
+| Layer | What | Status today |
+|---|---|---|
+| **L1: wallet ↔ action** | After you shield, your wallet doesn't appear in any subsequent shielded tx. | ✅ broken cryptographically (commitment + nullifier construction; same as Railgun / Tornado / Aztec) |
+| **L2: action ↔ action** | Two shielded actions by the same user can't be trivially linked. | ⚠️ partial — broken at the *note* layer (each note has unique commitment + nullifier). For stateful adapters that have a shared protocol-side account (e.g. v0.1 Kamino uses a single shared obligation across all b402 users), in-pool action-to-action linkage among b402 users IS observable. Per-user obligation PDA from `viewing_pub_hash` is in [`derive_owner_pda`][derive_owner_pda] but gated to v0.2. |
+| **L3: pool-level statistical clustering** | Timing + amount correlation across the boundary of the pool. | ⚠️ scales with anonymity set. Small pool = weak protection; large pool = strong. Alpha is small and capped. |
+
+[derive_owner_pda]: programs/b402-kamino-adapter/src/lib.rs
+
+**The threat model b402 defends against:** the dominant real-world adversary —
+bots scraping wallets to copy strategies, MEV searchers targeting public DEX
+flow, surveillance-grade indexers (Chainalysis, Nansen, Arkham) building
+wallet-level histories. Layer 1 unlinkability is complete protection here.
+
+**The threat model b402 does NOT fully defend against (yet):** patient
+clustering analysts running timing-and-amount correlation across the pool
+boundary at small TVL. This is a fundamental property of UTXO-mixer
+constructions, not a b402-specific weakness. It is solved by adoption — every
+shield strengthens every other user's privacy.
+
+For autonomous agents specifically — where the adversary is automated
+strategy-copying bots, not patient analysts — Layer 1 is sufficient. That's
+the use case we lead with.
+
+## Trust assumptions during alpha
+
+These are the explicit, deliberate weaknesses of alpha. Each has a roadmap
+out of it — none are blockers for a credible alpha launch, but you should
+know them before depositing real funds:
+
+- **Single-key admin.** The pool's `admin_multisig` is currently a single
+  pubkey. Migration to a 3-of-5 Squads multisig is a roadmap item — alpha
+  is small enough that fast pause-unpause via single key is operationally
+  preferred during the first weeks.
+- **Throwaway trusted-setup VK.** A single contributor (us) ran the
+  `transact` and `adapt` ceremonies. Multi-party ceremony with ≥3
+  contributors (≥1 external) is a planned step before TVL caps lift.
+- **No external audit yet.** Engagements being scoped with Veridise +
+  Trail of Bits + Zellic. Reports will be linked here when they land.
+- **Soft TVL cap.** We commit to not promoting deposits beyond a small
+  initial cap. A hard `max_pool_tvl_per_mint` field in `PoolConfig` lands
+  before any community-promoted deposit.
+- **Apache 2.0 + permissionless + 0% fee posture.** This matches Railgun
+  on EVM. We've reviewed Tornado Cash legal precedent and structure
+  operations accordingly: relayer screens OFAC SDN list, geographic IP
+  restrictions on relayer/frontend, sanctions-counsel review in progress,
+  no operator custody at any point.
 
 ## What's implemented
 

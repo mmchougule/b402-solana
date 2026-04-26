@@ -1,0 +1,215 @@
+---
+title: Assurance Methodology
+description: "How b402-solana's separate assurance workspace verifies the production stack."
+---
+
+`b402-solana-assurance` is an isolated workspace whose sole purpose is
+to verify, stress-test, and benchmark the production `b402-solana`
+implementation **without modifying it**. It treats the main repo as
+the immutable system under test.
+
+Source: [`b402-solana-assurance`](https://github.com/b402-ai/b402-solana-assurance)
+
+## Why isolated
+
+Per the workspace README:
+
+> - the active repo is under concurrent development
+> - SBF builds are sensitive to dependency and stack changes
+> - fuzz corpora, benchmark baselines, and generated reports should be
+>   kept deliberate and reviewable
+
+Practical implication: the assurance repo never edits the production
+crate sources or program code. It pulls them as path dependencies,
+adds parity reference implementations, runs property/fuzz/benchmark
+harnesses, and emits machine-readable artifacts plus human-readable
+reports.
+
+## PRD set
+
+Six PRDs sequenced in order:
+
+| PRD | Topic |
+|---|---|
+| [`PRD-A01`](https://github.com/b402-ai/b402-solana-assurance/blob/main/prds/PRD-A01-assurance-architecture.md) | Assurance architecture & methodology |
+| [`PRD-A02`](https://github.com/b402-ai/b402-solana-assurance/blob/main/prds/PRD-A02-parity-vectors.md) | Parity vectors (Rust ↔ TS ↔ Circom) |
+| [`PRD-A03`](https://github.com/b402-ai/b402-solana-assurance/blob/main/prds/PRD-A03-property-invariant-testing.md) | Property + invariant testing |
+| [`PRD-A04`](https://github.com/b402-ai/b402-solana-assurance/blob/main/prds/PRD-A04-fuzzing.md) | Fuzzing |
+| [`PRD-A05`](https://github.com/b402-ai/b402-solana-assurance/blob/main/prds/PRD-A05-benchmarks-budgets.md) | Benchmarks + budgets |
+| [`PRD-A06`](https://github.com/b402-ai/b402-solana-assurance/blob/main/prds/PRD-A06-formal-verification-readiness.md) | Formal verification readiness |
+
+## Inputs
+
+The assurance workspace pulls path-dependencies from `b402-solana`:
+
+- `circuits/` — circuit sources + build artifacts
+- `packages/crypto/` — Rust Fr / Poseidon / Merkle reference
+- `packages/prover/` — TS prover wrapper
+- `packages/sdk/` — TS SDK
+- `programs/b402-verifier-transact/` — Rust verifier crate
+- `programs/b402-pool/` — Pool program
+- `programs/b402-jupiter-adapter/` — Jupiter adapter
+
+It does not touch sources beyond reading them.
+
+## Outputs
+
+After a full assurance run (`pnpm run all`), the workspace emits:
+
+```
+artifacts/
+  shield-witness.json
+  proof-input.json
+  proof-verification.json
+  adapt-assurance.json
+  invariant-summary.json
+  fuzz-summary.json
+  onchain-summary.json
+  bench-summary.json
+
+vectors/
+  domain-tags.json
+  fr-codec.json
+  poseidon-primitives.json
+  merkle.json
+  note-encryption.json
+
+reports/
+  assurance-summary.md
+  parity-summary.md
+  invariant-summary.md
+  fuzz-summary.md
+  onchain-summary.md
+  benchmark-summary.md
+  adapt-summary.md
+  fv/
+```
+
+The `vectors/` files are pinned: any change to circuit semantics that
+mutates these requires a deliberate update commit. They are the
+parity gold standard.
+
+## What "assurance pass" means
+
+Generated [`reports/assurance-summary.md`](https://github.com/b402-ai/b402-solana-assurance/blob/main/reports/assurance-summary.md):
+
+```
+Phase 2a status:
+  Real ZK-bound adapt evidence is present through the adapt fixture and
+  verifier-adapt Rust tests.
+  Adapt verifier tests:        6 passed, 0 failed.
+  Adapt public inputs:         23.
+  Adapt ceremony:              throwaway-devnet-only.
+
+Scale:
+  Property runs:               128 wallet determinism, 128 note round-trip.
+  Stateful sequences:          104.
+  Root pressure appends:       512.
+  Nullifier shard samples:     4096; max bucket 4.
+
+Fuzz and adversarial:
+  Proof mutation rejects:      128/128.
+  Public-input mutation rejects: 128/128.
+  Non-rejecting proof mutations captured: 0.
+  Adapt binding cases tracked: 6.
+
+On-chain evidence:
+  Main-repo on-chain tests:    12 passed, 0 failed, 3 deferred.
+  Full adapt_execute LiteSVM coverage: true.
+  Adapt verifier configured in main on-chain harness: true.
+
+Benchmarks:
+  Transact proof generation avg ms: 733.357.
+  Verifier CLI avg ms:              116.791.
+  Adapt fixture load avg ms:        0.093.
+```
+
+Numbers come from a full machine-emitted run, not hand-collected.
+
+## Mainnet readiness gate
+
+Per the assurance summary's "Current audit-readiness gaps" section:
+
+```
+ONCHAIN-ADAPT-FULLPATH         [covered]
+ONCHAIN-ADAPT-VERIFIER-ID      [covered]
+ONCHAIN-ADAPT-DELTA-DEFERRED   [stale-doc]
+ONCHAIN-PROBE-STATUS           [covered]
+```
+
+Mainnet remains blocked on:
+
+- Multi-party trusted-setup ceremony (not started — calendar item).
+- External audits (Veridise, Accretion, Zellic — not scheduled).
+- Solana-native formal verification (PRD-A06 specs the readiness
+  artifacts; FV engagement not started).
+
+These gates are not assurance-side; they are external. Assurance
+documents that the *engineering surface* is ready for them.
+
+## How "external findings" work
+
+The assurance workspace explicitly does not modify the production
+code, so when it identifies a gap it tags the finding rather than
+fixing it directly. The format from
+[`reports/onchain-summary.md`](https://github.com/b402-ai/b402-solana-assurance/blob/main/reports/onchain-summary.md):
+
+```
+ONCHAIN-ADAPT-FULLPATH         [covered]
+ONCHAIN-ADAPT-VERIFIER-ID      [covered]
+ONCHAIN-ADAPT-DELTA-DEFERRED   [stale-doc]
+```
+
+Tags:
+
+- `[covered]` — assurance verified the property; no main-repo change
+  needed.
+- `[gap/<severity>]` — main repo has a real gap; flagged for the team.
+- `[stale-doc/<severity>]` — main repo's docs/comments lag behind
+  current code state.
+
+Example: in the current run, the main repo's on-chain harness
+initializes `verifier_adapt` with the transact verifier ID — a
+LiteSVM test setup mistake, not an on-chain bug. Assurance flagged
+it as `[covered]` because the assurance probe runs the *correct*
+configuration with full coverage. The main-repo fix is editorial.
+
+## Workflow
+
+For the system-under-test team:
+
+1. Land a change in `b402-solana` (circuit, program, SDK, etc.).
+2. The assurance repo's CI re-runs `pnpm run all` against the new
+   path-dependency.
+3. New findings get filed; existing findings get re-categorized
+   (`[gap]` → `[covered]` once fixed; `[covered]` → `[gap]` if a
+   regression).
+4. Reports are reviewed at PR time; ad-hoc snapshots are taken before
+   each release.
+
+For external auditors:
+
+1. The assurance repo's `vectors/` + `reports/` + `artifacts/` are
+   the canonical handoff package.
+2. Reproducible by `pnpm run all` against a specific
+   `b402-solana` commit hash.
+3. PRD-A06 specs the additional FV-readiness artifacts (canonical
+   semantics, reduction proofs, adversary models) the audit team
+   will ingest.
+
+## Continue reading
+
+<CardGroup cols={2}>
+  <Card title="Parity Vectors" icon="equals" href="/assurance/parity-vectors">
+    Rust ↔ TypeScript ↔ Circom byte-equality.
+  </Card>
+  <Card title="Property Invariants" icon="vial" href="/assurance/property-invariants">
+    Stateful sequence checks + replay rejection.
+  </Card>
+  <Card title="Fuzzing" icon="bug" href="/assurance/fuzzing">
+    Adversarial proof and public-input mutation.
+  </Card>
+  <Card title="Benchmarks" icon="gauge" href="/assurance/benchmarks">
+    CU and tx-size budgets.
+  </Card>
+</CardGroup>

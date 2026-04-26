@@ -1,0 +1,126 @@
+---
+title: Parity Vectors
+description: "Rust, TypeScript, and Circom must produce byte-identical output on every primitive."
+---
+
+The pool's safety depends on **three independent implementations**
+agreeing bit-for-bit on every cryptographic primitive:
+
+1. **Circom** (`circuits/`) — the in-circuit version, what the prover
+   verifies against.
+2. **TypeScript** (`packages/sdk/src/poseidon.ts`,
+   `note-encryption.ts`, `merkle.ts`) — what client wallets compute.
+3. **Rust** (`packages/crypto/`) — what the on-chain pool program
+   computes via `sol_poseidon` syscalls and what the verifier expects.
+
+A divergence between any two means a user's TS-side commitment doesn't
+match the on-chain Rust recomputation, or worse, a circuit-verifiable
+witness fails to verify on-chain. Either way, that's a hard failure.
+
+The assurance repo's parity harness is the safety net. From
+[`reports/parity-summary.md`](https://github.com/b402-ai/b402-solana-assurance/blob/main/reports/parity-summary.md):
+
+## What parity covers
+
+- **Domain tags.** All 14 domain-tag strings (`"b402/v1/commit"`,
+  `"b402/v1/null"`, etc.) interpreted as Fr produce the same value
+  across all three implementations.
+- **Field encoding.** Little-endian 32-byte buffers must round-trip
+  to the same Fr value. Out-of-range values must reject.
+- **Poseidon primitives.** Poseidon_2, Poseidon_3, Poseidon_5 over BN254
+  with the `iden3/circomlib v2.4.0` parameter set.
+- **Commitment recompute.** Given the same `(tokenMint, value, random,
+  spendingPub)`, all three produce the same 32-byte commitment.
+- **Nullifier recompute.** Same for `(spendingPriv, leafIndex)`.
+- **Spending pub derivation.** `Poseidon_2(spendKeyPubTag,
+  spendingPriv)` matches.
+- **Merkle parent / root.** `parent = Poseidon_3(mkNodeTag, left,
+  right)`. Empty-tree roots match.
+- **Note encryption round-trip.** TS encrypts; TS and Rust both
+  decrypt the same plaintext.
+
+## Pinned vectors
+
+The vectors live under `b402-solana-assurance/vectors/`:
+
+| File | Cases |
+|---|---|
+| [`domain-tags.json`](https://github.com/b402-ai/b402-solana-assurance/blob/main/vectors/domain-tags.json) | 14 |
+| [`fr-codec.json`](https://github.com/b402-ai/b402-solana-assurance/blob/main/vectors/fr-codec.json) | many (canonical accept + non-canonical reject) |
+| [`poseidon-primitives.json`](https://github.com/b402-ai/b402-solana-assurance/blob/main/vectors/poseidon-primitives.json) | 35 |
+| [`merkle.json`](https://github.com/b402-ai/b402-solana-assurance/blob/main/vectors/merkle.json) | 11 sequences |
+| [`note-encryption.json`](https://github.com/b402-ai/b402-solana-assurance/blob/main/vectors/note-encryption.json) | round-trip + foreign-viewer reject |
+
+Any change to a primitive's semantics that mutates one of these is a
+**deliberate update commit**, reviewed alongside the corresponding
+Rust / TS / Circom change. This is how cryptographic regressions get
+caught at PR time, not at user-funds-lost time.
+
+## End-to-end proof verification
+
+Beyond the primitive vectors, the harness runs full end-to-end proof
+verification:
+
+```
+Proof bytes:           256
+Proof SHA-256:         156646b00e20479f1d438af2f16d25e2b72e7565ee142cf074821fc677449253
+Rust verifier CLI:     OK
+snarkjs verify:        true
+Public merkle root:    985999000303982730338428754194088923905967606990783005928989542783436386978
+```
+
+A TypeScript-generated Groth16 transact proof must verify under both:
+
+- snarkjs (the JS reference verifier).
+- The Rust `b402-verifier-transact` CLI binary (the same code that
+  ships on chain, just CLI-wrapped).
+
+If they disagree, parity is broken. From the report — they agree.
+
+## Adapt parity
+
+```
+Adapt proof bytes:     256
+Adapt proof SHA-256:   142c6007ee916a67d0c5f3cec6523907f121490b57967e3aa0d1d147fec7ae1c
+Public inputs:         23
+Rust verifier-adapt tests passed:   6
+Rust verifier-adapt tests failed:   0
+```
+
+The 6 verifier-adapt tests cover the adapt-binding-tamper rejection
+cases:
+
+- `tampered_adapter_id_rejected`
+- `tampered_action_hash_rejected`
+- `tampered_expected_out_mint_rejected`
+- `tampered_proof_rejected`
+- Public-input count = 23 fixture check
+- Throwaway-ceremony flag (VK must not be misclassified as production)
+
+## Why this matters more than usual
+
+Most ZK projects test their circuit against itself: prove + verify in
+the same toolchain. b402's deployment shape — pool computes some
+things in Rust on chain, prover computes the same things in TS off
+chain, circuit constraints between them — means the trust assumption
+crosses three language boundaries.
+
+Without parity vectors, a Poseidon constant rotated upstream would
+produce a different on-chain hash than the Circom witness, and proofs
+would silently start rejecting. With parity vectors pinned, the diff
+shows up at PR time as "vectors/poseidon-primitives.json changed" and
+gets explicit review.
+
+## Running locally
+
+```bash
+cd b402-solana-assurance
+pnpm install
+pnpm run all  # runs everything; emits artifacts and reports
+
+# subset:
+pnpm run parity   # parity-only
+```
+
+Outputs land in `artifacts/` and `reports/`. CI artifacts are
+attached to the assurance repo's CI runs (when CI is wired).

@@ -1,0 +1,157 @@
+---
+title: Fuzzing
+description: "Adversarial proof and public-input mutation; what we found."
+---
+
+Per [`PRD-A04`](https://github.com/b402-ai/b402-solana-assurance/blob/main/prds/PRD-A04-fuzzing.md),
+the assurance harness includes a fuzz suite that mutates valid proofs,
+valid public inputs, and valid note ciphertexts, then asserts the
+verifier and SDK reject all of them.
+
+A non-rejection here is a hole.
+
+## Overall results
+
+From [`reports/fuzz-summary.md`](https://github.com/b402-ai/b402-solana-assurance/blob/main/reports/fuzz-summary.md):
+
+```
+Seed:                            2689560577
+Profile:                         gate
+Fr canonical iterations:         256
+Proof mutation iterations:       128
+Public-input mutation iterations: 128
+Malformed verifier inputs:       8
+Malformed note payloads:         32
+Adapt binding mutation cases:    6
+```
+
+```
+Fr canonical accepts:                 43
+Fr canonical rejects:                 213
+Proof mutation rejects:               128 / 128
+Public-input mutation rejects:        128 / 128
+Malformed verifier input rejects:     8 / 8
+Note-store malformed rejects:         32 / 32
+Adapt binding mutation cases tracked: 6
+Non-rejecting proof mutations captured: 0
+```
+
+**Zero non-rejecting samples** across 128 + 128 = 256 random proof and
+public-input mutations. This is the headline number: in the sampled
+space, no mutated proof verifies.
+
+## Fr canonical fuzz
+
+256 iterations sampling the 256-bit space, classifying values as
+canonical (< p, valid Fr) vs non-canonical (≥ p):
+
+```
+Accepts:    43      // values < p — must round-trip
+Rejects:    213     // values ≥ p — must reject
+```
+
+The reject count is higher because the BN254 scalar field prime `p ≈
+2^253.99` — the top ~2 bits of a 256-bit space are out-of-range. The
+`reduce_le_mod_p` helper handles this for inputs that need to be
+canonicalized (mints, action-payload keccaks); the strict-canonical
+encoder in `fr.ts` rejects.
+
+If a non-canonical Fr were silently accepted, two distinct on-chain
+mints could alias to the same circuit-encoded `tokenMint_Fr`, which is
+the canonical "it kind of works but is subtly broken" failure mode
+this test catches.
+
+## Proof bit-mutation
+
+128 iterations:
+
+1. Generate a valid Groth16 proof.
+2. Flip one or more random bits.
+3. Submit to the Rust verifier CLI.
+4. **Expected: reject.**
+
+Result: 128 / 128 rejected. **0 cases where mutating proof bytes
+produced a still-valid proof.**
+
+Sample mutation kinds covered:
+
+- Single-bit flips in `proof_A` (G1 point).
+- Single-bit flips in `proof_B` (G2 point).
+- Single-bit flips in `proof_C` (G1 point).
+- Whole-byte zeroing in random offsets.
+- Endianness flips on 32-byte boundaries.
+
+## Public-input mutation
+
+128 iterations:
+
+1. Generate a valid proof + valid public inputs.
+2. Mutate one public input (e.g. flip a bit, replace with random Fr).
+3. Verifier expected to reject.
+
+Result: 128 / 128 rejected.
+
+Sample mutation kinds:
+
+- `merkleRoot` flipped to a non-existent root.
+- `nullifier[i]` zeroed (would falsely indicate dummy).
+- `commitmentOut[j]` randomized.
+- `publicAmountIn` randomized.
+- Domain tag (`commitTag`, `nullTag`, etc.) replaced with a different
+  domain string. Critical: catches cross-domain replay attempts.
+- For adapt: `adapterId`, `actionHash`, `expectedOutMint`,
+  `expectedOutValue` randomized.
+
+## Adapt binding mutation cases (6)
+
+The 6 enumerated adapt-binding tamper cases (from
+[`programs/b402-verifier-adapt/tests/verify.rs`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-verifier-adapt/tests)):
+
+| Case | Source | What it proves |
+|---|---|---|
+| `adapter_id_mismatch` | `tampered_adapter_id_rejected` | Proof for adapter X cannot verify under adapter Y public input |
+| `action_hash_mismatch` | `tampered_action_hash_rejected` | Action_payload swap changes actionHash; verifier rejects |
+| `expected_out_mint_mismatch` | `tampered_expected_out_mint_rejected` | Cross-mint output commitment tampering rejected |
+| `proof_byte_tamper` | `tampered_proof_rejected` | Adapt proof byte mutation rejected |
+| `public_input_count_23` | `artifacts/adapt-assurance.json` | Adapt fixture exposes exactly 23 public inputs |
+| `throwaway_ceremony_flag` | same | Devnet VK marked as throwaway, not production |
+
+These are the load-bearing security properties for adapt-execute.
+
+## Malformed verifier inputs
+
+8 hand-crafted bad inputs (under-length proof, mis-aligned public
+inputs, garbage bytes). All 8 rejected.
+
+Corpora are committed under `corpora/verifier-malformed-N.txt` for
+reproducibility.
+
+## Malformed note ciphertexts
+
+32 mutations of a valid note ciphertext fed to `NoteStore.add`:
+
+- Truncated ciphertext.
+- ChaCha20 tag mutation (AEAD authentication should fail).
+- ephemeralPub replaced with a non-curve-point.
+- Wrong viewing tag with otherwise-valid ciphertext.
+- Padded plaintext with off-by-one length.
+
+All 32 rejected by the SDK before reaching the prover.
+
+## What the fuzz suite does NOT cover
+
+- **Adaptive fuzzing.** The current sampler is non-adaptive; it does
+  not feed back from coverage metrics. Future work: integrate
+  `cargo-fuzz` for the verifier crate and `jest-fuzz`-style coverage
+  guidance for the SDK.
+- **Long-running search.** 128 iterations per case is a regression
+  gate, not a security bound. Audit-time fuzz runs go to 10⁶ +.
+- **Cross-protocol fuzz.** Each adapter has its own action-payload
+  schema; per-adapter fuzz is done case-by-case during adapter
+  development, not yet centralized in this harness.
+
+## Reference
+
+- [`PRD-A04`](https://github.com/b402-ai/b402-solana-assurance/blob/main/prds/PRD-A04-fuzzing.md)
+- [`reports/fuzz-summary.md`](https://github.com/b402-ai/b402-solana-assurance/blob/main/reports/fuzz-summary.md)
+- Corpora: `b402-solana-assurance/corpora/`

@@ -1,0 +1,280 @@
+---
+title: Building an Adapter
+description: "How to add a new DeFi protocol behind the b402 shielded pool."
+---
+
+This page walks through the full lifecycle of adding a new b402 adapter,
+using the existing Jupiter and Kamino adapters as references. By the end
+you'll have a checklist for going from "I want b402 to support
+Protocol X" to a registered, audited adapter program.
+
+## Prerequisites
+
+Before you start, decide whether your target protocol fits the v1 ABI:
+
+- **Single in-mint, single out-mint?** v1 adapt circuit covers it.
+- **Multi-output (e.g. Orca DecreaseLiquidity)?** Needs PRD-11 vector
+  bindings — currently v2-only, not shipped.
+- **Synchronous CPI settlement?** v1 covers it.
+- **Async (keeper-fulfilled, oracle-pending)?** Needs PRD-14 claim
+  notes — deferred until the first async target is prioritized.
+- **Per-user protocol state (positions, accounts)?** v0.1 ships shared
+  via Kamino as the precedent; v0.2 will use PRD-13 shadow PDAs.
+
+If your target needs anything beyond "synchronous, single in-mint,
+single out-mint, no per-user state," you're building against the v2
+ABI and your adapter can be specced now but not shipped until v2 lands.
+
+The Jupiter adapter is the cleanest v1 reference; Kamino is the
+reference for "I have per-user state, here's how the v0.1 hack looks."
+
+## Step 1: Write a PRD
+
+Every adapter needs a PRD before code. Follow the existing pattern in
+[`docs/prds/`](https://github.com/b402-ai/b402-solana/tree/main/docs/prds):
+
+```
+PRD-XX-<protocol>-adapter.md
+```
+
+Required sections:
+
+1. **Goal.** What private DeFi action this unlocks and why.
+2. **Protocol overview.** Programs touched, accounts, instructions used,
+   oracle dependencies.
+3. **Operations supported in v1.** Action-payload enum + per-op
+   semantics + per-op IN/OUT mints.
+4. **Account layout per op.** Full account list per CPI, with
+   writability flags. This is the part the adapter source code will
+   verify against — get it right.
+5. **Action payload format.** Borsh-encoded; ≤ 400 B (v1 cap).
+6. **Delta-invariant strategy per op.** Each op must specify what
+   `expected_out_value` means and what risk that exposes.
+7. **State ownership.** If protocol has per-user PDAs, decide between
+   shared (v0.1 Kamino style) and per-user (PRD-13 shadow PDA style).
+   Document the trade.
+8. **Liquidation / failure handling.** What happens if the protocol
+   fails the CPI? What invariants survive?
+9. **Test strategy.** Mainnet-fork validator setup, test cases.
+10. **Open questions.** Things you genuinely don't know yet.
+
+Use [`PRD-09`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-09-kamino-adapter.md)
+as the gold standard. It's ~400 lines and answers everything an
+auditor would ask.
+
+## Step 2: Scaffold the adapter program
+
+Copy the Jupiter adapter as a starting point:
+
+```bash
+cp -r programs/b402-jupiter-adapter programs/b402-<protocol>-adapter
+# Update Cargo.toml package name
+# Update declare_id! to a fresh keypair
+# Update lib.rs with your CPI logic
+```
+
+Required structure:
+
+```rust
+declare_id!("...");
+
+pub const VERSION_PREFIX: &[u8] = b"b402/v1";
+pub const SEED_ADAPTER: &[u8] = b"adapter";
+
+#[program]
+pub mod b402_<protocol>_adapter {
+    use super::*;
+
+    pub fn execute<'info>(
+        ctx: Context<'_, '_, '_, 'info, Execute<'info>>,
+        in_amount: u64,
+        min_out_amount: u64,
+        action_payload: Vec<u8>,
+    ) -> Result<()> {
+        // 1. Validate ABI sanity (in_amount > 0, payload non-empty)
+        // 2. Decode action_payload (Borsh)
+        // 3. Pre-CPI snapshot adapter scratch ATAs
+        // 4. invoke_signed downstream protocol with adapter_authority seeds
+        // 5. Sweep adapter_out_ta delta to out_vault
+        Ok(())
+    }
+}
+
+#[derive(Accounts)]
+pub struct Execute<'info> {
+    /// Adapter PDA signer.
+    #[account(mut, seeds = [VERSION_PREFIX, SEED_ADAPTER], bump)]
+    pub adapter_authority: UncheckedAccount<'info>,
+
+    #[account(mut)] pub in_vault: Account<'info, TokenAccount>,
+    #[account(mut)] pub out_vault: Account<'info, TokenAccount>,
+
+    #[account(mut, constraint = adapter_in_ta.owner == adapter_authority.key())]
+    pub adapter_in_ta: Account<'info, TokenAccount>,
+    #[account(mut, constraint = adapter_out_ta.owner == adapter_authority.key())]
+    pub adapter_out_ta: Account<'info, TokenAccount>,
+
+    pub token_program: Program<'info, Token>,
+}
+
+#[error_code]
+pub enum AdapterError {
+    InvalidAmount = 6000,
+    InvalidPayload = 6001,
+    InsufficientInput = 6002,
+    SlippageExceeded = 6003,
+    DownstreamCpiFailed = 6004,
+    // ...
+}
+```
+
+The `adapter_authority` PDA seeds `[b"b402/v1", b"adapter"]` are **not
+optional**. The pool's `adapt_execute` doesn't validate them, but the
+adapter must use this exact seed pair so the pool's pre-flight checks
+work consistently across all adapters.
+
+If the downstream protocol expects the caller to be a signer, mark
+`adapter_authority` as the signer in the forwarded `AccountMeta`s and
+`invoke_signed` with the seeds. The Jupiter adapter does this for
+Jupiter's `userTransferAuthority`:
+
+```rust
+let auth_key = ctx.accounts.adapter_authority.key();
+let accounts_for_cpi = ctx.remaining_accounts.iter().map(|a| {
+    let is_signer = a.is_signer || *a.key == auth_key;
+    if a.is_writable {
+        AccountMeta::new(*a.key, is_signer)
+    } else {
+        AccountMeta::new_readonly(*a.key, is_signer)
+    }
+}).collect();
+```
+
+## Step 3: Write the SDK driver
+
+The adapter is useless without TS code that builds the right
+`remaining_accounts` order. Add a TypeScript module under
+[`packages/sdk/src/actions/`](https://github.com/b402-ai/b402-solana/tree/main/packages/sdk/src/actions)
+or in `examples/`:
+
+```typescript
+export async function buildPrivate<Protocol>Action({
+  connection,
+  wallet,
+  pool,
+  adapterProgram,
+  // ... protocol-specific params
+}): Promise<Transaction> {
+  // 1. Build the action_payload (Borsh-encoded enum variant).
+  // 2. Compute action_hash = poseidon3(adaptBindTag, keccak256(action_payload), expectedOutMint_Fr).
+  // 3. Generate adapt proof via AdaptProver.
+  // 4. Build the adapt_execute instruction with:
+  //      - 6 named accounts
+  //      - remaining_accounts in the exact order the adapter expects
+  //      - encrypted_notes for output commitments
+  // 5. Return a v0 Transaction with the b402 ALT.
+}
+```
+
+For per-protocol nuances (oracle accounts that change per reserve, ALT
+extensions for new mints, refresh-instruction-prerequisites), see how
+[`examples/kamino-adapter-fork-deposit.ts`](https://github.com/b402-ai/b402-solana/blob/main/examples/kamino-adapter-fork-deposit.ts)
+handles Kamino.
+
+## Step 4: Add a mainnet-fork test
+
+Mirror [`ops/mainnet-fork-validator.sh`](https://github.com/b402-ai/b402-solana/tree/main/ops):
+
+```bash
+solana-test-validator \
+  --clone <PROTOCOL_PROGRAM_ID> \
+  --clone <RELEVANT_STATE_ACCOUNTS> \
+  --clone <ORACLE_ACCOUNTS> \
+  --url https://api.mainnet-beta.solana.com
+```
+
+Add an example under `examples/`:
+
+```bash
+examples/<protocol>-adapter-fork-action.ts
+```
+
+The example should:
+
+1. Boot the validator (or assume it's running).
+2. Shield → adapt-execute → verify the post-CPI delta → unshield.
+3. Print a clear PASS/FAIL with the adapt tx signature.
+
+CI runs this on every adapter PR.
+
+## Step 5: Register the adapter
+
+The admin instruction `register_adapter` adds an entry:
+
+```rust
+register_adapter(AdapterInfo {
+    adapter_id: keccak256(adapter_program_id) reduced mod p,
+    program_id: adapter_program_id,
+    allowed_instructions: [
+        instruction_discriminator("execute"),
+        // ...
+    ],
+    allowed_instruction_count: 1,
+    enabled: true,
+});
+```
+
+This is governance: requires the admin multisig signature in v1
+post-PRD-03 §9 implementation, and currently uses single-key.
+
+The PR introducing a new adapter must include:
+
+- The PRD.
+- The adapter source.
+- The SDK driver.
+- The mainnet-fork test that runs green.
+- A filled-out
+  [`ops/adapter-review.md`](https://github.com/b402-ai/b402-solana/tree/main/ops)
+  checklist (PRD-04 §11). Each new adapter must answer the 7 risk
+  questions.
+- The `register_adapter` call as a separate ops step (not auto-merged).
+
+## Step 6: Audit
+
+Per [PRD-08](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-08-audit-launch.md),
+new adapters go through the same audit pipeline as the pool itself
+(initially Veridise + Accretion + Zellic; calendar-permitting). For
+mainnet, no adapter ships unaudited.
+
+## Common pitfalls
+
+- **Forgetting to mark `adapter_authority` as a signer** in the
+  forwarded `AccountMeta`s. Most downstream protocols expect a signer
+  for token transfers; without `is_signer = true`, you get "signer
+  privilege escalated" or similar opaque errors.
+- **Wrong writability flags.** The Jupiter and Kamino adapters
+  selectively override writability per CPI because the inbound
+  `AccountInfo.is_writable` doesn't always match what the downstream
+  protocol expects. See `KaminoMeta { key, is_writable }` in the
+  Kamino adapter source.
+- **`action_payload` mismatch.** The adapter receives the same bytes
+  the pool re-keccaked. If the SDK builds the payload differently from
+  what the proof was generated against, the on-chain Poseidon
+  recomputation rejects.
+- **Account ordering drift.** `remaining_accounts` order is part of
+  the adapter's contract. Document it inline (see `ra_deposit` mod in
+  the Kamino adapter) and verify it explicitly:
+  ```rust
+  let reserve = ra[ra_deposit::RESERVE].clone();
+  ```
+
+## Continue reading
+
+<CardGroup cols={2}>
+  <Card title="Adapter Overview" icon="plug" href="/adapters/overview">
+    The full ABI contract.
+  </Card>
+  <Card title="v2 ABI PRDs" icon="circle-info" href="/protocol/architecture">
+    PRD-11 / 12 / 13 / 14 / 15 — what changes for v2.
+  </Card>
+</CardGroup>

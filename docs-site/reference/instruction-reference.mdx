@@ -1,0 +1,290 @@
+---
+title: Instruction Reference
+description: "Every Anchor instruction across the b402-solana programs."
+---
+
+This is the type-level reference. For semantics, see
+[Pool Program](/protocol/pool-program) and [Adapters](/adapters/overview).
+
+Generated structurally from `programs/*/src/instructions/*.rs`.
+
+## `b402_pool` instructions
+
+### `init_pool`
+
+```rust
+pub struct InitPoolArgs {
+    pub admin_multisig: Pubkey,
+    pub admin_threshold: u8,
+}
+```
+
+Accounts:
+- `[signer, mut]` deployer
+- `[mut, init]` PoolConfig PDA
+- `[mut, init]` TreeState PDA
+- `[mut, init]` AdapterRegistry PDA
+- `[mut, init]` TreasuryConfig PDA
+- `[]` verifier_transact program
+- `[]` verifier_adapt program
+- `[]` verifier_disclose program (optional, can be `Pubkey::default()`)
+- `[]` system_program
+
+### `add_token_config`
+
+```rust
+pub struct AddTokenConfigArgs { pub mint: Pubkey; }
+```
+
+Accounts:
+- `[signer]` admin signer (multisig auth via separate args)
+- `[mut]` PoolConfig
+- `[mut, init_if_needed]` TokenConfig PDA
+- `[mut, init_if_needed]` Vault token account PDA
+- `[]` mint
+- `[]` token_program / system_program / associated_token_program
+
+### `shield`
+
+```rust
+pub struct ShieldArgs {
+    pub proof: [u8; 256],
+    pub public_inputs: TransactPublicInputs,
+    pub encrypted_notes: [EncryptedNote; 2],
+    pub note_dummy_mask: u8,
+}
+```
+
+Accounts: relayer (signer), depositor (signer), depositor_token_account
+(mut), TokenConfig, Vault (mut), TreeState (mut), PoolConfig,
+verifier_transact, token_program, system_program.
+
+### `transact`
+
+```rust
+pub struct TransactArgs {
+    pub proof: [u8; 256],
+    pub public_inputs: TransactPublicInputs,
+    pub encrypted_notes: [EncryptedNote; 2],
+    pub in_dummy_mask: u8,
+    pub out_dummy_mask: u8,
+    pub nullifier_shard_prefix: [u16; 2],
+}
+```
+
+Accounts: relayer (signer), TreeState (mut), PoolConfig, verifier,
+NullifierShard[p0] (mut), NullifierShard[p1] (mut), token_program,
+system_program.
+
+### `unshield`
+
+```rust
+pub struct UnshieldArgs {
+    pub proof: [u8; 256],
+    pub public_inputs: TransactPublicInputs,
+    pub encrypted_notes: [EncryptedNote; 2],
+    pub in_dummy_mask: u8,
+    pub out_dummy_mask: u8,
+    pub nullifier_shard_prefix: [u16; 2],
+    pub relayer_fee_recipient: Pubkey,
+}
+```
+
+Accounts: relayer (signer, mut), PoolConfig, TokenConfig, Vault (mut),
+recipient_token_account (mut), relayer_fee_token_account (mut),
+TreeState (mut), verifier, NullifierShard[p0] (mut),
+NullifierShard[p1] (mut), token_program, system_program.
+
+### `adapt_execute`
+
+```rust
+pub struct AdaptExecuteArgs {
+    pub proof: Vec<u8>,                         // 256 bytes
+    pub public_inputs: AdaptPublicInputs,       // 14 fields, see below
+    pub encrypted_notes: Vec<EncryptedNote>,    // 0..=2
+    pub in_dummy_mask: u8,
+    pub out_dummy_mask: u8,
+    pub nullifier_shard_prefix: [u16; 2],
+    pub relayer_fee_recipient: Pubkey,
+    pub raw_adapter_ix_data: Vec<u8>,           // first 8B = ix discriminator
+    pub action_payload: Vec<u8>,                // pool re-keccaks
+}
+
+pub struct AdaptPublicInputs {
+    pub merkle_root: [u8; 32],
+    pub nullifier: [[u8; 32]; 2],
+    pub commitment_out: [[u8; 32]; 2],
+    pub public_amount_in: u64,
+    pub public_amount_out: u64,                 // forced 0
+    pub public_token_mint: Pubkey,              // IN mint
+    pub relayer_fee: u64,
+    pub relayer_fee_bind: [u8; 32],
+    pub root_bind: [u8; 32],
+    pub recipient_bind: [u8; 32],
+    pub adapter_id: [u8; 32],
+    pub action_hash: [u8; 32],
+    pub expected_out_value: u64,
+    pub expected_out_mint: Pubkey,              // OUT mint
+}
+```
+
+Accounts: relayer, PoolConfig, AdapterRegistry, TokenConfig (in),
+TokenConfig (out), Vault (in, mut), Vault (out, mut), TreeState (mut),
+verifier_adapt, adapter_program, adapter_authority,
+adapter_in_ta (mut), adapter_out_ta (mut), relayer_fee_ta (mut),
+NullifierShard[p0] (mut), NullifierShard[p1] (mut), token_program,
+system_program.
+
+`remaining_accounts` are forwarded to the adapter CPI.
+
+### Admin instructions
+
+| Instruction | Args |
+|---|---|
+| `pause(which: u8)` | bitmask |
+| `unpause(which: u8)` | bitmask |
+| `register_adapter(info: AdapterInfo)` | adapter info |
+| `disable_adapter(adapter_id: [u8; 32])` | adapter id |
+| `enable_adapter(adapter_id: [u8; 32])` | adapter id |
+| `queue_upgrade(args: QueueUpgradeArgs)` | new program hash, purpose |
+| `activate_upgrade(slot: u64)` | activates queued upgrade |
+| `cancel_upgrade(slot: u64)` | aborts queued upgrade |
+| `revoke_upgrade_authority()` | irreversible |
+| `rotate_admin(new_multisig, new_threshold)` | self-rotation |
+
+## Adapter instructions
+
+### `b402_jupiter_adapter::execute`
+
+```rust
+pub fn execute(
+    ctx: Context<Execute>,
+    in_amount: u64,
+    min_out_amount: u64,
+    action_payload: Vec<u8>,  // Jupiter route ix data, forwarded
+) -> Result<()>;
+```
+
+### `b402_kamino_adapter::execute`
+
+```rust
+pub fn execute(
+    ctx: Context<Execute>,
+    in_amount: u64,
+    min_out_amount: u64,
+    action_payload: Vec<u8>,  // Borsh-serialized KaminoAction enum
+) -> Result<()>;
+
+pub enum KaminoAction {
+    Deposit  { reserve: Pubkey, in_amount: u64, min_kt_out: u64 },
+    Withdraw { reserve: Pubkey, kt_in: u64, min_underlying_out: u64 },
+    Borrow   { reserve: Pubkey, amount_out: u64, max_collateral_used_bps: u16 },
+    Repay    { reserve: Pubkey, amount_in: u64 },
+}
+```
+
+### `b402_mock_adapter::execute`
+
+Test-only. Echoes the input back as output for delta-invariant tests.
+
+## Verifier instructions
+
+### `b402_verifier_transact::verify`
+
+```rust
+pub struct VerifyArgs {
+    pub proof: [u8; 256],
+    pub public_inputs: Vec<[u8; 32]>,  // 18 inputs
+}
+```
+
+No accounts — pure computation.
+
+### `b402_verifier_adapt::verify`
+
+Same shape. 23 public inputs.
+
+## Anchor discriminators
+
+First 8 bytes of `sha256("global:<ix_name>")`. Computed at build time
+into the program binary. The SDK helper:
+
+```typescript
+import { instructionDiscriminator } from '@b402ai/solana';
+const disc = instructionDiscriminator('shield');
+// = sha256("global:shield").slice(0, 8)
+// = [0xdc, 0xc6, 0xfd, 0xf6, 0xe7, 0x54, 0x93, 0x62]
+```
+
+## Encoded instruction layouts (wire format)
+
+For low-level inspection / debugging, the wire format of each
+instruction is `discriminator || borsh_args`. Borsh in Anchor uses
+little-endian primitive encoding, length-prefixed `Vec`, and
+struct-fields-in-declaration-order.
+
+### Shield (1,099 bytes typical)
+
+```
+[0..8]       discriminator       sha256("global:shield")[..8]
+                                 = dc c6 fd f6 e7 54 93 62
+[8..12]      u32 LE              proof.len() = 256
+[12..268]    proof               Groth16 (256 B)
+[268..580]   TransactPublicInputs (312 B)
+                merkle_root        [32]
+                nullifier          [32][32]
+                commitment_out     [32][32]
+                public_amount_in   u64 LE
+                public_amount_out  u64 LE
+                public_token_mint  [32]
+                relayer_fee        u64 LE
+                relayer_fee_bind   [32]
+                root_bind          [32]
+                recipient_bind     [32]
+[580..584]   u32 LE              encrypted_notes.len()
+[584..]      encrypted_notes      [89B ct + 32B ephPub + 2B vt]*
+[..]         u8                  note_dummy_mask
+```
+
+### Unshield
+
+Same shape as shield with these differences:
+
+- `public_amount_in == 0`, `public_amount_out > 0`
+- `recipient_bind` non-zero (committed to recipient ATA owner)
+- `nullifier` slots are real (not 0 sentinels) when spending real notes
+- Trailing `relayer_fee_recipient: Pubkey` arg
+
+### Adapt_execute (~1,231 B with Jupiter route)
+
+```
+[0..8]       discriminator       sha256("global:adapt_execute")[..8]
+[8..12]      u32 LE              proof.len() = 256
+[12..268]    proof               Groth16
+[268..]      AdaptPublicInputs   (376 B — adds 4×32 + 8 over transact)
+[..]         u32 LE              encrypted_notes.len()
+[..]         encrypted_notes     [89+32+2]*
+[..]         u8                  in_dummy_mask
+[..]         u8                  out_dummy_mask
+[..]         u16 LE              nullifier_shard_prefix[0]
+[..]         u16 LE              nullifier_shard_prefix[1]
+[..]         [32]                relayer_fee_recipient
+[..]         u32 LE              raw_adapter_ix_data.len()
+[..]         raw_adapter_ix_data
+[..]         u32 LE              action_payload.len()
+[..]         action_payload
+```
+
+The variable-length `raw_adapter_ix_data` is what's forwarded to the
+adapter program; `action_payload` is what the proof bound (the user's
+proof of intent). They are typically identical for Jupiter (the
+forwarded data IS the action payload), and slightly different for
+Kamino (the forwarded data includes Kamino-specific Anchor framing
+around the Borsh `KaminoAction`).
+
+## Source
+
+- [`programs/b402-pool/src/instructions/`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-pool/src/instructions)
+- [`programs/b402-jupiter-adapter/src/lib.rs`](https://github.com/b402-ai/b402-solana/blob/main/programs/b402-jupiter-adapter/src/lib.rs)
+- [`programs/b402-kamino-adapter/src/lib.rs`](https://github.com/b402-ai/b402-solana/blob/main/programs/b402-kamino-adapter/src/lib.rs)
+- [`programs/b402-mock-adapter/src/lib.rs`](https://github.com/b402-ai/b402-solana/blob/main/programs/b402-mock-adapter/src/lib.rs)

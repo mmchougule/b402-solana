@@ -1,0 +1,151 @@
+---
+title: Program IDs
+description: "Devnet (live) and mainnet (TBD) program IDs."
+---
+
+## Devnet (2026-04-25)
+
+Live deployment. Phase 2a real ZK adapt path is wired:
+
+| Program | Program ID |
+|---|---|
+| `b402_pool` | `42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y` |
+| `b402_verifier_transact` | `Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK` |
+| `b402_verifier_adapt` | `3Y2tyhNSaUiW5AcZcmFGRyTMdnroxHxc5GqFQPcMTZae` |
+| `b402_jupiter_adapter` | `3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7` |
+| `b402_kamino_adapter` | `2enwFgcGKJDqruHpCtvmhtxe3DYcV3k72VTvoGcdt2rX` |
+| `b402_mock_adapter` | `89kw33YDcbXfiayVNauz599LaDm51EuU8amWydpjYKgp` |
+| b402 ALT (16 entries) | `9FPYufa1KDkrn1VgfjkR7R667hbnTA7CNtmy38QcsuNj` |
+
+Source: [README.md](https://github.com/b402-ai/b402-solana/blob/main/README.md)
+
+### Live txs (proof of life)
+
+Shield → real Groth16 adapt swap → unshield, end-to-end on devnet:
+
+- Shield: [`59ahVAQN…Qyk3u`](https://explorer.solana.com/tx/59ahVAQNKGce4d5QRcfZuxYcGsPuXXrgbGqSTQpi4ByCuAtJtPyipypb8jLJwiqQf64suYjWHz625ynPNcQyk3u?cluster=devnet)
+- Adapt (real ZK proof, 23 public inputs): [`5AVK983L…vzBf`](https://explorer.solana.com/tx/5AVK983LcxXN3851GpAiZG58cUGncRjfDYKLU1oziWyWVps8YYTnaDW2r27cYb65NUcYUSVYstPZNqq8RZMEvzBf?cluster=devnet)
+- Unshield: [`e9KvuQn8…CEv6u`](https://explorer.solana.com/tx/e9KvuQn8F2iN9Gr8gzdVtKSHXjVPWyA623kUbqRAhYWhvwQP1GVsJwZfP1NCB8rGswmrVfgvxgmhVRzgRZCEv6u?cluster=devnet)
+
+Earlier devnet shield + unshield (also confirm-able):
+
+```
+Shield:   5XLaccuw6tv6AWowMDKLK24zTSxD4Ej2nuRwSnpbLWZSHU19SPb7n8mNpx8G4fHEHxBMRo5GiYPyPj6G4pmsLyZB
+Unshield: 38mKQXBPuwtYhM5JvbyJA2se9cehMvw1mUbevhERAkZdni7a6VTYdYNx66nZ5KqzbgUng1SsbCiQEJX2F3XG77PD
+```
+
+```bash
+solana -u devnet confirm -v 5XLaccuw6tv6AWowMDKLK24zTSxD4Ej2nuRwSnpbLWZSHU19SPb7n8mNpx8G4fHEHxBMRo5GiYPyPj6G4pmsLyZB
+solana -u devnet confirm -v 38mKQXBPuwtYhM5JvbyJA2se9cehMvw1mUbevhERAkZdni7a6VTYdYNx66nZ5KqzbgUng1SsbCiQEJX2F3XG77PD
+```
+
+## Mainnet
+
+**TBD.** Mainnet deployment is gated on:
+
+1. Multi-party trusted-setup ceremony for both `transact` and `adapt`
+   circuits (per [`PRD-08`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-08-audit-launch.md)).
+2. Two independent firm audits (Veridise + Accretion or equivalent).
+3. Zellic independent second opinion on pool.
+4. Public bug bounty live (≥$500k).
+5. Deposit-capped beta launch first ($100k/day per user, $1M total
+   TVL, first 30 days).
+
+When mainnet ships, IDs will be deterministic via `solana program
+deploy` with pinned keypairs and published in the repo under
+`ops/deploy/mainnet-ids.toml`.
+
+## Localnet
+
+`./ops/local-validator.sh --reset` boots `solana-test-validator` with
+all 4 programs deployed at deterministic IDs. The IDs are constructed
+from the keypairs in `ops/keypairs/` (gitignored).
+
+For repeatable testing across machines, the localnet IDs differ per
+operator; reference them via `Anchor.toml` rather than hardcoding.
+
+## Whitelisted mints (devnet)
+
+On the current devnet pool:
+
+- Test mint per run (created fresh by the example scripts; idempotent)
+- Native USDC `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` (mainnet
+  USDC; cloned in the mainnet-fork validator)
+- Native wSOL `So11111111111111111111111111111111111111112`
+
+The `add_token_config` admin instruction whitelists additional mints.
+Adding a mint does not require a program upgrade — the circuit treats
+`tokenMint` as a runtime variable.
+
+## Scaffolded but not yet deployed
+
+These programs exist in source under `programs/` but are not deployed
+to devnet pending the v2 ABI work and per-PRD implementation:
+
+| Program | Status |
+|---|---|
+| `b402_adrena_adapter` | Scaffolded per [PRD-16](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-16-adrena-adapter.md). Implementation pending v2 ABI. |
+| `b402_orca_adapter` | Scaffolded. Multi-output flows require PRD-11 vector bindings. |
+| `b402_jupiter_perps_adapter` | Scaffolded. Async settlement requires PRD-14 claim notes. |
+
+Once the v2 ABI lands, these will get fresh program IDs deployed to
+devnet, then mainnet.
+
+## Anchor IDLs
+
+```
+target/idl/b402_pool.json
+target/idl/b402_verifier_transact.json
+target/idl/b402_verifier_adapt.json
+target/idl/b402_jupiter_adapter.json
+target/idl/b402_kamino_adapter.json
+target/idl/b402_mock_adapter.json
+```
+
+Generated on `anchor build`. Used by the SDK for instruction
+encoding. The IDL JSON is committed to the repo so consumers don't
+need to rebuild — see `target/idl/` after a clean build.
+
+## Verifying programs match the source
+
+To confirm a deployed devnet program matches a known source commit:
+
+```bash
+# 1. Build the program for BPF.
+cargo build-sbf --tools-version v1.54 \
+  --manifest-path programs/b402-pool/Cargo.toml
+
+# 2. Hash the resulting .so.
+sha256sum target/deploy/b402_pool.so
+
+# 3. Pull the on-chain program data.
+solana -u devnet program dump 42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y \
+  /tmp/onchain.so
+sha256sum /tmp/onchain.so
+
+# Hashes must match modulo Anchor's metadata trailer.
+```
+
+For an extra-paranoid verification, use
+`cargo-build-bpf --verifiable` (when available) for fully reproducible
+builds.
+
+## Migration log
+
+When the pool's program ID changes (which happens at every fresh
+deployment), the migration policy from
+[`PRD-01 §4.4`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-01-architecture.md#44-migration-policy)
+applies:
+
+1. Old pool stays operational indefinitely so users can always exit.
+2. New pool deploys with new program ID + new verifier.
+3. SDK exposes a `migrationUnshield` flow that proves ownership in the
+   old pool and shields into the new pool atomically.
+4. Users are never force-migrated; migration is opt-in.
+
+For tracking deployments:
+
+- Devnet IDs are pinned in `Anchor.toml` per deployment.
+- Mainnet IDs will be published in `ops/deploy/mainnet-ids.toml` after
+  deployment with full deploy artifacts (slot, deployer pubkey,
+  program-data hash).

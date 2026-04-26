@@ -1,0 +1,297 @@
+---
+title: Pool Program
+description: "The b402_pool program: instructions, accounts, validation order, on-chain bindings."
+---
+
+`b402-pool` is the shielded pool. It owns custody, holds the merkle tree
+state and the nullifier set, dispatches instructions, and CPIs into the
+verifier and registered adapters.
+
+Source: [`programs/b402-pool/src/`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-pool/src).
+Devnet ID: `42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y`.
+
+## Instructions overview
+
+Each instruction is documented below with its accounts, args, and
+validation order. Numbered steps come from the actual handler code, not
+the PRD — where they differ, code wins.
+
+### `init_pool`
+
+One-time admin instruction. Creates `PoolConfig`, `TreeState`,
+`AdapterRegistry`, `TreasuryConfig`. Pins the verifier program IDs that
+the pool will trust on every subsequent instruction.
+
+### `add_token_config`
+
+Admin. Whitelists an SPL mint for shield/unshield/adapt. Creates the
+`TokenConfig` PDA and the `Vault` token account (owned by `PoolConfig`
+PDA so only the pool can sign vault transfers).
+
+### `shield`
+
+User deposits tokens, adds a commitment to the tree.
+
+**Accounts** (12 total):
+
+| # | Role | Notes |
+|---|---|---|
+| 0 | relayer (signer, mut) | Pays SOL fee |
+| 1 | depositor (signer, mut) | Authorizes the SPL transfer |
+| 2 | depositor_token_account (mut) | Source of tokens |
+| 3 | TokenConfig | Proves mint is whitelisted |
+| 4 | Vault (mut) | Destination |
+| 5 | TreeState (mut) | Tree leaf append |
+| 6 | PoolConfig | Pause flags + pinned verifier addrs |
+| 7 | verifier_transact program | For CPI |
+| 8 | spl-token program | For CPI |
+| 9 | system program | For account creation |
+
+**Args:** `proof: [u8; 256]`, `public_inputs: TransactPublicInputs`,
+`encrypted_notes: [EncryptedNote; 2]`, `note_dummy_mask: u8`.
+
+**Validation order:**
+
+1. `paused_shields == false`.
+2. `pool_config.verifier_transact == verifier_program.key()`.
+3. `token_config.mint == public_inputs.public_token_mint`,
+   `token_config.enabled`.
+4. `public_amount_in > 0` and `public_amount_out == 0`.
+5. `nullifier[0] == nullifier[1] == 0` (shield has no inputs).
+6. `merkle_root` is in the recent root ring.
+7. CPI to `b402_verifier_transact::verify(proof, 18 public inputs)`.
+   ~178k CU.
+8. CPI `spl-token::transfer(depositor_ata → vault, public_amount_in)`,
+   authorized by depositor signature.
+9. For each non-dummy `commitment_out[j]`: `tree_append`, emit
+   `CommitmentAppended { leaf_index, commitment, ciphertext,
+   ephemeral_pub, viewing_tag, tree_root_after, slot }`.
+10. Emit `ShieldExecuted { mint, amount, slot }`.
+
+**Observed cost** (devnet, README):
+
+```
+Tx size:    1,157 B
+Compute:    239,224 CU
+Fee:        5,000 lamports (~$0.001 @ $200/SOL)
+```
+
+See [TX-WALKTHROUGH.md](https://github.com/b402-ai/b402-solana/blob/main/docs/TX-WALKTHROUGH.md)
+for a layer-by-layer dissection of an actual shield tx.
+
+### `transact`
+
+Spend N notes, create M notes, no public amount movement (internal
+transfer / consolidation / split).
+
+Same accounts as `shield` minus the depositor signer/ATA, plus two
+`NullifierShard[p]` accounts (one per nullifier slot, addressed by
+high-16-bit prefix).
+
+**Validation:**
+
+1. Pause check.
+2. `public_amount_in == 0 && public_amount_out == 0`.
+3. Root ring membership.
+4. Verifier CPI.
+5. Per non-dummy nullifier: shard prefix matches, binary search rejects
+   duplicates, sorted insert.
+6. `nullifier[0] < nullifier[1]` (when both non-dummy).
+7. Tree append for non-dummy commitments.
+
+### `unshield`
+
+Spend notes, withdraw to a clear recipient ATA.
+
+**Accounts:** relayer (signer), PoolConfig, TokenConfig, Vault (mut),
+recipient_token_account (mut), relayer_fee_token_account (mut),
+TreeState (mut), Verifier, NullifierShard[p0] (mut),
+NullifierShard[p1] (mut), spl-token, system.
+
+**Validation:**
+
+1. **`paused_shields` does NOT block unshield.** This is the unkillable
+   exit path — see [`PRD-03 §10`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-03-program-spec.md#10-security-invariants-program-level)
+   for the regression-test requirement.
+2. `public_amount_out > 0`, `public_amount_in == 0`.
+3. `relayer_fee ≤ public_amount_out`.
+4. **Recipient binding:** `pi.recipient_bind == Poseidon_3(
+   recipientBindTag,
+   recipient_token_account.owner[0..16] as u128_low,
+   recipient_token_account.owner[16..32] as u128_high
+   )`. This is what stops a malicious relayer from swapping in their own
+   ATA — the proof doesn't verify against any owner the sender didn't
+   commit to.
+5. **Fee binding:** `pi.relayer_fee_bind == Poseidon_3(feeBindTag,
+   relayer_fee_recipient_Fr, relayer_fee)`.
+6. Root ring, verifier CPI, nullifier inserts.
+7. Append change commitments (for non-zero `commitment_out[j]`).
+8. Pool-signed transfer: `vault → recipient`, `vault → relayer_fee`.
+
+**Observed cost:**
+
+```
+Tx size:    ~1,150 B
+Compute:    ~350k CU
+```
+
+### `adapt_execute` (Phase 2a, live on devnet)
+
+The composability instruction. Real ZK binding to adapter ID + action
+hash + expected output mint and value.
+
+Source:
+[`programs/b402-pool/src/instructions/adapt_execute.rs`](https://github.com/b402-ai/b402-solana/blob/main/programs/b402-pool/src/instructions/adapt_execute.rs).
+
+**Args:**
+
+```rust
+pub struct AdaptExecuteArgs {
+    pub proof: Vec<u8>,                         // must be 256 bytes
+    pub public_inputs: AdaptPublicInputs,
+    pub encrypted_notes: Vec<EncryptedNote>,    // 0..=2 entries
+    pub in_dummy_mask: u8,
+    pub out_dummy_mask: u8,
+    pub nullifier_shard_prefix: [u16; 2],
+    pub relayer_fee_recipient: Pubkey,
+    pub raw_adapter_ix_data: Vec<u8>,           // first 8B = ix discriminator
+    pub action_payload: Vec<u8>,                // pool re-keccaks this
+}
+```
+
+**Accounts:** relayer, PoolConfig, AdapterRegistry, TokenConfig (in),
+TokenConfig (out), Vault (in), Vault (out), TreeState, verifier_program,
+adapter_program, adapter_authority, adapter_in_ta, adapter_out_ta,
+relayer_fee_ta, NullifierShard[p0], NullifierShard[p1], spl-token,
+system, plus `remaining_accounts` for the downstream protocol.
+
+**Validation order** (from the actual handler):
+
+1. `proof.len() == 256`.
+2. `paused_adapts == false`.
+3. `verifier_program == pool_config.verifier_adapt`.
+4. `public_amount_out == 0` and `public_amount_in > 0`.
+5. `token_config_in.mint == pi.public_token_mint`.
+6. `token_config_out.mint == pi.expected_out_mint`.
+7. **Adapter registered + enabled** in `AdapterRegistry`, **first 8 bytes
+   of `raw_adapter_ix_data` are in the registry's discriminator
+   allowlist**.
+8. `pi.adapter_id == keccak256(adapter_program.key) mod p`.
+9. `pi.action_hash == Poseidon_3(adaptBindTag, keccak(action_payload)
+   mod p, expected_out_mint mod p)`.
+10. `merkle_root` in recent root ring.
+11. Per non-dummy nullifier: shard prefix consistency.
+12. `relayer_fee ≤ public_amount_in`.
+13. CPI `b402_verifier_adapt::verify(proof, 23 public inputs)`.
+14. Nullifier ordering when both inputs non-dummy.
+15. Burn input nullifiers (sharded inserts).
+16. Pool-signed transfer: `in_vault → adapter_in_ta` for
+    `public_amount_in`.
+17. Pool-signed relayer fee transfer (if fee > 0).
+18. `pre = out_vault.amount` snapshot.
+19. CPI the adapter with `raw_adapter_ix_data` + `remaining_accounts`.
+20. `post = out_vault.amount`. **Require `post - pre ≥
+    expected_out_value`** else `AdapterReturnedLessThanMin`.
+21. Append output commitments (for non-dummy `commitment_out[j]`).
+22. Emit `AdaptExecuted { adapter_program, in_mint, out_mint,
+    public_amount_in, out_delta, expected_out_value, relayer_fee, slot }`.
+
+**Observed cost** (devnet, README):
+
+| Path | Tx size | CU |
+|---|---|---|
+| Mock adapter, real Groth16 | 1,214 B | ~600k |
+| Mainnet-fork real Jupiter SolFi V2 | 1,231 B | ~660k |
+
+Live devnet sigs (proof of life):
+
+- Shield: [`59ahVAQN…Qyk3u`](https://explorer.solana.com/tx/59ahVAQNKGce4d5QRcfZuxYcGsPuXXrgbGqSTQpi4ByCuAtJtPyipypb8jLJwiqQf64suYjWHz625ynPNcQyk3u?cluster=devnet)
+- Adapt (real ZK proof, 23 pis): [`5AVK983L…vzBf`](https://explorer.solana.com/tx/5AVK983LcxXN3851GpAiZG58cUGncRjfDYKLU1oziWyWVps8YYTnaDW2r27cYb65NUcYUSVYstPZNqq8RZMEvzBf?cluster=devnet)
+- Unshield: [`e9KvuQn8…CEv6u`](https://explorer.solana.com/tx/e9KvuQn8F2iN9Gr8gzdVtKSHXjVPWyA623kUbqRAhYWhvwQP1GVsJwZfP1NCB8rGswmrVfgvxgmhVRzgRZCEv6u?cluster=devnet)
+
+## Admin instructions
+
+| Instruction | Auth | Effect |
+|---|---|---|
+| `pause(which)` / `unpause(which)` | full multisig | Sets `PoolConfig.paused_*` flags. Cannot pause unshield. |
+| `register_adapter` | multisig | Adds entry to AdapterRegistry. |
+| `disable_adapter` | single-sig | Emergency kill switch (sets `enabled = false`). |
+| `enable_adapter` | multisig | Reverses disable. |
+| `queue_upgrade` | multisig | Starts 72h timelock for program upgrade. |
+| `activate_upgrade` | any signer (post-timelock) | Executes the upgrade. |
+| `cancel_upgrade` | multisig | Aborts queued upgrade. |
+| `revoke_upgrade_authority` | multisig | Permanent, irreversible after 12 months. |
+| `rotate_admin` | full multisig | Self-rotate. |
+
+V1 ships with single-key admin behind a stub multisig pubkey. The full
+co-signer pattern is specced in PRD-03 §9 but **not yet implemented**.
+
+## Events
+
+All events emit via Anchor `emit!` and surface as base64 `Program data:`
+log lines:
+
+```rust
+#[event]
+pub struct CommitmentAppended {
+    pub leaf_index: u64,
+    pub commitment: [u8; 32],
+    pub ciphertext: [u8; 89],
+    pub ephemeral_pub: [u8; 32],
+    pub viewing_tag: [u8; 2],
+    pub tree_root_after: [u8; 32],
+    pub slot: u64,
+}
+
+#[event]
+pub struct NullifierSpent {
+    pub nullifier: [u8; 32],
+    pub shard: u16,
+    pub slot: u64,
+}
+
+#[event]
+pub struct AdaptExecuted {
+    pub adapter_program: Pubkey,
+    pub in_mint: Pubkey,
+    pub out_mint: Pubkey,
+    pub public_amount_in: u64,
+    pub out_delta: u64,
+    pub expected_out_value: u64,
+    pub relayer_fee: u64,
+    pub slot: u64,
+}
+
+#[event]
+pub struct ShieldExecuted   { pub mint: Pubkey, pub amount: u64, pub slot: u64 }
+
+#[event]
+pub struct UnshieldExecuted { ... }
+```
+
+No event leaks private data. `ciphertext` is encrypted; `commitment` and
+`nullifier` are opaque under Poseidon.
+
+The `Scanner` in `@b402ai/solana` subscribes to these via
+`logsSubscribe` and parses `Program data:` lines via
+`parseProgramDataLog`.
+
+## Security invariants
+
+From [`PRD-03 §10`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-03-program-spec.md#10-security-invariants-program-level)
+— things auditors verify hold across all code paths:
+
+1. No nullifier insertion without a successful proof verify earlier in
+   the same instruction.
+2. No vault transfer without balance conservation proven.
+3. No commitment append without circuit-checked well-formedness.
+4. No pause applies to unshield.
+5. No adapter CPI without post-balance-delta check.
+6. Nullifier ordering enforced.
+7. Root ring freshness on every proof.
+8. No admin instruction reduces user authority.
+9. Upgrade timelock is unskippable.
+10. Once upgrade authority is revoked, it cannot be re-granted.
+
+The on-chain test suite under `tests/onchain/` exercises 12 of these
+directly. See [Property Invariants](/assurance/property-invariants).

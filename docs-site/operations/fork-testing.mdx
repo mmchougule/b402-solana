@@ -1,0 +1,154 @@
+---
+title: Mainnet-Fork Testing
+description: "Boot a local validator with mainnet program state cloned in for real-protocol integration tests."
+---
+
+The b402 adapter pattern depends on real downstream protocol bytecode
+behaving correctly. A pure mock-adapter test passes the b402 invariants
+but tells you nothing about whether the Jupiter / Kamino / Adrena CPI
+actually works.
+
+The solution: **boot a local `solana-test-validator` with mainnet
+program state cloned in.** Real bytecode, real pool state, no real
+money, deterministic.
+
+This page documents the existing flows and how to set up new ones.
+
+## Existing fork validators
+
+| Script | Clones | What it tests |
+|---|---|---|
+| [`ops/local-validator.sh`](https://github.com/b402-ai/b402-solana/tree/main/ops) | Just b402 programs | Pure b402 e2e (shield/unshield/transact) |
+| [`ops/mainnet-fork-validator.sh`](https://github.com/b402-ai/b402-solana/tree/main/ops) | Jupiter V6 + AMM programs + AMM pool state | Real Jupiter swap |
+| `ops/kamino-fork-validator.sh` (referenced in PRD-09) | Kamino Lend + reserves + oracles | Real Kamino deposit |
+
+## How `mainnet-fork-validator.sh` works
+
+```bash
+./ops/mainnet-fork-validator.sh --route /tmp/jup-route.json --reset
+```
+
+Internally:
+
+1. Reads `jup-route.json` (produced by `ops/jup-quote.ts`) to extract
+   every account the Jupiter route touches.
+2. Boots `solana-test-validator` with:
+   - `--clone <addr>` for every Jupiter program, AMM program, pool state
+     account, oracle account.
+   - `--clone-upgradeable-program` for upgradeable programs.
+   - `--url https://api.mainnet-beta.solana.com` (configurable).
+3. Pre-deploys all 4 b402 programs at deterministic devnet IDs.
+4. Pre-funds the test caller with SOL.
+
+Result: a local validator where calling Jupiter's `route` instruction
+behaves like calling it on mainnet, but with the b402 pool, b402
+verifier, and b402 adapter as the calling programs.
+
+## Fetching a Jupiter quote (off-chain)
+
+```bash
+cd examples && pnpm tsx ../ops/jup-quote.ts \
+  --in So11111111111111111111111111111111111111112 \
+  --out EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v \
+  --amount 100000000 \
+  --caller $(solana address -k ~/.config/solana/id.json) \
+  --out-file /tmp/jup-route.json
+```
+
+Output:
+
+```json
+{
+  "quote": { ... },
+  "swapInstruction": {
+    "programId": "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+    "accounts": [...],
+    "data": "<base64>"
+  },
+  "addressLookupTableAddresses": [...],
+  "cloneAccounts": [
+    "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4",
+    // every AMM program, pool state, oracle, etc.
+  ]
+}
+```
+
+The `cloneAccounts` array is what the validator script feeds to
+`--clone`.
+
+## Setting up a new fork
+
+For a new adapter, mirror the Jupiter pattern:
+
+1. Identify the downstream protocol's program ID.
+2. Identify the on-chain state accounts the protocol's instruction
+   touches. Tools: `solana program show`, examination of the
+   protocol's IDL, sample mainnet transactions.
+3. Identify the oracles (Pyth / Switchboard) the protocol depends on.
+4. Write a script that boots the validator with all of those cloned.
+
+Concretely for Kamino, per [`PRD-09 §10`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-09-kamino-adapter.md#10-test-strategy):
+
+```bash
+solana-test-validator \
+  --clone KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD \  # Kamino program
+  --clone <USDC_RESERVE> \
+  --clone <SOL_RESERVE> \
+  --clone <USDC_MINT> \
+  --clone <SOL_MINT> \
+  --clone <PYTH_USDC> \
+  --clone <PYTH_SOL> \
+  --clone <LENDING_MARKET> \
+  --url https://api.mainnet-beta.solana.com
+```
+
+Pyth oracle accounts must be re-cloned periodically because their
+slot data has a freshness window — `refresh_reserve` rejects stale
+prices. For long test runs, the validator script may need a
+`--clone --reclone-on-stale` mode (not currently implemented).
+
+## What this catches that mocks don't
+
+- **Wrong account writability flags.** Mock adapters tend to mark
+  everything writable; real protocols are strict.
+- **Wrong `is_signer` flags.** Critical for CPI signing — Jupiter
+  expects `userTransferAuthority` as a signer, Kamino expects the
+  obligation owner as a signer.
+- **Anchor discriminator drift.** If the SDK is built against an old
+  IDL but the program upgraded, mainnet-fork tests catch the
+  mismatch.
+- **Oracle staleness.** Stale Pyth feeds reject; tests catch the path.
+
+## What this does NOT catch
+
+- Mainnet-only state: validator congestion, MEV searcher behavior,
+  real liquidator dynamics, real Jito bundle competition.
+- Long-running interactions: positions held over multiple slots, funding
+  rate accrual, long-term oracle drift.
+- Adversarial protocol upgrades.
+
+For those, you need devnet rehearsal (where the protocol can be
+upgraded under your feet) or eventually mainnet.
+
+## Reproducing the verified runs
+
+```bash
+# Real Jupiter swap (the verified Phase 2a flow)
+cd examples && pnpm tsx ../ops/jup-quote.ts \
+  --in So11111111111111111111111111111111111111112 \
+  --out EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v \
+  --amount 100000000 \
+  --caller $(solana address -k ~/.config/solana/id.json) \
+  --out-file /tmp/jup-route.json
+./ops/mainnet-fork-validator.sh --route /tmp/jup-route.json --reset
+cd examples && pnpm swap-e2e-jupiter
+
+# Real Kamino deposit (verified GREEN 2026-04-26)
+./ops/kamino-fork-validator.sh --reset    # if available
+cd examples && pnpm tsx kamino-adapter-fork-deposit.ts
+```
+
+The Kamino-fork script may not exist yet in the same form as the
+Jupiter one; in that case, the example file
+[`examples/kamino-fork-deposit.ts`](https://github.com/b402-ai/b402-solana/blob/main/examples/kamino-fork-deposit.ts)
+documents the clone list and you boot the validator manually.

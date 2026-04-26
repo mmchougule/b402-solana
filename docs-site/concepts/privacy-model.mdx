@@ -1,0 +1,224 @@
+---
+title: Privacy Model
+description: "Three layers of linkage; what's hidden today, what's a v0.2 upgrade, what's out of scope."
+---
+
+This page is the most important one in the docs. If a privacy claim is not
+cited from circuit code, on-chain handler code, or a test in the assurance
+repo, it is not made here.
+
+## Three layers of linkage
+
+The protocol's job is to break (or attenuate) three different observer-side
+links:
+
+| Layer | What an observer correlates | b402 today |
+|---|---|---|
+| **L1: Wallet → Action** | "Wallet X did this DeFi action" | Strong |
+| **L2: Action → Action** | "These two adapter calls were the same user" | Partial — see §2 |
+| **L3: Pool-level clustering** | "Of all pool participants, these subset are correlated" | Scales with adoption |
+
+Each layer is a different attack and a different defense.
+
+## L1: Wallet → Action
+
+**Defended.** This is the canonical thing a privacy pool buys.
+
+A user shields tokens from wallet `A`. Later, they unshield (or
+adapt-execute) using a relayer-paid transaction. The on-chain transaction
+does not contain wallet `A`'s pubkey or any account derived from it. The
+recipient ATA is bound into the proof's `recipientBind` public input as
+`Poseidon_3("b402/v1/recipient-bind", owner_low_128, owner_high_128)`,
+but the source spending key never appears.
+
+What an observer sees on the unshield tx:
+
+- A relayer signing as fee payer.
+- The `vault → recipient_token_account` transfer.
+- A nullifier emitted via `NullifierSpent` event.
+- A new merkle root emitted via `CommitmentAppended` (for change outputs).
+
+What the observer cannot derive:
+
+- Which previous `commitment` was the source of the spent note.
+- Whether wallet `A` is the spender.
+- Whether the same user has spent any other notes from the pool.
+
+**Caveat — timing/volume correlation.** If a user shields 100,000 USDC and
+unshields 99,950 USDC two minutes later, with no other comparable shields
+in that window, the anonymity set collapses to that user. This is a
+property of all pool-based designs and is documented honestly. The SDK
+surfaces an `anonymitySet` hint per token; users wanting better privacy
+wait for thicker pools.
+
+## L2: Action → Action (cross-action linkability)
+
+**Partial.** Two adapter calls by the same user *should* be unlinkable.
+Here's where they are and aren't today.
+
+### What works
+
+For Jupiter swaps and the mock adapter, two `adapt_execute` calls by the
+same user are independent: each generates a fresh nullifier from a
+different leaf index, the per-action keypair binding is different, and
+the proof's `actionHash` includes the specific instruction data. There is
+no shared per-user PDA on the Jupiter or mock paths.
+
+### What does NOT yet hold: Kamino single-obligation
+
+In the **current Kamino adapter implementation** (`v0.1.0`), the
+`adapter_authority` PDA is the **shared** Kamino obligation owner across
+all b402 users. From
+[`programs/b402-kamino-adapter/src/lib.rs:23-46`](https://github.com/b402-ai/b402-solana/blob/main/programs/b402-kamino-adapter/src/lib.rs):
+
+> For the v0.1 test-gate landing we ship (2). The Deposit / Withdraw /
+> Borrow / Repay handlers all use `adapter_authority` as the Kamino
+> obligation owner. PRD-09 §7.2 is amended in this commit accordingly.
+
+This means **every shielded user's Kamino position aggregates into one
+on-chain `Obligation` PDA owned by the b402 Kamino adapter**. An observer
+correlating Kamino's public obligation state can:
+
+- Count the number of distinct b402 Kamino actions over time.
+- See aggregate b402-Kamino TVL by reserve.
+- See timing of every b402-Kamino state change.
+
+Note that this is still a strict L1 win: the observer cannot link any
+specific action to a specific wallet. But the observer *can* trivially
+group all b402-Kamino actions as "from the b402 pool," which is L2
+linkability collapsed to "everyone in the same b402 obligation."
+
+This is acceptable for a v0.1 test gate where Kamino was the first
+non-trivial-state adapter to ship. **It is not acceptable for production.**
+
+### The v0.2 upgrade path (already designed and partially scaffolded)
+
+PRD-09 §7.2 specifies per-user obligation PDAs, derived as:
+
+```rust
+obligation = PDA([
+  b"b402/v1",
+  b"kamino-obligation",
+  viewing_pub_hash,        // Poseidon hash of user's viewing pubkey
+  reserve_market,
+], adapter_program_id)
+```
+
+`viewing_pub_hash` is already part of the shielded note schema (it's the
+encryption target on every output commitment), so binding it to a unique
+obligation address adds no privacy leak — but does cleanly partition each
+user's Kamino position into a distinct obligation that looks, from
+Kamino's perspective, like an independent unrelated user.
+
+The helpers exist in code but are gated:
+
+```rust
+// programs/b402-kamino-adapter/src/lib.rs (~line 833)
+#[allow(dead_code)]
+pub fn derive_owner_pda(viewing_pub_hash: &[u8; 32]) -> (Pubkey, u8) {
+    Pubkey::find_program_address(
+        &[VERSION_PREFIX, b"kamino-owner", viewing_pub_hash.as_ref()],
+        &crate::ID,
+    )
+}
+
+#[allow(dead_code)]
+pub fn derive_obligation_pda(
+    owner_pda: &Pubkey,
+    lending_market: &Pubkey,
+) -> (Pubkey, u8) { ... }
+```
+
+The shipping path: lock the v2 ABI (`PRD-11..PRD-15`, especially shadow
+PDAs in PRD-13), extend the adapt circuit to bind `viewing_pub_hash` into
+the obligation pubkey public input, redo the trusted-setup ceremony,
+re-audit. This is a **design-shipped, code-not-shipped** state.
+
+### Drift, Marginfi, future per-user-state adapters
+
+Same story. Any protocol with a per-user PDA needs the shadow-PDA
+treatment from PRD-13. PRD-10 §3.4 originally picked Option A
+(shared-account) for Drift; that decision should and will be revisited
+under the PRD-09/PRD-13 consistency argument. None of these adapters are
+shipped to mainnet, so the issue is forward-architecture, not
+liability-on-mainnet.
+
+## L3: Pool-level clustering
+
+**Scales with adoption.**
+
+At thin TVL, an observer with infinite patience and timing data can do
+basic "shield-then-spend" clustering — if a 1.234567 SOL deposit lands
+and a 1.234567 SOL withdrawal happens 30 seconds later, those are
+probably the same user. This applies to **every** pool-based privacy
+design (Tornado, Railgun, Privacy.cash). It is not specific to b402.
+
+What helps:
+
+- **High pool throughput.** More concurrent shields and spends per
+  minute. Adoption-driven, not protocol-driven.
+- **No fixed denominations.** b402 lets users shield arbitrary `u64`
+  amounts; an agent's 0.10 USDC and a treasury's 100k USDC sit in the
+  same anonymity set. Tornado's fixed-denomination approach is rejected
+  per [PRD-01 §8](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-01-architecture.md).
+- **Aggregator routing through the pool.** The more legitimate volume
+  flows through `adapt_execute` into Jupiter / Kamino / Orca, the
+  noisier the L3 surface gets.
+
+What does not help:
+
+- KYT screening. Doesn't add privacy and explicitly excluded.
+- Pool tiers. Splits the anonymity set; rejected.
+
+L3 is honest: small TVL means weak L3 privacy. The solution is more
+users, not more cryptography.
+
+## What we DO NOT hide
+
+Stating these explicitly:
+
+- **Per-mint aggregate TVL.** The vault SPL token account balance is
+  public. Anyone can read total wSOL, USDC, whatever held in shielded
+  form. This is by design — pool size is the anonymity-set signal.
+- **Tx submission timestamps.** Every shielded action is a Solana
+  transaction with a slot timestamp. Timing analysis is in scope for any
+  observer.
+- **Network-layer metadata.** A relayer sees the user's IP unless they
+  use Tor. The protocol does not anonymize the network layer.
+- **Protocol footprints downstream of adapters.** Jupiter sees a swap.
+  Kamino sees an obligation deposit. The pool is the visible *caller* to
+  these protocols, but the call itself is on-chain.
+- **Anything the user reveals voluntarily.** Viewing-key disclosure is
+  explicitly user-sovereign. If a user gives an auditor their viewing
+  key, that auditor sees their notes. The protocol has no on-chain
+  forced-disclosure mechanism.
+
+## Comparison to other Solana privacy projects
+
+Spec-level differentiation, sourced from
+[PRD-01 §14](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-01-architecture.md):
+
+| Capability | b402-solana v1 | Privacy.cash | Umbra (Arcium) | Token-2022 CT |
+|---|---|---|---|---|
+| Atomic composable DeFi | yes (`adapt_execute`) | no (unshield + reshield) | no | n/a |
+| Protocol fee | 0% | 0.35% | TBD | 0 |
+| Compliance stance | user-sovereign | mandatory CipherOwl screen | viewing keys + risk + geo | n/a |
+| Trust model | ZK (Groth16) | ZK (Groth16) | MPC | ZK (ElGamal) |
+| Audits | not yet | 18 + Veridise FV | partial | pending |
+
+`b402-solana` is **not the most-audited Solana privacy product today**.
+Privacy.cash leads on audit count by a wide margin. The differentiator is
+permissionlessness (no CipherOwl screen) and DeFi composability via the
+adapter framework — not maturity.
+
+## Summary
+
+| Privacy property | Status today |
+|---|---|
+| L1: Wallet ↔ shielded action | Strong (proof-bound recipient binding, Groth16 over BN254) |
+| L2: Adapt-action ↔ adapt-action (Jupiter, mock) | Strong (no shared per-user state) |
+| L2: Kamino obligation linkability | **Weak** — single shared obligation in v0.1, per-user upgrade designed |
+| L2: Drift, future per-user-state adapters | Not yet shipped; will use shadow PDAs (PRD-13) |
+| L3: Pool-level clustering | Scales with adoption; thin at small TVL |
+| Network-layer privacy | Out of scope (use Tor / VPN) |
+| Trusted setup | **Throwaway, single-contributor** — mainnet blocked on multi-party ceremony |

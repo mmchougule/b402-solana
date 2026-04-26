@@ -1,0 +1,138 @@
+---
+title: Scanner
+description: "Auto-discover incoming shielded notes via viewing-tag pre-filter and ECDH decrypt."
+---
+
+`Scanner` is the SDK's note-discovery primitive. It subscribes to
+pool log events, runs a viewing-tag Poseidon pre-filter on each one,
+and ECDH-decrypts the matches with the user's X25519 viewing key. The
+result: when Alice privately sends Bob a note, Bob's wallet
+auto-discovers it without any out-of-band coordination.
+
+This is the recipient-side of privacy; without it, b402 is one-way.
+
+## API
+
+```typescript
+import { Scanner, NoteStore } from '@b402ai/solana';
+
+const noteStore = new NoteStore();
+
+const scanner = new Scanner({
+  connection,                  // web3.js Connection
+  pool,                        // pool program ID
+  wallet,                      // local wallet from buildWallet
+  noteStore,                   // where discovered notes get pushed
+  startSlot: 'recent',         // or a specific slot
+  // optional: callback on each discovered note
+  onNote: (note, meta) => {
+    console.log('discovered:', meta.leafIndex, note.value);
+  },
+});
+
+await scanner.start();
+// scanner runs until you call:
+await scanner.stop();
+```
+
+## How it works
+
+For each new `CommitmentAppended` event from pool logs:
+
+1. **Compute candidate `sharedSecret = X25519(viewingPriv, ephemeralPub)`.**
+   `ephemeralPub` is published as part of the event.
+2. **Compute candidate `viewingTag = Poseidon_2("b402/v1/viewtag",
+   sharedSecret_as_field)[0..2]`** — a 16-bit tag.
+3. **Compare to `viewing_tag` on the event.** Mismatch → skip
+   (`~99.998%` of cases). 16-bit collision probability is `1/65,536`.
+4. **On match: derive `encryptKey = HKDF-SHA256(sharedSecret, salt="b402-note-enc-v1")`.**
+5. **Attempt ChaCha20-Poly1305 decrypt** with AAD `"b402-note-v1"`.
+   If AEAD tag invalid → skip (false-positive from the tag pre-filter).
+6. **Decode `Note { value, random, tokenMint, version }`.**
+7. **Verify `commitment = Poseidon_5("b402/v1/commit", tokenMint, value,
+   random, spendingPub)`** matches the event's commitment.
+8. **Verify `spendingPub` corresponds to the local wallet's spending
+   key.** This is the final check that the note is *ours* — without
+   this, an attacker who happened to collide on the viewing tag could
+   inject decoy data.
+9. **Push to `NoteStore`.**
+
+Step 3 (the viewing-tag pre-filter) is what keeps the scanner cheap.
+Without it, the scanner would do a full ChaCha20 decrypt on every
+event in the pool, which doesn't scale. The 16-bit tag cuts work by
+~65k×.
+
+## Performance
+
+From [`reports/benchmark-summary.md`](https://github.com/b402-ai/b402-solana-assurance/blob/main/reports/benchmark-summary.md):
+
+```
+Note scan / decrypt avg ms:  3.09
+```
+
+Per event, including the Poseidon viewing-tag computation. At pool
+events arrive at maximum Solana block rate (~400ms/block, multiple
+events per block), the scanner stays comfortably ahead.
+
+## Source
+
+- [`packages/sdk/src/notes/scanner.ts`](https://github.com/b402-ai/b402-solana/tree/main/packages/sdk/src/notes/scanner.ts)
+- [`packages/sdk/src/note-encryption.ts`](https://github.com/b402-ai/b402-solana/blob/main/packages/sdk/src/note-encryption.ts)
+- Helpers: `parseProgramDataLog`, `expectedCommitmentForOwner`
+
+## Verified flow
+
+[`examples/scanner-e2e.ts`](https://github.com/b402-ai/b402-solana/blob/main/examples/scanner-e2e.ts)
+runs three independent keypairs:
+
+```
+Alice            → shields 100 USDC
+Alice            → privately sends 50 USDC to Bob (transact ix)
+Bob's Scanner    → subscribes to pool logs, runs viewing-tag filter,
+                   ECDH-decrypts the match, pushes the new note to NoteStore
+Bob              → unshields the new 50 USDC note to Charlie's ATA
+```
+
+All without Bob ever talking to Alice off-chain. Run with:
+
+```bash
+./ops/local-validator.sh --reset       # terminal 1
+cd examples && pnpm scanner-e2e        # terminal 2
+```
+
+## Limitations
+
+The scanner is **stateless across restarts** by default. `NoteStore` is
+in-memory; consumers persist as appropriate. A long-running agent
+that restarts mid-day will need to:
+
+1. Persist `NoteStore` state across restarts (IndexedDB / SQLite /
+   filesystem).
+2. Replay events from the last-seen slot, not from chain genesis.
+3. De-dupe — `noteStore.add` is idempotent on `(commitment,
+   leafIndex)`.
+
+Persistence is an explicit non-goal of the SDK package; consumers
+build it once for their app and reuse.
+
+## Foreign-viewer rejection
+
+The scanner's correctness check (step 8) is empirically verified in
+the assurance suite:
+
+```
+Note-store ingest accepted:           true
+Note-store foreign viewer rejected:   true
+Note-store expected nullifier matches: true
+```
+
+From [`reports/invariant-summary.md`](https://github.com/b402-ai/b402-solana-assurance/blob/main/reports/invariant-summary.md).
+A note encrypted to Wallet A's viewing key will not pass scanner
+validation when run under Wallet B's viewing key, even if the tag
+collides. The malformed note rejection rate is:
+
+```
+Note-store malformed rejects:         32 / 32  (PRD-A04 fuzz)
+```
+
+From [`reports/fuzz-summary.md`](https://github.com/b402-ai/b402-solana-assurance/blob/main/reports/fuzz-summary.md).
