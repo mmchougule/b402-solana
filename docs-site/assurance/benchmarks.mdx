@@ -1,0 +1,140 @@
+---
+title: Benchmarks
+description: "CU and tx-size budgets, observed wall times, and what they mean."
+---
+
+Per [`PRD-A05`](https://github.com/b402-ai/b402-solana-assurance/blob/main/prds/PRD-A05-benchmarks-budgets.md),
+the assurance harness measures off-chain wall times and on-chain
+compute units / tx sizes. These are regression-tracked: a CU spike on
+shield from 240k to 400k is a regression even if it still works.
+
+## Off-chain wall times
+
+From [`reports/benchmark-summary.md`](https://github.com/b402-ai/b402-solana-assurance/blob/main/reports/benchmark-summary.md):
+
+```
+Platform:                       darwin arm64
+Node:                           v24.4.0
+
+Wallet build avg ms:            0.740
+Merkle append avg ms:           3.797
+Note encrypt + decrypt avg ms:  3.064
+Proof generation avg ms:        733.357   ← dominates
+Verifier CLI avg ms:            116.791
+Adapt fixture load avg ms:      0.093
+Note scan + decrypt avg ms:     3.086
+```
+
+Proof generation is **97% of the off-chain wall time** for any
+shielded action. Optimization paths:
+
+- **Rapidsnark (C++).** Drop-in Groth16 prover; ~3× faster than
+  snarkjs WASM. v1 stays on snarkjs for portability and zero-install
+  browser compatibility. v2 should land Rapidsnark for server-side
+  prover hosts.
+- **Recursion.** PRD-17 explores Halo2-style recursive proofs to fold
+  multiple notes into one. Out-of-scope for v1.
+- **Worker threads.** snarkjs proofs are single-threaded JS. Wrap in
+  a worker for non-blocking client UX. Trivial.
+
+## On-chain compute units
+
+From [`reports/onchain-summary.md`](https://github.com/b402-ai/b402-solana-assurance/blob/main/reports/onchain-summary.md):
+
+```
+Shield success CU:              233,495
+Unshield success CU:            223,413
+Full adapt_execute CU:          313,725  (LiteSVM, mock adapter)
+```
+
+These are litesvm measurements — same `.so` bytecode that ships, but
+in-process Solana VM. Compare to README's mainnet-fork numbers:
+
+```
+Shield (devnet):                239,224 CU       1,157 B
+Unshield (devnet):              ~350,000 CU      ~1,150 B
+Adapt swap (mock, devnet):      ~600,000 CU      1,214 B
+Adapt swap (Jupiter SolFi V2):  ~660,000 CU      1,231 B
+```
+
+The litesvm numbers are slightly lower than devnet because the litesvm
+test path doesn't include the verifier CPI overhead (the assurance
+harness has a "full adapt_execute" probe that does include it; that's
+the 313k figure).
+
+## CU budget per instruction
+
+From [`PRD-03 §8`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-03-program-spec.md#8-compute-budget-reservation),
+SDK helpers set these CU limits:
+
+| Instruction | Requested CU | Observed CU |
+|---|---|---|
+| init_pool | 300k | — |
+| add_token_config | 100k | — |
+| shield | 350k | 233k |
+| transact | 400k | — |
+| unshield | 400k | 223k |
+| adapt_execute (Jupiter 2-hop) | 900k | 660k (real Jupiter) |
+| adapt_execute (Kamino) | 700k | — |
+| adapt_execute (Drift) | 1,100k | — |
+| admin ops | 200k | — |
+
+Headroom is on purpose — leaving ~30% slack accounts for protocol
+upgrades that increase costs.
+
+## Tx-size budgets
+
+Solana caps a v0 transaction at **1,232 bytes serialized**. b402's
+observed sizes:
+
+| Op | Size | Headroom |
+|---|---|---|
+| Shield | 1,157 B | 75 B |
+| Unshield | ~1,150 B | ~80 B |
+| Adapt (mock) | 1,214 B | 18 B |
+| Adapt (Jupiter mainnet-fork) | 1,231 B | 1 B |
+
+The Jupiter case is **at the edge**. This is why the b402 ALT
+(`9FPYufa1KDkrn1VgfjkR7R667hbnTA7CNtmy38QcsuNj` on devnet) is
+non-optional for adapt: without it, Jupiter routes longer than 2 hops
+overflow the cap, and even 2-hop can overflow depending on which AMMs
+the route uses.
+
+`MAX_ACTION_PAYLOAD = 350` (set by the SDK) leaves enough headroom
+for 23 public inputs × 32 B = 736 B + 256 B proof + Borsh overhead +
+~80 B of accounts + dummy nullifiers + encrypted notes.
+
+## External findings
+
+From the assurance summary:
+
+```
+External observed adapt Jupiter fork CU:        660,000
+External observed adapt Jupiter fork tx bytes:  1,231
+```
+
+These are the mainnet-fork measurements taken from the live
+`swap-e2e-jupiter` run. They are the source of truth for the README's
+"observed costs" table.
+
+## CU regression policy
+
+The assurance harness tracks per-instruction CU as a baseline. A 10%
+deviation from baseline triggers a CI flag. The numbers in this page
+are the current baseline.
+
+Specific regressions to watch:
+
+- **Tree append CU.** Each `sol_poseidon` call is ~100k CU. If a
+  hot path regresses to >2 Poseidon calls per merkle level, we're
+  missing an optimization.
+- **Verifier CU.** Should stay near 178k. Drift indicates `groth16-solana`
+  changed in a way we should review.
+- **Adapter CPI overhead.** The pool-side overhead (excluding the
+  adapter's own work + its downstream CPI) should stay near 200k.
+
+## Reference
+
+- [`PRD-A05`](https://github.com/b402-ai/b402-solana-assurance/blob/main/prds/PRD-A05-benchmarks-budgets.md)
+- [`reports/benchmark-summary.md`](https://github.com/b402-ai/b402-solana-assurance/blob/main/reports/benchmark-summary.md)
+- [`reports/onchain-summary.md`](https://github.com/b402-ai/b402-solana-assurance/blob/main/reports/onchain-summary.md)

@@ -1,0 +1,144 @@
+---
+title: Relayer Client
+description: "HTTP relayer client for delegating SOL fee payment to a third-party signer."
+---
+
+A b402 relayer is an HTTP service that signs and submits a user-built
+shielded instruction with the relayer as the fee payer. The protocol
+binds the relayer fee into the proof, so a malicious relayer cannot
+forge a higher fee or redirect funds.
+
+This page covers the **client** side. To run a relayer service, see
+[Operations → Running a Relayer](/operations/running-a-relayer).
+
+## When to use a relayer vs self-submit
+
+| | Self-submit | Relayer |
+|---|---|---|
+| Fee payer | User's keypair (needs SOL) | Relayer's keypair |
+| User wallet on-chain | Yes (as fee payer) | No |
+| Privacy posture | L1 privacy weakened | L1 privacy preserved |
+| Speed | Direct | Adds one HTTP RTT |
+| Cost | User pays SOL | User pays an in-kind fee |
+
+Self-submit is appropriate when the user is OK appearing on-chain as
+the fee payer (e.g., they already shielded from this wallet, so the
+linkage is already there). Relayer is appropriate for fresh
+unshield-to-new-address flows.
+
+## Endpoints
+
+The relayer exposes four POST endpoints, all sharing one body shape:
+
+```
+POST /relay/shield
+POST /relay/unshield
+POST /relay/transact
+POST /relay/adapt
+```
+
+Request body:
+
+```json
+{
+  "ixData": "<base64 of full Anchor ix data — discriminator + Borsh args>",
+  "accountKeys": [
+    { "pubkey": "<base58>", "isSigner": true,  "isWritable": true  },
+    { "pubkey": "<base58>", "isSigner": false, "isWritable": false }
+  ],
+  "altAddresses": ["<base58>"],
+  "computeUnitLimit": 1400000,
+  "userSignature": "<optional base64 64-byte ed25519 sig>",
+  "userPubkey":    "<optional base58>"
+}
+```
+
+The first `accountKeys` entry **must** be marked `isSigner=true,
+isWritable=true` — that's the pool's `relayer: Signer` slot. The
+relayer overwrites the pubkey in that slot with its own, regardless
+of what the client sent.
+
+Response on success:
+
+```json
+{
+  "signature": "5VkKL...",
+  "slot": 308912240,
+  "confirmedAt": "2026-04-24T12:34:56.000Z"
+}
+```
+
+Errors are RFC 7807 problem+json:
+
+```json
+{
+  "type": "https://b402.ai/errors/fee_too_low",
+  "title": "fee_too_low",
+  "status": 400,
+  "detail": "relayer_fee 5000 below floor 10000",
+  "got": "5000",
+  "min": "10000"
+}
+```
+
+## Health check
+
+```bash
+curl -s http://localhost:8080/health | jq
+```
+
+```json
+{
+  "ok": true,
+  "relayerPubkey": "...",
+  "relayerLamports": 1234567890,
+  "rpcSlot": 308912233
+}
+```
+
+## Authentication
+
+Optional. If `API_KEY_FILE` is configured server-side, requests must
+include `Authorization: Bearer <key>` or `x-api-key: <key>`. Per-key
+rate limits and token allowlists are configurable.
+
+## What the relayer enforces (client must satisfy)
+
+1. **Pool program whitelist.** The forwarded ix data is for the
+   configured `POOL_PROGRAM_ID`.
+2. **Adapter allowlist** for `/relay/adapt` — at least one adapter
+   pubkey from `JUPITER_ADAPTER_ID` / `MOCK_ADAPTER_ID` /
+   `EXTRA_ADAPTER_IDS` must be in `accountKeys`.
+3. **Fee floor.** The relayer reads `relayer_fee: u64` at offset 476
+   in the ix data (the value the proof binds via `relayer_fee_bind`)
+   and rejects below `MIN_FEE_LAMPORTS`.
+4. **Tx size cap.** Serialized v0 tx ≤ 1,232 bytes (Solana's hard limit).
+5. **Per-API-key rate limit.** Sliding 60-second window, default 10/min.
+
+The relayer does not interpret the ix data otherwise — Anchor account
+constraints in the pool catch malformed assembly.
+
+## Trust model
+
+The relayer:
+
+- **Cannot forge a transaction.** The proof binds amount, mint,
+  recipient, fee.
+- **Cannot front-run user intent.** `recipient_bind` and
+  `expected_out_value` constrain destination and price floor.
+- **Can censor.** A relayer can refuse to submit; mitigated by the
+  user's ability to switch relayers or self-submit.
+- **Sees the user's IP** (absent Tor / VPN). Network-layer privacy is
+  out of scope.
+- **Sees proof bytes + public inputs.** This is the same information
+  any chain observer sees post-confirmation.
+
+For the operational side (how to run one, Cloud Run config, Jito
+integration, etc.) see [Running a Relayer](/operations/running-a-relayer).
+
+## Reference
+
+- [`packages/relayer/README.md`](https://github.com/b402-ai/b402-solana/blob/main/packages/relayer/README.md)
+  — full operator docs.
+- [`packages/relayer/src/`](https://github.com/b402-ai/b402-solana/tree/main/packages/relayer/src)
+  — Fastify implementation.

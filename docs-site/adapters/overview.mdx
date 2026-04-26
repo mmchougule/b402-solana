@@ -1,0 +1,183 @@
+---
+title: Adapter Overview
+description: "ABI, registry, and lifecycle of b402 adapters."
+---
+
+An **adapter** is a separate Anchor program that the pool CPIs into via
+`adapt_execute`. Each adapter integrates one external DeFi protocol;
+keeping them isolated from the pool bounds the blast radius of any
+adapter bug.
+
+This page covers the v1 ABI shipped today. The v2 extensions
+(vector token bindings PRD-11, content-addressed action hash PRD-12,
+shadow PDAs PRD-13, two-phase claim notes PRD-14) are linked at the end.
+
+## The ABI contract
+
+Every b402 adapter program implements a single `execute` Anchor
+entrypoint:
+
+```rust
+#[derive(Accounts)]
+pub struct AdapterExecute<'info> {
+    /// Adapter's PDA signer.
+    /// Seeds = [b"b402/v1", b"adapter"].
+    pub adapter_authority: SystemAccount<'info>,
+
+    /// Pool's vault for the IN mint.
+    /// Pool has already moved `in_amount` into adapter_in_ta before CPI.
+    pub in_vault: Account<'info, TokenAccount>,
+
+    /// Pool's vault for the OUT mint.
+    /// The post-CPI delta target.
+    pub out_vault: Account<'info, TokenAccount>,
+
+    /// Adapter scratch token accounts (owned by adapter_authority).
+    pub adapter_in_ta: Account<'info, TokenAccount>,
+    pub adapter_out_ta: Account<'info, TokenAccount>,
+
+    pub token_program: Program<'info, Token>,
+    // remaining_accounts = downstream-protocol accounts
+}
+
+pub fn execute(
+    ctx: Context<AdapterExecute>,
+    in_amount: u64,
+    min_out_amount: u64,
+    action_payload: Vec<u8>,
+) -> Result<()>;
+```
+
+The first 6 accounts are **pool-managed**. Whatever follows in
+`remaining_accounts` is whatever the downstream protocol needs. The
+pool does not interpret these — it forwards them verbatim to the
+adapter. The adapter is responsible for validating their order and
+shape.
+
+`action_payload` is opaque bytes from the pool's perspective.
+Cryptographically bound by the pool via:
+
+```
+action_hash = Poseidon_3(
+    "b402/v1/adapt-bind",
+    keccak256(action_payload) reduced mod p,
+    expected_out_mint reduced mod p
+)
+```
+
+Recomputed on chain in `adapt_execute` before the adapter is invoked. A
+relayer that tampers with `action_payload` between proof gen and
+submission will fail this check; the entire tx reverts.
+
+## The five trust boundaries
+
+For every CPI:
+
+1. **Adapter is registered + enabled.** Pool checks
+   `AdapterRegistry.adapters[i].program_id == adapter_program.key()` and
+   `enabled == true`.
+2. **Instruction discriminator is allowlisted.** The first 8 bytes of
+   `raw_adapter_ix_data` must appear in
+   `AdapterRegistry.adapters[i].allowed_instructions`. Second line of
+   defense if an adapter program upgrades and adds an unsafe entrypoint.
+3. **Adapter ID matches the proof.** `pi.adapter_id ==
+   keccak256(adapter_program.key) reduced mod p`. Prevents replaying a
+   proof generated for adapter X against adapter Y.
+4. **Action hash matches.** Recomputed on chain from `action_payload`
+   bytes; rejects tampering.
+5. **Post-CPI balance delta.** `out_vault.amount` post-CPI minus pre-CPI
+   must be ≥ `expected_out_value`. Adapter cannot underdeliver without
+   the entire tx reverting.
+
+The adapter has access only to the accounts the pool passes. It cannot
+read/write `TreeState`, `NullifierShard`, or `PoolConfig` because those
+accounts are not in its `AccountInfo` slice.
+
+## Registry semantics
+
+The `AdapterRegistry` PDA stores:
+
+```rust
+pub struct AdapterRegistry {
+    pub count: u16,
+    pub adapters: Vec<AdapterInfo>,
+}
+
+pub struct AdapterInfo {
+    pub adapter_id: [u8; 32],              // keccak(program_id) mod p
+    pub program_id: Pubkey,
+    pub allowed_instructions: [[u8; 8]; N],
+    pub allowed_instruction_count: u8,
+    pub enabled: bool,
+}
+```
+
+The schema is being extended in v2 to add `allows_delta_zero` and
+`circuit_binding_flags` per instruction (per
+[`PRD-04 §7`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-04-composability.md#7-adapter-registry-semantics)
+amendment). Today, only `discriminator` and `enabled` are enforced; the
+extra fields exist in the source schema and are zero-valued.
+
+Lifecycle:
+
+- `register_adapter(info)` — admin multisig.
+- `disable_adapter(id)` — single signer. Emergency kill switch.
+- `enable_adapter(id)` — multisig.
+- Removing an adapter: not currently supported (registry append-only).
+  Disable suffices.
+
+## Adapters shipped (v1, devnet)
+
+| Adapter | Devnet ID | Status |
+|---|---|---|
+| `b402_jupiter_adapter` | `3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7` | Live; verified vs. real Jupiter V6 on mainnet-fork |
+| `b402_kamino_adapter` | `2enwFgcGKJDqruHpCtvmhtxe3DYcV3k72VTvoGcdt2rX` | Deposit verified mainnet-fork; Withdraw/Borrow/Repay coded but mainnet-fork verification pending |
+| `b402_mock_adapter` | `89kw33YDcbXfiayVNauz599LaDm51EuU8amWydpjYKgp` | Test-only |
+
+## Adapters scaffolded (programs exist; impl pending)
+
+| Adapter | Status | Source |
+|---|---|---|
+| `b402_adrena_adapter` | Scaffold per [`PRD-16`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-16-adrena-adapter.md). PRD specifies `OpenPosition`, `IncreasePosition`, `DecreasePosition`, `ClosePosition`. **Designed-for, not yet shipped.** | [`programs/b402-adrena-adapter/`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-adrena-adapter) |
+| `b402_orca_adapter` | Scaffold. Multi-output (DecreaseLiquidity returns 2 mints) requires PRD-11 vector bindings. **v2 ABI dependent.** | [`programs/b402-orca-adapter/`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-orca-adapter) |
+| `b402_jupiter_perps_adapter` | Scaffold. Async settlement requires PRD-14 claim notes. **v2 + claim-note dependent.** | [`programs/b402-jupiter-perps-adapter/`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-jupiter-perps-adapter) |
+
+## v2 extensions (designed, not shipped)
+
+These are the live PRDs that define the next ABI revision. They are
+**not in code yet**; the v1 ABI as documented above is what shipped.
+
+- [PRD-11: Vector Token Bindings (M-in / N-out)](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-11-vector-bindings.md)
+  — generalize scalar mint binding to up to 4 inputs × 4 outputs.
+- [PRD-12: Content-Addressed `action_hash`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-12-action-hash.md)
+  — extend the binding to include canonicalized accounts and per-adapter
+  scope tag. The "Open/Closed Principle made cryptographically
+  enforceable" — once shipped, any future adapter is a pure CPI wrapper.
+- [PRD-13: Shadow PDAs](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-13-shadow-pda.md)
+  — generic per-user protocol-state PDA pattern, replaces single-shared
+  obligation in Kamino and shared-account in Drift.
+- [PRD-14: Two-Phase Claim Notes](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-14-two-phase-claim.md)
+  — for any adapter that doesn't settle synchronously (Jupiter Perps,
+  post-reboot Drift, Phoenix limit orders).
+- [PRD-15: Delta-Zero + Deadline](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-15-delta-zero-deadline.md)
+  — for state-only ops (`cancel_order`, `claim_rewards` with zero
+  accrual). Implementation note: registry already has the
+  `allows_delta_zero` field (per PRD-04 §7 amendment).
+
+The `circuits/build/adapt_v2.r1cs.info.txt` shows the v2 circuit has
+been compiled and benchmarked but is not connected to a deployed
+verifier program.
+
+## Continue reading
+
+<CardGroup cols={3}>
+  <Card title="Jupiter" icon="arrow-right-arrow-left" href="/adapters/jupiter">
+    Private swap on real Jupiter V6.
+  </Card>
+  <Card title="Kamino" icon="building-columns" href="/adapters/kamino">
+    Private lend / withdraw / borrow / repay.
+  </Card>
+  <Card title="Build an adapter" icon="hammer" href="/adapters/building-an-adapter">
+    Step-by-step.
+  </Card>
+</CardGroup>

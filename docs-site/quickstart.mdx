@@ -1,0 +1,159 @@
+---
+title: Quickstart
+description: "From clone to a successful private swap on a mainnet-forked Jupiter validator."
+---
+
+This page walks you through running everything in the README end-to-end. Five
+minutes if you already have Solana and Rust installed; closer to thirty on a
+fresh machine.
+
+## Prerequisites
+
+- Node 20+ with `pnpm`
+- Rust stable + Solana CLI 2.0+
+- Anchor `platform-tools v1.54` for `cargo build-sbf`
+- (Optional) An Alchemy or Helius mainnet RPC URL for the mainnet-fork flow
+
+## Install
+
+```bash
+git clone https://github.com/b402-ai/b402-solana.git
+cd b402-solana
+pnpm install
+```
+
+## 1. Verify the cryptographic stack
+
+These are off-chain — no validator needed. Confirms Circom 2.2 builds, the
+Rust↔TS Poseidon parity matches `iden3/circomlib v2.4.0`, and snarkjs
+prove-verify is green.
+
+```bash
+cd circuits && pnpm install && \
+  RUN_PARITY=1 RUN_CIRCUIT_TESTS=1 pnpm vitest run
+
+cd ../packages/prover && \
+  RUN_PROVER=1 RUN_VERIFIER=1 pnpm vitest run
+
+cd ../crypto && cargo test
+```
+
+The Rust crypto crate must produce byte-identical Poseidon output to the
+TypeScript implementation in `packages/sdk/src/poseidon.ts` for every test
+vector in `b402-solana-assurance/vectors/poseidon-primitives.json`.
+
+## 2. Build the on-chain programs for BPF
+
+```bash
+cargo build-sbf --tools-version v1.54 \
+  --manifest-path programs/b402-verifier-transact/Cargo.toml
+cargo build-sbf --tools-version v1.54 \
+  --manifest-path programs/b402-verifier-adapt/Cargo.toml
+cargo build-sbf --tools-version v1.54 \
+  --manifest-path programs/b402-pool/Cargo.toml --features test-mock
+cargo build-sbf --tools-version v1.54 \
+  --manifest-path programs/b402-jupiter-adapter/Cargo.toml
+cargo build-sbf --tools-version v1.54 \
+  --manifest-path programs/b402-mock-adapter/Cargo.toml
+```
+
+You'll get five `.so` artifacts under `target/deploy/` — those are the
+bytecode that ships to devnet.
+
+## 3. Run the on-chain test suites
+
+```bash
+# litesvm: in-process Solana VM, runs the same .so bytecode that ships
+cd tests/onchain && cargo test
+```
+
+12 tests pass; 3 are deferred because of the Phase 2a removal of a
+test-only `check_adapter_delta_mock` instruction (the full `adapt_execute`
+path now covers what those tested). See
+[`reports/onchain-summary.md`](https://github.com/b402-ai/b402-solana-assurance/blob/main/reports/onchain-summary.md)
+in the assurance repo for the breakdown.
+
+## 4. End-to-end against a local validator
+
+```bash
+# terminal 1
+./ops/local-validator.sh --reset
+
+# terminal 2 — shield → unshield with real Groth16 proofs
+cd examples && pnpm e2e
+```
+
+The validator script boots `solana-test-validator` with all 4 programs
+pre-deployed at deterministic IDs.
+
+## 5. Private swap on devnet
+
+```bash
+RPC_URL=https://api.devnet.solana.com \
+  pnpm --filter=@b402ai/solana-examples swap-e2e
+```
+
+This uses your `~/.config/solana/id.json` wallet and the deployed devnet
+programs (see [Program IDs](/reference/program-ids)). You'll need ~0.07 SOL
+free for nullifier shard rent.
+
+The example shields, runs a real Groth16 adapt proof against the mock
+adapter, and unshields. The same flow ran against real Jupiter V6 on
+mainnet-fork — see step 6.
+
+## 6. Real Jupiter on mainnet-fork
+
+```bash
+# Fetch a live mainnet quote
+cd examples && pnpm tsx ../ops/jup-quote.ts \
+  --in So11111111111111111111111111111111111111112 \
+  --out EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v \
+  --amount 100000000 \
+  --caller $(solana address -k ~/.config/solana/id.json) \
+  --out-file /tmp/jup-route.json
+
+# terminal 1: boot a fork validator with Jupiter + AMM state cloned from mainnet
+./ops/mainnet-fork-validator.sh --route /tmp/jup-route.json --reset
+
+# terminal 2
+cd examples && pnpm swap-e2e-jupiter
+```
+
+Output includes the swap signature, the actual wSOL → USDC delta (real
+SolFi V2 pool state cloned from mainnet), and a confirmation that the
+post-CPI balance-delta invariant held against a real aggregator CPI.
+
+Observed cost on this run: 1,231 B tx size, ~660k CU, 5,000 lamports.
+
+## 7. Scanner auto-discovery (Alice → Bob → Charlie)
+
+```bash
+./ops/local-validator.sh --reset
+cd examples && pnpm scanner-e2e
+```
+
+Three independent keypairs. Bob's wallet subscribes to pool logs, runs a
+viewing-tag Poseidon pre-filter on every event, ECDH-decrypts matches with
+his X25519 viewing key, and auto-discovers incoming notes without any
+out-of-band coordination from Alice. Bob then unshields to Charlie with a
+real Groth16 proof.
+
+## What just happened
+
+Each of these flows produced a real ZK proof that the Solana runtime
+verified via the `b402_verifier_transact` or `b402_verifier_adapt` program.
+The proof binds amount, mint, recipient, fee, and (for adapt) adapter +
+action-hash + expected output to public inputs. The pool program enforces
+the on-chain side of the contract: nullifier insertion, vault transfer,
+post-CPI balance delta.
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Anatomy of a Tx" icon="microscope" href="/protocol/pool-program">
+    Layer-by-layer dissection of shield, unshield, and adapt.
+  </Card>
+  <Card title="Build an Adapter" icon="hammer" href="/adapters/building-an-adapter">
+    Add a new DeFi protocol behind the same proof system.
+  </Card>
+</CardGroup>

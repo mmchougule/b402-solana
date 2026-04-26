@@ -1,0 +1,215 @@
+---
+title: Shielded Pool
+description: "UTXO commitments, nullifiers, and viewing keys — the Railgun-style note model on Solana."
+---
+
+A b402 shielded pool is a single global commitment tree plus a nullifier set.
+Every shielded asset balance is encoded as a **note** — a tuple committed via
+Poseidon and inserted as a leaf into the tree. Spending a note reveals its
+**nullifier** (Poseidon over the spending key plus the leaf index) but does
+not reveal which commitment was the source. This unlinkability is the core
+property the protocol provides.
+
+## Note structure
+
+The clear-text layout, used in-circuit and inside the wallet:
+
+```rust
+Note {
+  tokenMint:    Fr,  // SPL mint pubkey, encoded as Fr (see PRD-02 §3.4)
+  value:        Fr,  // u64 in [0, 2^64)
+  random:       Fr,  // 32B uniformly random (the note's blinding)
+  spendingPub:  Fr,  // recipient's spending public key
+}
+
+commitment = Poseidon_5("b402/v1/commit", tokenMint, value, random, spendingPub)
+```
+
+The commitment is what lands on chain, as a 32-byte leaf in the merkle tree.
+It is binding (Poseidon collision-resistant) and hiding (Poseidon
+pseudorandomness given uniform `random`). Without `random`, an observer who
+knows `(tokenMint, value, spendingPub)` cannot recompute the commitment;
+without `spendingPub`, they cannot identify the recipient.
+
+See [`packages/sdk/src/poseidon.ts`](https://github.com/b402-ai/b402-solana/blob/main/packages/sdk/src/poseidon.ts)
+for the canonical TypeScript implementation and `packages/crypto/src/`
+for the Rust parity reference.
+
+## The nullifier
+
+When a user spends a note, they emit a nullifier:
+
+```
+nullifier = Poseidon_3("b402/v1/null", spendingPriv, leafIndex)
+```
+
+Critical properties:
+
+1. **Only the holder of `spendingPriv` can compute it.** The on-chain pool
+   never sees the spending key.
+2. **It is deterministic given `(spendingPriv, leafIndex)`.** Spending the
+   same note twice yields the same nullifier. The on-chain nullifier set
+   catches double-spend.
+3. **It is unlinkable to the commitment** without `spendingPriv`. Knowing
+   one nullifier does not leak the commitment it spent or any other
+   nullifier owned by the same user.
+
+The nullifier set is sharded across PDAs by 16-bit prefix — see
+[Nullifier Tree](/protocol/nullifier-tree).
+
+## Spending key vs viewing key
+
+b402 separates two key roles. **Different cryptography for different
+constraints.**
+
+| Key | Curve | Purpose |
+|---|---|---|
+| Spending | BN254 `Fr` | Authorize spends; in-circuit knowledge proof |
+| Viewing | Curve25519 X25519 | Decrypt incoming note ciphertexts via ECDH |
+
+The spending key lives in BN254 because it must be cheap inside the SNARK.
+"Spend authority" is proven in-circuit by demonstrating knowledge of the
+preimage of `spendingPub = Poseidon_2("b402/v1/spend-key-pub", spendingPriv)`.
+There is no on-chain ECDSA verification of any key.
+
+The viewing key is X25519 because note encryption uses ChaCha20-Poly1305, a
+byte-oriented cipher. ECDH over Curve25519 derives a shared secret cheaply,
+in standard libraries, without paying the in-circuit cost of EC ops.
+
+This separation lets a user disclose a viewing key (auditor: "show me your
+deposits") without disclosing spend authority. Parity with Railgun, parity
+with privacy-pools.
+
+## Note encryption (delivery)
+
+When Alice creates a note for Bob, she publishes on-chain:
+
+- The 32-byte `commitment` (becomes a tree leaf).
+- A 89-byte ciphertext = ChaCha20-Poly1305 over a 73-byte cleartext
+  containing `(value, random, tokenMint, version)`.
+- A 32-byte ephemeral X25519 public key.
+- A 2-byte **viewing tag** for scan optimization.
+
+```
+ephPriv         ← random Curve25519 scalar
+ephPub          ← X25519(ephPriv, basepoint)
+sharedSecret    ← X25519(ephPriv, recipientViewingPub)
+encryptKey      ← HKDF-SHA256(sharedSecret, salt="b402-note-enc-v1")
+ciphertext      ← ChaCha20-Poly1305(encryptKey, Note, aad="b402-note-v1")
+viewingTag      ← Poseidon_2("b402/v1/viewtag", sharedSecret_as_field)[0..2]
+```
+
+Total per-note on-chain overhead: 32 (commitment) + 89 (ciphertext) + 32
+(ephPub) + 2 (viewingTag) = **155 bytes**.
+
+The viewing tag lets a scanner skip ~99.998% of notes without doing any
+decryption work. See [Scanner](/sdk/scanner) for the algorithm.
+
+## The merkle tree
+
+Single global tree per pool. Parameters from
+[`docs/prds/PRD-02-crypto-spec.md`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-02-crypto-spec.md):
+
+- **Arity 2**, depth **26**, capacity **2^26 ≈ 67M leaves**.
+- **Hash:** `parent = Poseidon_3("b402/v1/mk-node", left, right)`.
+- **Zero subtree** precomputed; `zero[26]` is the empty-tree root.
+- On-chain `TreeState` PDA stores the **last 64 roots** as a ring buffer,
+  the **frontier** (right-most path), the leaf count, and the zero cache.
+  Total ~3,720 B; never grows.
+
+Why 26: at 100k shields/day, the tree fills in ~1,800 years. Going deeper
+adds Poseidon hashes per merkle path inside the circuit (~240 constraints
+each), with no real-world benefit.
+
+The pool program writes every appended leaf via the `sol_poseidon`
+syscall (Light Protocol's contribution; ~100k CU per hash). Leaves are
+**not stored on chain** beyond emitting a `CommitmentAppended` event —
+clients reconstruct the tree from RPC log replay.
+
+## Root ring (the freshness window)
+
+Proof generation reads the current root from RPC, builds a witness, runs
+the prover (~800 ms in snarkjs WASM), and submits. Between proof gen and
+on-chain verification, the root may have advanced — someone else
+shielded.
+
+The pool's `TreeState.root_ring` keeps the **last 128 roots** (PRD-03 §3.4
+specifies 64; current implementation uses 128 — see the on-chain code).
+Proofs verifying against any of those roots are accepted. Stale roots
+(more than 128 appends old) reject with `InvalidMerkleRoot`; the user
+must regenerate.
+
+## What's hidden vs what's revealed
+
+| Data | On chain | Visible to |
+|---|---|---|
+| Depositor pubkey at shield | yes | everyone |
+| Source ATA at shield | yes | everyone |
+| Mint being shielded | yes | everyone |
+| Amount at shield | yes (`public_amount_in`) | everyone |
+| Aggregate vault balance per mint | yes | everyone |
+| Note commitment (opaque 32B) | yes | everyone, but they can't open it |
+| Note contents (owner, value) | no | only holder of `spendingPriv` |
+| Future spend destination | no | nobody until unshield |
+| Nullifier of a shielded note | no (revealed on spend) | — |
+| Linkage shield ↔ subsequent spend | no | nobody (the core unlinkability) |
+
+Shield is a one-way valve: amount goes in publicly, but the *identity* of
+the future spender is hidden. When that user later spends — via
+`unshield`, `transact`, or `adapt_execute` — they reveal a nullifier
+which is cryptographically unlinked from the original shield commitment.
+
+## Domain tags
+
+Every Poseidon hash in b402 takes a per-purpose **domain tag** as the
+first input. This prevents cross-domain replay — a Poseidon collision
+attack across two different uses (commitment vs nullifier vs merkle
+node, etc.) is structurally impossible because they hash with
+different first inputs.
+
+Tags are ASCII strings interpreted as Fr (UTF-8 bytes as a
+big-endian integer; always well under `p` because tags are ≤ 31
+bytes). Defined once in [`PRD-02 §1.2`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-02-crypto-spec.md#12-domain-tags):
+
+| Tag | Use |
+|---|---|
+| `b402/v1/commit` | commitment hash |
+| `b402/v1/null` | nullifier hash |
+| `b402/v1/mk-node` | merkle internal node |
+| `b402/v1/mk-zero` | merkle zero-subtree anchor |
+| `b402/v1/note-enc-key` | (HKDF-SHA256, not Poseidon) note encryption key |
+| `b402/v1/spend-key` | spending private key derivation |
+| `b402/v1/spend-key-pub` | spending public key derivation |
+| `b402/v1/view-key` | viewing private key derivation |
+| `b402/v1/viewtag` | 16-bit viewing tag |
+| `b402/v1/fee-bind` | relayer fee recipient binding |
+| `b402/v1/root-bind` | recent-root freshness binding |
+| `b402/v1/recipient-bind` | unshield recipient ATA owner binding |
+| `b402/v1/adapt-bind` | adapter action binding |
+| `b402/v1/disclose` | disclosure circuit input binding |
+
+These tag strings are **byte-literal in the circuit and in every
+reference implementation**. Changing any tag string is a breaking
+protocol change requiring a fresh ceremony.
+
+The Rust constants in `programs/b402-pool/src/constants.rs`
+(`TAG_COMMIT`, `TAG_NULLIFIER`, etc.) are 32-byte LE-encoded
+representations of these strings as Fr; they must match the strings
+exactly bit-for-bit.
+
+## Continue reading
+
+<CardGroup cols={2}>
+  <Card title="Composability" icon="link" href="/concepts/composability">
+    How `adapt_execute` extends the spend primitive to DeFi calls.
+  </Card>
+  <Card title="Privacy Model" icon="user-secret" href="/concepts/privacy-model">
+    Three layers of linkage, what each layer hides today.
+  </Card>
+  <Card title="Circuits" icon="circle-nodes" href="/protocol/circuits">
+    R1CS counts, public inputs, source layout.
+  </Card>
+  <Card title="Pool Program" icon="cube" href="/protocol/pool-program">
+    PDAs, instruction dispatch, on-chain checks.
+  </Card>
+</CardGroup>

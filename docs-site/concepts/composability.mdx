@@ -1,0 +1,201 @@
+---
+title: Composability
+description: "adapt_execute, the adapter ABI, and the post-CPI delta invariant."
+---
+
+`adapt_execute` is the b402 primitive for calling external DeFi programs with
+shielded funds. It is the Solana counterpart to Railgun's `RelayAdapt`
+contract on EVM. There is no `delegatecall` on Solana, so the design is
+different in the runtime details — but the safety invariant is identical:
+**the pool never trusts the downstream program with more than a proof-bound
+input, and must receive at least a proof-bound output.**
+
+## What changes from `transact`
+
+`transact` (the base shielded-spend primitive) burns N notes, mints M notes,
+all in the same mint. `adapt_execute` extends this to:
+
+- **Two mints.** Input notes carry IN mint, output notes carry OUT mint.
+- **An adapter program ID.** A specific external program receives a
+  pool-signed transfer.
+- **An action hash.** A Poseidon-3 commitment to the adapter's instruction
+  data plus the expected output mint, so a relayer cannot tamper with the
+  payload between proof generation and submission.
+- **A minimum output value.** The pool measures the OUT vault delta
+  post-CPI and reverts if it falls short.
+
+These extra bindings live in 5 additional public inputs on the adapt
+circuit — bringing the total to **23** (transact has 18). See
+[`circuits/adapt.circom`](https://github.com/b402-ai/b402-solana/blob/main/circuits/adapt.circom)
+for the canonical definition.
+
+## On-chain control flow
+
+From [`programs/b402-pool/src/instructions/adapt_execute.rs`](https://github.com/b402-ai/b402-solana/blob/main/programs/b402-pool/src/instructions/adapt_execute.rs):
+
+```
+1. Validate paused_adapts == false.
+2. Verify pool_config.verifier_adapt matches the passed verifier program.
+3. Parse 23 public inputs from AdaptPublicInputs.
+4. Bind to pool state:
+   - public_token_mint        == token_config_in.mint
+   - expected_out_mint        == token_config_out.mint
+   - adapter_program          is registered + enabled in AdapterRegistry
+   - first 8 bytes of raw_adapter_ix_data is in the registry's allowlist
+   - adapter_id (pi)          == keccak(adapter_program.key) reduced mod p
+   - action_hash (pi)         == Poseidon_3(
+                                   adaptBindTag,
+                                   keccak(action_payload) reduced mod p,
+                                   expected_out_mint reduced mod p
+                                 )
+   - merkle_root              is in the recent root ring
+5. CPI b402_verifier_adapt → Groth16 verify (~180k CU; one Solana ix).
+6. Check nullifier ordering, shard prefix consistency.
+7. Burn input nullifiers (sharded insert into NullifierShard PDAs).
+8. Pool-signed transfer: in_vault → adapter_in_ta (amount = public_amount_in).
+9. Snapshot out_vault.amount as `pre`.
+10. CPI the adapter with raw_adapter_ix_data + remaining_accounts.
+11. Re-read out_vault.amount as `post`. Require post - pre ≥ expected_out_value.
+12. Append output commitments to the tree, emit CommitmentAppended events.
+13. Pool-signed transfer of relayer fee from in_vault to relayer_fee_ta.
+14. Emit AdaptExecuted event.
+```
+
+Atomicity is enforced by Solana transaction semantics: if any step fails,
+the whole transaction reverts. Nullifier writes happen *after* the CPI
+returns successfully, so a partial-execution failure leaves the user's
+notes still spendable.
+
+## The adapter ABI
+
+Every adapter program implements a single `execute` entrypoint matching
+the [PRD-04 §2 contract](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-04-composability.md):
+
+```rust
+#[derive(Accounts)]
+pub struct AdapterExecute<'info> {
+    /// Adapter's PDA signer; seeds = [b"b402/v1", b"adapter"]
+    pub adapter_authority: SystemAccount<'info>,
+
+    /// Pool's IN-mint vault (read-only here; pool already moved tokens out)
+    pub in_vault: Account<'info, TokenAccount>,
+    /// Pool's OUT-mint vault — the post-CPI delta target
+    pub out_vault: Account<'info, TokenAccount>,
+
+    /// Adapter scratch ATAs (owned by adapter_authority)
+    pub adapter_in_ta: Account<'info, TokenAccount>,
+    pub adapter_out_ta: Account<'info, TokenAccount>,
+
+    pub token_program: Program<'info, Token>,
+    // remaining_accounts = whatever the downstream protocol needs
+}
+
+pub fn execute(
+    ctx: Context<AdapterExecute>,
+    in_amount: u64,
+    min_out_amount: u64,
+    action_payload: Vec<u8>,
+) -> Result<()>;
+```
+
+The adapter decodes `action_payload` into its own per-protocol arguments
+(route plan, slippage, perp order, whatever) and performs the downstream
+CPIs. It is **trusted only to "try hard"** — the pool's post-CPI delta
+check is what guarantees safety, not the adapter's honesty.
+
+## The post-CPI delta invariant
+
+Stated formally:
+
+> For any adapter CPI, `out_vault.amount` after the CPI minus
+> `out_vault.amount` before the CPI must be ≥ `expected_out_value`.
+
+Enforced by the pool program reading the vault directly, not via any
+adapter-reported value. An adapter that returns the wrong mint, less than
+expected, or nothing at all will trip this check and the entire
+transaction reverts. The pool does not trust the adapter's return code.
+
+This is what makes adapter compromise **bounded blast-radius**: a buggy
+or malicious adapter can fail to deliver, but it cannot drain the pool.
+The proof binds the maximum the pool will release (`public_amount_in`),
+the pool's PDA is the only signer that can transfer from `in_vault`, and
+the post-CPI check enforces the floor on what comes back.
+
+## Adapter registry
+
+```rust
+pub struct AdapterInfo {
+    pub adapter_id: [u8; 32],         // Poseidon hash of program_id
+    pub program_id: Pubkey,
+    pub allowed_instructions: Vec<[u8; 8]>, // Anchor discriminator allowlist
+    pub enabled: bool,
+}
+```
+
+Stored in the `AdapterRegistry` PDA, written by admin via
+`register_adapter`. Each entry locks (a) which program ID is whitelisted,
+(b) which instruction discriminators on that program the pool will CPI,
+and (c) an enable flag for emergency disable.
+
+The discriminator allowlist is a second line of defense: if an adapter
+program upgrades and adds an unsafe entrypoint, it is blocked at the pool
+level until governance explicitly registers the new discriminator.
+
+## v2 ABI extensions
+
+Specced but not landed:
+
+- **Vector token bindings** (`PRD-11`) — generalize the scalar `(in_mint,
+  out_mint)` to `(M ≤ 4) inputs × (N ≤ 4) outputs`. Subsumes Orca
+  multi-output swaps, basket rebalances, three-leg arbitrage.
+- **Content-addressed action hash** (`PRD-12`) — extends the current
+  Poseidon-3 binding to also commit to the AccountMeta vector and a
+  per-adapter scope tag. Closes a known canonicalization malleability
+  vector.
+- **Shadow PDAs** (`PRD-13`) — generalizes Kamino's per-user obligation
+  pattern (`viewing_key_commitment` → unique PDA) to arbitrary per-user
+  protocol state.
+- **Two-phase claim notes** (`PRD-14`) — for async settlement (Jupiter
+  Perps, Drift queued orders). Deferred until the first async adapter is
+  prioritized.
+- **Delta-zero ops + per-instruction circuit-binding flags**
+  (`PRD-04 §7`, amended 2026-04-25) — already in the schema; lets adapters
+  expose state-only ops (cancel order, claim rewards-zero) without the
+  delta check.
+
+These are the auditor-relevant pending changes; the v1 ABI as shipped is
+single-mint scalar.
+
+## Account budget
+
+Solana caps a v0 transaction at 1,232 bytes serialized. With Address
+Lookup Tables (ALTs), per-tx account count goes from a hard ~35 to ~256.
+b402 ships a canonical 16-entry ALT
+([`9FPYufa1KDkrn1VgfjkR7R667hbnTA7CNtmy38QcsuNj`](https://explorer.solana.com/address/9FPYufa1KDkrn1VgfjkR7R667hbnTA7CNtmy38QcsuNj?cluster=devnet))
+seeded with common downstream accounts (Jupiter router, USDC, wSOL,
+common reserves). Without it, 3-hop Jupiter routes overflow the tx-size
+cap.
+
+Observed sizes from the live devnet adapt run:
+
+| Path | Tx size | CU |
+|---|---|---|
+| Adapt swap (mock adapter, real Groth16) | 1,214 B | ~600k |
+| Adapt swap (mainnet-fork, real Jupiter SolFi V2) | 1,231 B | ~660k |
+
+The adapt circuit fits in a single Solana instruction with the verifier
+CPI; no multi-tx split required, unlike some EVM L2 ZK rollup flows.
+
+## Continue reading
+
+<CardGroup cols={2}>
+  <Card title="Adapter Overview" icon="plug" href="/adapters/overview">
+    The full ABI, registry semantics, lifecycle.
+  </Card>
+  <Card title="Building an Adapter" icon="hammer" href="/adapters/building-an-adapter">
+    Walkthrough: scaffold a new adapter program.
+  </Card>
+  <Card title="Threat Model" icon="user-secret" href="/concepts/threat-model">
+    What an adapter can and cannot do; bounded blast radius.
+  </Card>
+</CardGroup>

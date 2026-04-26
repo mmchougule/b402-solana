@@ -1,0 +1,161 @@
+---
+title: Error Codes
+description: "PoolError, KaminoAdapterError, AdapterError, and how to interpret them."
+---
+
+All errors are stable across program upgrades — numbers never get
+renumbered, only appended.
+
+## `PoolError` (`b402_pool`)
+
+Source: [`programs/b402-pool/src/error.rs`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-pool/src).
+
+### Setup (1000-series)
+
+| Code | Variant | Cause |
+|---|---|---|
+| 1000 | `AlreadyInitialized` | Pool init called twice |
+| 1001 | `NotInitialized` | Operation before `init_pool` |
+| 1002 | `InvalidAdminSignature` | Multisig auth failure |
+| 1003 | `UnauthorizedAdmin` | Admin instruction without admin signer |
+
+### Pause (1100-series)
+
+| Code | Variant | Cause |
+|---|---|---|
+| 1100 | `PoolPaused` | Op blocked by pause flag |
+| 1101 | `CannotPauseWithdrawals` | Admin tried to pause unshield |
+
+### Token (1200-series)
+
+| Code | Variant | Cause |
+|---|---|---|
+| 1200 | `TokenNotWhitelisted` | Mint not in `TokenConfig` |
+| 1201 | `TokenAlreadyConfigured` | Re-add of an existing mint |
+| 1202 | `MintMismatch` | TokenConfig.mint != supplied mint |
+| 1203 | `VaultMismatch` | Vault account != TokenConfig.vault |
+
+### Tree (1300-series)
+
+| Code | Variant | Cause |
+|---|---|---|
+| 1300 | `InvalidMerkleRoot` | Proof's `merkle_root` not in 128-root ring |
+| 1301 | `TreeCapacityExceeded` | Hit 2^26 leaves (won't happen in practice) |
+| 1302 | `FrontierMismatch` | Frontier vs leaf count inconsistency |
+
+### Nullifier (1400-series)
+
+| Code | Variant | Cause |
+|---|---|---|
+| 1400 | `NullifierAlreadySpent` | Double-spend attempt |
+| 1401 | `NullifierOrderingViolation` | `nullifier[0] >= nullifier[1]` (when both non-dummy) |
+| 1402 | `NullifierShardMismatch` | Shard PDA seed != nullifier prefix |
+
+### Commitment (1500-series)
+
+| Code | Variant | Cause |
+|---|---|---|
+| 1500 | `CommitmentAlreadyExists` | (Reserved; not enforced on-chain) |
+| 1501 | `InvalidCommitment` | Malformed commitment bytes |
+
+### Proof (1600-series)
+
+| Code | Variant | Cause |
+|---|---|---|
+| 1600 | `ProofVerificationFailed` | Verifier CPI rejected |
+| 1601 | `ProofPublicInputMismatch` | Dummy mask vs nullifier=0 mismatch, or commitment_out=0 with non-dummy mask |
+| 1602 | `InvalidFeeBinding` | Fee recipient ATA owner != args.relayer_fee_recipient, or fee > public_amount |
+| 1603 | `InvalidRootBinding` | (Reserved) |
+| 1604 | `InvalidAdapterBinding` | `adapter_id` or `action_hash` mismatch |
+
+### Amounts (1700-series)
+
+| Code | Variant | Cause |
+|---|---|---|
+| 1700 | `InsufficientVaultBalance` | Vault < amount being transferred |
+| 1701 | `PublicAmountExclusivity` | `publicAmountIn` and `publicAmountOut` both > 0, or both 0 when not internal transfer |
+| 1702 | `ValueOverflow` | u64 overflow in balance computation |
+| 1703 | `SlippageExceeded` | (Reserved at pool layer; usually adapter-side) |
+
+### Adapter (1800-series)
+
+| Code | Variant | Cause |
+|---|---|---|
+| 1800 | `AdapterNotRegistered` | Adapter program not in registry, or disabled, or ix discriminator not allowlisted |
+| 1801 | `AdapterReturnedLessThanMin` | Post-CPI delta < `expected_out_value` |
+| 1802 | `AdapterCallReverted` | Adapter CPI returned error |
+
+### Misc (1900-series)
+
+| Code | Variant | Cause |
+|---|---|---|
+| 1900 | `InvalidInstructionData` | Borsh deserialization failure, length checks, etc. |
+| 1901 | `AccountSizeMismatch` | PDA at wrong size |
+| 1902 | `RentNotCovered` | Account creation insufficient lamports |
+
+## `KaminoAdapterError` (`b402_kamino_adapter`)
+
+Source: [`programs/b402-kamino-adapter/src/lib.rs:802`](https://github.com/b402-ai/b402-solana/blob/main/programs/b402-kamino-adapter/src/lib.rs).
+
+| Code | Variant | Cause |
+|---|---|---|
+| 6000 | `NotYetImplemented` | Reserved for stub paths |
+| 6001 | `InvalidActionPayload` | Borsh decode failure |
+| 6002 | `MintMismatch` | `expected_out_mint` doesn't match the reserve's kToken / underlying |
+| 6003 | `KaminoCpiFailed` | A Kamino CPI returned error (often: oracle stale, LTV violation) |
+| 6004 | `InvalidAmount` | `in_amount == 0` |
+| 6005 | `InsufficientInput` | `adapter_in_ta.amount < in_amount` |
+| 6006 | `ScratchAtaOwnerMismatch` | Scratch ATA not owned by `adapter_authority` |
+| 6007 | `MissingRemainingAccounts` | `remaining_accounts.len() < ra_*::MIN_LEN` for the op |
+| 6008 | `SlippageExceeded` | Post-Kamino delivery below user's slippage floor |
+| 6009 | `AmountMismatch` | `KaminoAction.amount` field disagrees with ABI `in_amount` |
+
+## `AdapterError` (`b402_jupiter_adapter`)
+
+| Variant | Cause |
+|---|---|
+| `InvalidAmount` | `in_amount == 0` |
+| `InvalidPayload` | Empty action_payload |
+| `InsufficientInput` | adapter_in_ta < in_amount |
+| `JupiterCpiFailed` | Jupiter CPI returned error |
+| `SlippageExceeded` | Post-CPI delta < `min_out_amount` |
+
+## How to read errors
+
+Anchor errors surface in tx logs as:
+
+```
+Program log: AnchorError caused by account: ... Error Code: NullifierAlreadySpent. Error Number: 1400. Error Message: Nullifier already spent
+```
+
+The number is the stable identifier — message strings can change
+between releases for clarity, but numbers cannot.
+
+For SDK consumers:
+
+```typescript
+import { B402Error, B402ErrorCode } from '@b402ai/solana';
+
+try {
+  await unshield({ ... });
+} catch (e) {
+  if (e instanceof B402Error && e.code === B402ErrorCode.NullifierAlreadySpent) {
+    // user-side: refresh notes from chain, mark this one as spent
+  }
+}
+```
+
+`B402Error` is the SDK's wrapper around on-chain errors;
+`B402ErrorCode` enumerates the numeric codes above.
+
+## Common error → likely cause table
+
+| You see... | Most likely cause |
+|---|---|
+| `ProofVerificationFailed` (1600) | Stale merkle root, wrong public inputs, mismatched VK (e.g. devnet proof against mainnet pool) |
+| `InvalidMerkleRoot` (1300) | Proof generated against a too-old root (>128 appends ago) — regenerate |
+| `NullifierAlreadySpent` (1400) | Note already spent. Refresh `NoteStore` from chain. |
+| `InvalidAdapterBinding` (1604) | `action_payload` mutated between proof gen and submission, or wrong `adapter_id` for the proof |
+| `AdapterReturnedLessThanMin` (1801) | Slippage. Either decrease `expectedOutValue` or wait for better pool conditions |
+| `AdapterNotRegistered` (1800) | Either adapter program not in registry, or instruction discriminator not allowlisted |
+| `MintMismatch` (1202) | `public_token_mint` or `expected_out_mint` in proof doesn't match the supplied TokenConfig PDAs |

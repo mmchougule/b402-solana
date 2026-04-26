@@ -1,0 +1,184 @@
+---
+title: Jupiter Adapter
+description: "Private swap via Jupiter V6, validated end-to-end against real Jupiter on a mainnet-forked validator."
+---
+
+`b402-jupiter-adapter` is the first b402 adapter to ship and the
+reference implementation against which others are written. It forwards
+the user's pre-built Jupiter V6 `route` instruction data to Jupiter,
+gated by the pool's proof bindings.
+
+Devnet ID: `3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7`.
+
+Source: [`programs/b402-jupiter-adapter/src/lib.rs`](https://github.com/b402-ai/b402-solana/blob/main/programs/b402-jupiter-adapter/src/lib.rs).
+
+## Status
+
+Live on devnet. Validated end-to-end against **real Jupiter V6** on a
+mainnet-forked validator: 0.1 wSOL → 8.549 USDC through SolFi V2,
+running real aggregator bytecode and real pool state cloned from
+mainnet. See [`examples/swap-e2e-jupiter.ts`](https://github.com/b402-ai/b402-solana/blob/main/examples/swap-e2e-jupiter.ts)
+for the verified flow.
+
+Observed cost (mainnet-fork run):
+
+```
+Tx size:    1,231 B
+Compute:    ~660k CU
+```
+
+## How it works
+
+The Jupiter adapter is the simplest case of the b402 ABI: it does not
+have any per-user protocol state (Jupiter is purely an aggregator), it
+does not need state binding, and it does not require multi-output. The
+entire adapter program is ~150 LoC.
+
+```rust
+declare_id!("3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7");
+
+pub const JUPITER_V6_PROGRAM_ID: Pubkey = pubkey!("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4");
+
+pub fn execute(
+    ctx: Context<Execute>,
+    in_amount: u64,
+    min_out_amount: u64,
+    action_payload: Vec<u8>,
+) -> Result<()> {
+    require!(in_amount > 0, AdapterError::InvalidAmount);
+    require!(action_payload.len() >= 8, AdapterError::InvalidPayload);
+    require!(
+        ctx.accounts.adapter_in_ta.amount >= in_amount,
+        AdapterError::InsufficientInput
+    );
+
+    let pre_out = ctx.accounts.adapter_out_ta.amount;
+
+    // Mark adapter_authority as a signer in the forwarded CPI.
+    let auth_key = ctx.accounts.adapter_authority.key();
+    let accounts_for_cpi = ctx.remaining_accounts.iter().map(|a| {
+        let is_signer = a.is_signer || *a.key == auth_key;
+        if a.is_writable {
+            AccountMeta::new(*a.key, is_signer)
+        } else {
+            AccountMeta::new_readonly(*a.key, is_signer)
+        }
+    }).collect();
+
+    let ix = Instruction {
+        program_id: JUPITER_V6_PROGRAM_ID,
+        accounts: accounts_for_cpi,
+        data: action_payload.clone(),
+    };
+
+    let bump = ctx.bumps.adapter_authority;
+    let seeds: &[&[u8]] = &[b"b402/v1", b"adapter", &[bump]];
+    invoke_signed(&ix, ctx.remaining_accounts, &[seeds])
+        .map_err(|_| AdapterError::JupiterCpiFailed)?;
+
+    // Sweep output to pool's out_vault.
+    let out_ta = &mut ctx.accounts.adapter_out_ta;
+    out_ta.reload()?;
+    let received = out_ta.amount.saturating_sub(pre_out);
+    require!(received >= min_out_amount, AdapterError::SlippageExceeded);
+
+    token::transfer(/* adapter_out_ta → out_vault, received */, ...)?;
+    Ok(())
+}
+```
+
+The adapter forwards `action_payload` byte-for-byte as the Jupiter
+instruction data. The user fetches a Jupiter route quote via the
+official Jupiter SDK, extracts the `route` instruction's data field,
+and uses that as `action_payload`. The pool's
+`actionHash = Poseidon_3(adaptBindTag, keccak256(action_payload),
+expectedOutMint_Fr)` cryptographically pins this exact route.
+
+## SDK flow
+
+End-to-end from [`examples/swap-e2e-jupiter.ts`](https://github.com/b402-ai/b402-solana/blob/main/examples/swap-e2e-jupiter.ts):
+
+```typescript
+// 1. Fetch a live Jupiter quote.
+const quoteRes = await fetch(`https://quote-api.jup.ag/v6/quote?...`);
+const quote = await quoteRes.json();
+
+// 2. Build the route instruction.
+const swapRes = await fetch('https://quote-api.jup.ag/v6/swap-instructions', {
+  method: 'POST',
+  body: JSON.stringify({
+    quoteResponse: quote,
+    userPublicKey: jupiterCallerPubkey, // adapter authority on the b402 side
+    ...
+  }),
+});
+const swap = await swapRes.json();
+
+// 3. Compute action_payload = route ix data.
+const actionPayload = Buffer.from(swap.swapInstruction.data, 'base64');
+
+// 4. Generate adapt proof binding actionHash to actionPayload.
+const proof = await adaptProver.prove({
+  ...,
+  actionHash: poseidon3(
+    TAG_ADAPT_BIND,
+    keccak256(actionPayload).reduceModP(),
+    expectedOutMint_Fr
+  ),
+  expectedOutValue: minOut,
+  expectedOutMint,
+  ...
+});
+
+// 5. Submit the adapt_execute tx.
+//    remaining_accounts = swap.swapInstruction.keys (the Jupiter accounts).
+```
+
+## Address Lookup Table
+
+The b402 ALT (`9FPYufa1KDkrn1VgfjkR7R667hbnTA7CNtmy38QcsuNj` on devnet)
+contains 16 entries of common downstream accounts: Jupiter program ID,
+USDC and wSOL mints, common AMM programs (Whirlpool, SolFi, Raydium),
+common pool authorities. Without it, Jupiter routes longer than two
+hops overflow the 1,232 B Solana tx-size cap.
+
+The SDK includes the ALT in every adapt tx by default. Custom routes
+needing accounts not in the ALT can either fall back to legacy v0 tx
+encoding (for short routes) or extend the ALT via
+[`ops/alt/create-alt.ts`](https://github.com/b402-ai/b402-solana/tree/main/ops/alt).
+
+## Reproduction
+
+From repo root:
+
+```bash
+# Terminal 1: fetch a live quote, boot mainnet-fork validator
+cd examples && pnpm tsx ../ops/jup-quote.ts \
+  --in So11111111111111111111111111111111111111112 \
+  --out EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v \
+  --amount 100000000 \
+  --caller $(solana address -k ~/.config/solana/id.json) \
+  --out-file /tmp/jup-route.json
+
+./ops/mainnet-fork-validator.sh --route /tmp/jup-route.json --reset
+
+# Terminal 2: run shield → real Jupiter swap → unshield
+cd examples && pnpm swap-e2e-jupiter
+```
+
+The output prints the swap signature, the actual wSOL → USDC delta, and
+confirms the post-CPI balance-delta invariant held against a real
+aggregator CPI.
+
+## Privacy notes
+
+Jupiter has no per-user state. Two adapt-execute calls by the same
+user at different times produce different proofs, different nullifiers,
+and have no on-chain link. **L2 unlinkability holds for Jupiter** in v1.
+
+Jupiter's matching engine sees a swap from the b402 adapter's PDA — but
+that PDA is shared across all b402 users using Jupiter, which is
+already the L3-pool-clustering case (see
+[Privacy Model](/concepts/privacy-model)). An observer can correlate
+"a b402 user did a swap of size X at time T," but cannot link that to
+any specific wallet.

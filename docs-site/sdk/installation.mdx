@@ -1,0 +1,151 @@
+---
+title: SDK Installation
+description: "Install @b402ai/solana, @b402ai/solana-prover, and the relayer client."
+---
+
+The b402-solana TypeScript surface is split across four packages, each
+with a focused responsibility. Install only what you need.
+
+## Packages
+
+| Package | Purpose |
+|---|---|
+| `@b402ai/solana` | Wallet, scanner, action builders, merkle, note encryption |
+| `@b402ai/solana-prover` | `TransactProver`, `AdaptProver` — snarkjs WASM wrappers |
+| `@b402ai/solana-relayer` | HTTP relayer (Fastify) — only needed if you run a relayer |
+| `@b402ai/solana-shared` | Constants and codecs shared across packages |
+
+## Install
+
+```bash
+pnpm add @b402ai/solana @b402ai/solana-prover
+```
+
+The repo is a `pnpm` workspace; using `pnpm` is recommended. `npm` and
+`yarn` work but the workspace setup is pnpm-native.
+
+## Peer dependencies
+
+```bash
+pnpm add @solana/web3.js @solana/spl-token @coral-xyz/anchor
+```
+
+`@solana/web3.js` v1.x is the pinned version. v2.x has not been
+validated.
+
+## Toolchain (for circuit / program work)
+
+These are only needed if you're modifying the circuits or programs;
+SDK consumers do not need them.
+
+- **Rust stable** + Solana CLI 2.0+
+- **Anchor 0.30+** (`avm install 0.30.1 && avm use 0.30.1`)
+- **Circom 2.2+** + **snarkjs**
+- **Anchor `platform-tools v1.54`** for `cargo build-sbf`
+
+## Importing
+
+```typescript
+import {
+  B402Solana,
+  buildWallet,
+  Scanner,
+  ClientMerkleTree,
+  shield,
+  unshield,
+  poolConfigPda,
+  treeStatePda,
+  // ...
+} from '@b402ai/solana';
+
+import { TransactProver, AdaptProver } from '@b402ai/solana-prover';
+```
+
+The complete public surface is in
+[`packages/sdk/src/index.ts`](https://github.com/b402-ai/b402-solana/blob/main/packages/sdk/src/index.ts).
+
+## Versioning
+
+Packages are versioned together. Mismatched versions across
+`@b402ai/solana` and `@b402ai/solana-prover` are not supported and may
+fail at runtime with cryptic Borsh / public-input length errors.
+
+## SDK constants
+
+The SDK exports a few important constants:
+
+```typescript
+// packages/sdk/src/index.ts
+
+export const MAX_TX_SIZE = 1232;         // Solana hard cap, v0 tx
+export const MAX_ACTION_PAYLOAD = 350;   // Soft cap for adapt action_payload
+```
+
+`MAX_TX_SIZE` is Solana's protocol-level hard limit — the SDK's tx
+builder will refuse to send anything larger.
+
+`MAX_ACTION_PAYLOAD` is a soft cap chosen to leave headroom for
+proof + 23 public inputs + accounts list + dummy notes. PRD-04 §5.3
+documents the original 400 B figure; the SDK uses 350 B in practice.
+
+## Quick PDA helpers
+
+```typescript
+import {
+  poolConfigPda,
+  treeStatePda,
+  tokenConfigPda,
+  vaultPda,
+  adapterRegistryPda,
+  treasuryPda,
+  nullifierShardPda,
+  shardPrefix,
+} from '@b402ai/solana';
+
+const [config] = poolConfigPda(programId);
+const [tree] = treeStatePda(programId);
+const [tokenConfig] = tokenConfigPda(programId, mint);
+const [vault] = vaultPda(programId, mint);
+const [registry] = adapterRegistryPda(programId);
+const [treasury] = treasuryPda(programId);
+
+// Nullifier shard for a specific nullifier hash
+const prefix = shardPrefix(nullifier);
+const [shard] = nullifierShardPda(programId, prefix);
+```
+
+PDA seeds use `b"b402/v1"` as a version prefix; if you derive PDAs
+manually, do not omit it. See [Architecture](/protocol/architecture)
+for the full PDA layout.
+
+## Tree state inspection
+
+```typescript
+import { fetchTreeState, type TreeStateView } from '@b402ai/solana';
+
+const tree: TreeStateView = await fetchTreeState(connection, poolProgramId);
+// tree.leafCount: bigint
+// tree.recentRoots: Uint8Array[]
+// tree.frontier: Uint8Array[]
+```
+
+For an SDK consumer, this is the lowest-level view of pool state.
+Rarely needed in normal flow (the prover handles merkle path
+generation), but useful for indexers and monitors.
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Shield / Unshield" icon="vault" href="/sdk/shield-unshield">
+    The two base operations and their SDK shape.
+  </Card>
+  <Card title="Private Actions" icon="bolt" href="/sdk/private-actions">
+    `adapt_execute` via `AdaptProver`.
+  </Card>
+  <Card title="Scanner" icon="radar" href="/sdk/scanner">
+    Auto-discover incoming notes via viewing-tag pre-filter.
+  </Card>
+  <Card title="Relayer" icon="server" href="/sdk/relayer">
+    HTTP client to a relayer service.
+  </Card>
+</CardGroup>

@@ -1,0 +1,104 @@
+---
+title: Orca Adapter
+description: "Private LP on Orca Whirlpools (designed-for, blocked on PRD-11 vector token bindings)."
+---
+
+<Warning>
+  **Designed, not shipped.** The `b402-orca-adapter` program is
+  scaffolded but cannot ship until the v2 vector-binding ABI lands.
+  Orca Whirlpool's `decrease_liquidity` and `collect_fees` instructions
+  return **two output mints simultaneously**, which the v1 single-mint
+  scalar binding cannot express.
+</Warning>
+
+## Why Orca needs PRD-11
+
+The v1 adapt circuit binds a **single** `expectedOutMint` and
+`expectedOutValue`. This works for swaps (one in, one out), Kamino
+deposit (underlying in, cToken out), and most lending ops. It does not
+work for Orca's:
+
+- **DecreaseLiquidity:** burn LP position units, receive both token A
+  and token B.
+- **CollectFees:** claim accrued fees in both tokens.
+
+These are **multi-output** operations. The shielded user must receive
+two output notes in two different mints, and the proof must bind both
+mints and minimums.
+
+[`PRD-11`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-11-vector-bindings.md)
+generalizes the scalar binding to a vector:
+
+```rust
+pub struct AdaptInputs {
+    pub bound_inputs:     [TokenBinding; 4],   // M ≤ 4
+    pub expected_outputs: [TokenBinding; 4],   // N ≤ 4
+    pub input_count:      u8,
+    pub output_count:     u8,
+    // ...
+}
+```
+
+Unused slots are zero-bindings (mint = 11111…, amount = 0). The
+circuit verifies that each slot is either fully zero or fully used,
+closing a known malleability vector.
+
+## Operations (planned, post-PRD-11)
+
+| Op | Inputs | Outputs |
+|---|---|---|
+| `IncreaseLiquidity` | `[(tokenA, amountA), (tokenB, amountB)]` | `[(positionNFT, 1)]` |
+| `DecreaseLiquidity` | `[(positionNFT, 1)]` | `[(tokenA, minA), (tokenB, minB)]` |
+| `CollectFees` | `[(positionNFT, 1)]` | `[(tokenA, minA), (tokenB, minB)]` |
+| `OpenPosition` | `[(tokenA, amountA), (tokenB, amountB)]` | `[(positionNFT, 1)]` |
+| `ClosePosition` | `[(positionNFT, 1)]` | `[(tokenA, minA), (tokenB, minB)]` |
+
+The position NFT itself becomes a shielded note bound to the user's
+spending key — same mechanism as cTokens in Kamino. The Orca position
+state is owned by an Orca-specific PDA, and per PRD-13 each user gets
+their own shadow PDA.
+
+## Circuit cost projection
+
+Per PRD-11 §4:
+
+- Public inputs grow from 23 to **39** (16 new = 4 inputs × (mint, amount)
+  + 4 outputs × (mint, amount)).
+- R1CS constraints grow by ~5,500 (Poseidon hashes for binding the four
+  mints into the action context, plus range checks).
+- Total adapt circuit constraint count: ~22,500 (current ~17,500).
+- Verifier CU: ~210k for Groth16 verify (39 public inputs vs 23) — under
+  budget.
+
+## What's needed before shipping
+
+Per the dependency chain in PRD-11 / PRD-12 / PRD-13:
+
+1. **PRD-11 (vector bindings):** circuit, verifier program, pool
+   handler, SDK.
+2. **PRD-12 (content-addressed action_hash):** generalize the binding
+   to include canonicalized AccountMeta vec + scope tag. Once shipped,
+   any future adapter is a pure CPI wrapper.
+3. **PRD-13 (shadow PDAs):** generic per-user state pattern; Orca
+   positions use this.
+4. **Re-run trusted-setup ceremony** for the new circuit.
+5. **Re-audit** all four (circuit, verifier, pool, adapter).
+
+This is a coordinated v2 release. Orca, Adrena, Drift (post-reboot),
+and the per-user-Kamino upgrade all ship together in v2.
+
+## Compute budget projection
+
+Without an implementation we can't measure exactly, but PRD-11 §4
+projects ~210k CU for the verifier alone, with the pool handler
+overhead similar to v1 (~325k CU). Whirlpool CPI cost varies with the
+position's tick range and liquidity depth — typically 200–400k CU.
+
+Total projected adapt budget for Orca: 700k–900k CU. Under cap.
+
+## Reference
+
+- [PRD-11: Vector Token Bindings](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-11-vector-bindings.md)
+- [PRD-12: Content-Addressed action_hash](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-12-action-hash.md)
+- [PRD-13: Shadow PDAs](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-13-shadow-pda.md)
+- [`circuits/build/adapt_v2.r1cs.info.txt`](https://github.com/b402-ai/b402-solana/blob/main/circuits/) — the v2 circuit info file (compiled, not yet wired to a verifier program).

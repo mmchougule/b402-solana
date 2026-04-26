@@ -1,0 +1,193 @@
+---
+title: Nullifier Set & Merkle Tree
+description: "Sharded nullifier storage and the incremental Poseidon merkle tree."
+---
+
+Two of the largest pieces of pool state. Both are designed for Solana's
+account model: the merkle tree fits in a single fixed-size PDA, and the
+nullifier set is sharded across up to 65,536 PDAs.
+
+## The merkle tree
+
+### Parameters
+
+From [`PRD-02 §5`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-02-crypto-spec.md#5-merkle-tree)
+and the pool's `TreeState` PDA:
+
+- **Arity 2** (binary).
+- **Depth 26.** Capacity = 2²⁶ ≈ 67M leaves.
+- **Hash:** `parent = Poseidon_3("b402/v1/mk-node", left, right)`.
+- **Leaf:** the 32-byte commitment, no extra hash.
+- **Domain tag** for zero subtree: `"b402/v1/mk-zero"`.
+
+Why depth 26: at 100k shields/day, the tree fills in ~1,800 years.
+Going deeper adds ~240 R1CS constraints per merkle path level; going
+shallower would force a tree-rotation flow, which is a massive
+operational complexity.
+
+### `TreeState` PDA layout
+
+From `programs/b402-pool/src/state.rs`:
+
+```rust
+#[account(zero_copy)]
+pub struct TreeState {
+    pub version: u16,
+    pub leaf_count: u64,
+    pub ring_head: u8,                 // 0..127
+    pub root_ring: [[u8; 32]; 128],    // recent merkle roots
+    pub frontier: [[u8; 32]; 26],      // right-most path hashes
+    pub zero_cache: [[u8; 32]; 26],    // precomputed zero[0..26]
+    pub _reserved: [u8; 64],
+}
+```
+
+Total size ~5,000 B. **Fixed**, never grows. The leaves themselves are
+not stored on chain — clients reconstruct them from
+`CommitmentAppended` event log replay.
+
+The PRD-02 spec used a 64-root ring; the current implementation uses
+**128 roots**. This is the source of truth; the PRD is older.
+
+### Append algorithm
+
+From [`PRD-02 §5.4`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-02-crypto-spec.md#54-append-algorithm-concurrent-safe):
+
+```
+idx  = leaf_count
+hash = leaf
+for level l in 0..26:
+    if bit l of idx is 0:
+        write hash to frontier[l]
+        hash = Poseidon_3(mkNodeTag, hash, zero[l])
+        break (higher levels unchanged for this leaf's path)
+    else:
+        hash = Poseidon_3(mkNodeTag, frontier[l], hash)
+
+new_root = hash
+root_ring[(ring_head + 1) % 128] = new_root
+ring_head = (ring_head + 1) % 128
+leaf_count += 1
+```
+
+26 `sol_poseidon` calls per worst-case append, ~100k CU each × 1-13
+levels actually computed = bounded amortized cost.
+
+Concurrency: Solana's single-writer-per-account rule serializes
+appends; the runtime acquires a write lock on `TreeState` for any
+shield/transact/unshield/adapt instruction. No CMT changelog needed.
+
+### Root validity for proofs
+
+A proof references a `merkleRoot`. On-chain verification requires that
+root to appear in `root_ring[]`. Stale roots (older than 128 appends)
+are rejected with `InvalidMerkleRoot`; the user regenerates against a
+recent root.
+
+128 was chosen empirically: enough headroom that proof generation +
+network round-trip + relayer queueing rarely cause stale-root races,
+and small enough to keep `TreeState` under the account size limit.
+
+### Client merkle tree
+
+`packages/sdk/src/merkle.ts` exports `ClientMerkleTree`, the off-chain
+mirror. Clients:
+
+1. Subscribe to `CommitmentAppended` events.
+2. Append leaves locally in order (they include `leaf_index`, so
+   out-of-order arrivals are handled).
+3. Maintain a `frontier` and full leaf set sufficient to compute any
+   merkle path for proof generation.
+
+The `proveMostRecentLeaf` helper builds a path against the most recent
+root. For older leaves, the client uses its own local tree.
+
+## The nullifier set
+
+### Why sharded
+
+Solana accounts are capped at 10 MB. Nullifier count grows linearly
+with spend volume; at 67M max commitments, total nullifiers (typically
+2× max commitments — each user typically ends up with half the notes
+they created and the other half spent) approach 130M. A single
+unsharded nullifier account would saturate quickly.
+
+### Shard scheme
+
+```
+prefix = nullifier[30..32] interpreted as u16 (high 16 bits, big-endian)
+shard PDA seeds = [b"b402/v1", b"null", prefix.to_le_bytes()]
+```
+
+65,536 possible shards, created lazily on first nullifier landing in
+that prefix. At saturation (~130M nullifiers), each shard holds ~2,000
+entries → ~64 KB per account, well under the 10 MB limit.
+
+### `NullifierShard` PDA layout
+
+```rust
+#[account(zero_copy)]
+pub struct NullifierShard {
+    pub prefix: u16,
+    pub count: u32,
+    pub nullifiers: [[u8; 32]; MAX_PER_SHARD],
+}
+```
+
+`MAX_PER_SHARD` is sized to keep total account ≤ 10 KB at the current
+deployment (per `programs/b402-pool/src/state.rs`); the spec allows
+~2,045 entries with realloc.
+
+Internal representation: **sorted `Vec<[u8; 32]>`**, binary-searched on
+lookup. Insertion is O(n) per shard but `n` stays small (~2k at
+saturation). Trade-off picked for code-review simplicity over a
+hashmap-style probe.
+
+### Insertion algorithm
+
+From `programs/b402-pool/src/util.rs::nullifier_insert`:
+
+1. Binary search the sorted list.
+2. If found: return `NullifierAlreadySpent` error → tx reverts.
+3. Else: shift entries, insert in sorted position, increment `count`.
+
+### Why high-bits prefix
+
+The high 16 bits of a nullifier hash distribute uniformly (Poseidon is
+a cryptographic hash over `Fr`). Empirically — from the assurance
+report:
+
+```
+Nullifier shard samples:        4,096
+Unique prefixes observed:       3,529
+Max bucket size:                4
+```
+
+Cited from
+[`reports/invariant-summary.md`](https://github.com/b402-ai/b402-solana-assurance/blob/main/reports/invariant-summary.md).
+That's well-balanced for a 4096-sample run. Concentration attacks via
+preimage manipulation aren't possible because the user has no control
+over their nullifier — it's `Poseidon_3(nullTag, spendingPriv,
+leafIndex)`.
+
+### Rent
+
+Each shard's first creation costs ~0.07 SOL in rent. The relayer pays
+this and recovers it via the in-kind relayer fee. From the README:
+
+> Funded CLI wallet pays rent for fresh nullifier shards (~0.07 SOL each).
+
+For a v0 deployment this is high; for a saturated mainnet this is a
+one-time 65,536 × 0.07 = ~4,500 SOL spread across the protocol's
+lifetime, recovered amortized by relayer fees.
+
+## Continue reading
+
+<CardGroup cols={2}>
+  <Card title="Pool Program" icon="cube" href="/protocol/pool-program">
+    Where these structures get written.
+  </Card>
+  <Card title="Property Invariants" icon="vial" href="/assurance/property-invariants">
+    Stress tests against the nullifier-shard distribution.
+  </Card>
+</CardGroup>

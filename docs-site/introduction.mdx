@@ -1,0 +1,100 @@
+---
+title: Introduction
+description: "Private DeFi on Solana — shielded pool + composable execution path for Jupiter, Kamino, and beyond."
+---
+
+`b402-solana` is a shielded asset pool plus a composable private DeFi execution
+layer on Solana. It mirrors the [b402 Railgun fork](https://github.com/b402-ai)
+deployed on Base, Arbitrum, and BSC, ported to Solana's account-centric runtime
+and CPI semantics.
+
+This is the engineering documentation. For the design rationale that pre-dates
+the code, read `docs/prds/PRD-01..PRD-23` in numeric order.
+
+<Warning>
+  **Alpha, devnet only. Not audited.** The current trusted-setup ceremony is a
+  single-contributor throwaway. Do not deploy real funds. Mainnet is gated on
+  the multi-party ceremony, two independent firm audits, and the launch
+  criteria in [PRD-08](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-08-audit-launch.md).
+</Warning>
+
+## What you can build today
+
+- **Shield** any whitelisted SPL token into the pool. Receive an opaque
+  commitment that hides amount and identity.
+- **Unshield** any subset of notes back to a clear Solana address, with the
+  source notes cryptographically unlinkable from the destination.
+- **Private DeFi** via `adapt_execute`: Jupiter swaps live on devnet and
+  validated against real Jupiter V6 on mainnet-fork; Kamino lend deposit
+  validated against cloned mainnet bytecode; Adrena, Orca, Drift adapters
+  scoped per [PRDs 09–16](https://github.com/b402-ai/b402-solana/tree/main/docs/prds).
+
+## What's actually shipped
+
+| Surface | Status |
+|---|---|
+| Shield / unshield with real Groth16 proofs (devnet) | Live |
+| `adapt_execute` with real ZK binding (devnet) | Live (Phase 2a, 2026-04-25) |
+| Real Jupiter V6 private swap (mainnet-fork) | Verified |
+| Kamino deposit (mainnet-fork) | Verified |
+| Per-user Kamino obligations | Designed (PRD-09 §7.2), gated, helpers exist |
+| Drift / Adrena / Orca adapters | PRDs only (10, 16, scaffolds) |
+| Multi-party trusted-setup ceremony | Not started |
+| External audits | Not started |
+
+## Threat model in one paragraph
+
+b402-solana hides three things: the **amount** held in any single shielded
+note, the **identity** of the note's owner, and the **link** between deposit
+and any later spend. It does not hide aggregate pool TVL by mint, on-chain
+events emitted by downstream DeFi protocols, transaction timing patterns, or
+network-layer metadata. See [Threat Model](/concepts/threat-model) for the
+full adversary list and what is and isn't defended against today.
+
+## Non-goals
+
+This protocol is not, and is not trying to be:
+
+- A consumer wallet. b402-solana is SDK-first; wallet UX comes from
+  `@b402ai/kohaku` plugins.
+- A KYT / Chainalysis integration layer. Compliance is user-sovereign via
+  optional viewing-key disclosure, per Railgun's stance. There is no
+  protocol-level screening.
+- An MPC privacy layer. Trust model is ZK over BN254 with a multi-party
+  trusted setup. Arcium / Umbra / Token-2022 Confidential Transfer are
+  complementary, not competing — and not integrated in v1.
+- A governance-token system. The protocol fee is **0%**, immutable, and there
+  is no fee-collection code path to govern.
+
+## Key locked decisions
+
+These are the choices auditors will scrutinize. They are non-reversible
+without migrating user funds.
+
+- Proof system: **Groth16** over BN254
+- Hash: **Poseidon** with `x^5` S-box (`iden3/circomlib v2.4.0`)
+- Note model: **Railgun-style UTXO** with viewing-key separation
+- Merkle: incremental, **depth 26**, Poseidon node hash
+- Verifier: **`Lightprotocol/groth16-solana`** (audited, widely deployed)
+- Program framework: **Anchor 0.30+**
+- Protocol fee: **0%**, immutable
+
+Justifications and rejected alternatives are documented inline in the PRDs;
+nothing here is speculative.
+
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Five-minute path from `pnpm install` to a successful private swap.
+  </Card>
+  <Card title="Privacy Model" icon="user-secret" href="/concepts/privacy-model">
+    Three-layer linkage frame; what we hide and what we don't.
+  </Card>
+  <Card title="Architecture" icon="diagram-project" href="/protocol/architecture">
+    Programs, circuits, verifiers, and adapters in one diagram.
+  </Card>
+  <Card title="Adapters" icon="plug" href="/adapters/overview">
+    Adapter ABI, registry rules, and per-protocol specs.
+  </Card>
+</CardGroup>

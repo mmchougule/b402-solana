@@ -1,0 +1,117 @@
+---
+title: Adrena Adapter
+description: "Private perpetuals on Solana via Adrena (designed-for, not yet shipped)."
+---
+
+<Warning>
+  **Designed, not shipped.** The `b402-adrena-adapter` program is
+  scaffolded but the implementation is pending the v2 ABI work
+  (PRD-11–15). The PRD below specifies the target shape; do not deploy.
+</Warning>
+
+`b402-adrena-adapter` will integrate [Adrena](https://www.adrena.xyz/)
+for private leveraged perpetuals on SOL-PERP and ETH-PERP markets.
+Spec: [`PRD-16`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-16-adrena-adapter.md).
+
+## Why Adrena (not Drift, not Jupiter Perps)
+
+From PRD-16 §2:
+
+- **Jupiter Perps** uses a request-queue + keeper model. Async settlement
+  needs PRD-14 claim notes; deferred.
+- **Drift v2** experienced a $285M exploit on April 1, 2026 (DPRK
+  durable-nonce admin takeover, fake CVT collateral). Tether-led
+  rescue closed April 16; full reboot is pending fresh audits. Program
+  ID will likely change post-reboot, so integrating against pre-reboot
+  bytecode is wasted work.
+- **Adrena** is operational, audited (Ottersec — one shipped, second in
+  progress per Adrena docs), source-available under GPL-3.0
+  (`AdrenaFoundation/adrena-program`), synchronous (no keeper),
+  ~$50M+ TVL. Shape matches PRD-11 + PRD-15 cleanly.
+
+GPL-3.0 licensing note: b402's adapter program **does not link to or
+redistribute Adrena's source** — it CPIs into the deployed Adrena
+program by program ID. Runtime CPI is not a derivative work under
+GPL-3.0; b402's licensing is unaffected.
+
+## Operations (planned)
+
+| Op | Inputs | Outputs | State | Notes |
+|---|---|---|---|---|
+| `OpenPosition` | `[(USDC, collateral)]` | `[]` (delta-zero) | Position PDA | Collateral in; position created |
+| `IncreasePosition` | `[(USDC, additional)]` | `[]` (delta-zero) | Position PDA | Mutates existing |
+| `DecreasePosition` | `[]` | `[(USDC, settlement_min)]` | Position PDA | Partial close |
+| `ClosePosition` | `[]` | `[(USDC, settlement_min)]` | Position PDA → closed | Full close |
+
+`OpenPosition` and `IncreasePosition` are **delta-zero ops** — no
+tokens come back. This is the canonical use case for the
+`allows_delta_zero` registry flag introduced in PRD-04 §7 and specced
+fully in [PRD-15](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-15-delta-zero-deadline.md).
+
+## Action payload
+
+```rust
+pub enum AdrenaAction {
+    Open     { market: Pubkey, side: Side, leverage_bp: u16, collateral: u64 },
+    Increase { collateral: u64 },
+    Decrease { size_to_close: u64, min_out: u64 },
+    Close    { min_out: u64 },
+}
+```
+
+## Shadow PDA
+
+Per PRD-13, each shielded user's Adrena position is keyed off a unique
+shadow PDA:
+
+```
+shadow_pda = PDA([
+    "b402-shadow",
+    ADRENA_PROGRAM_ID,
+    b"adrena:position:v1",
+    viewing_key_commitment,
+])
+```
+
+The shadow PDA *is* the Adrena Position PDA — Adrena's program owns it.
+This gives each shielded user their own independent Adrena position,
+correctly isolating liquidation risk and L2 linkability.
+
+## Compute budget projection
+
+PRD-16 §6 projects:
+
+```
+Adrena CPI:                  ~250k CU
+Adapter overhead:            ~16k CU
+Pool's existing handler:     ~325k CU
+─────────────────────────────────────
+Total:                       ~591k CU
+```
+
+Under the 1.4M Solana per-tx budget.
+
+## Validation plan
+
+Mainnet-fork local validator with Adrena programs cloned, mirroring
+[`examples/swap-e2e-jupiter.ts`](https://github.com/b402-ai/b402-solana/blob/main/examples/swap-e2e-jupiter.ts):
+
+1. Boot test validator with Adrena programs cloned from mainnet.
+2. Open position with $1k USDC collateral, 5x leverage long SOL.
+3. Wait one slot, increase by $500.
+4. Decrease by half.
+5. Close.
+6. Verify final settlement equals expected (within slippage).
+
+Until the v2 ABI lands and this test runs green, Adrena remains "PRD
+only."
+
+## Open questions
+
+Per PRD-16 §8:
+
+1. Adrena's ALP (LP) token — separate adapter or extend this one?
+   Tentative: separate (`b402-adrena-lp-adapter`).
+2. Funding rate accrual surfacing — Adrena settles funding lazily on
+   position interactions. SDK should expose accrued funding via a
+   read-only RPC method on the adapter SDK.
