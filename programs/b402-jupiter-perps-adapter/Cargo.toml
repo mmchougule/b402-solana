@@ -1,12 +1,12 @@
 [package]
-name = "b402-kamino-adapter"
+name = "b402-jupiter-perps-adapter"
 version.workspace = true
 edition.workspace = true
-description = "b402 Kamino lend/borrow adapter (per PRD-09)"
+description = "b402 Jupiter Perpetuals adapter (per PRD-0X — TDD scaffold)"
 
 [lib]
 crate-type = ["cdylib", "lib"]
-name = "b402_kamino_adapter"
+name = "b402_jupiter_perps_adapter"
 
 [features]
 no-entrypoint = []
@@ -18,4 +18,3 @@ default = []
 [dependencies]
 anchor-lang.workspace = true
 anchor-spl.workspace = true
-indexmap = { version = "=2.9.0" }
