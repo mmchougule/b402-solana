@@ -52,7 +52,8 @@ use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 use crate::constants::{
     SEED_ADAPTERS, SEED_CONFIG, SEED_NULL, SEED_TOKEN, SEED_TREE, SEED_VAULT, VERSION_PREFIX,
     TAG_ADAPT_BIND_V2, TAG_COMMIT, TAG_FEE_BIND, TAG_MK_NODE, TAG_NULLIFIER, TAG_RECIPIENT_BIND,
-    TAG_SHADOW_BIND, TAG_SPEND_KEY_PUB,
+    TAG_SPEND_KEY_PUB,
+    // TAG_SHADOW_BIND wired in handler shadow-binding follow-up (PRD-13 §3.3).
 };
 use crate::error::PoolError;
 use crate::events::{AdaptExecutedV2, CommitmentAppended, NullifierSpent};
@@ -319,7 +320,7 @@ pub fn handler<'info>(
             .ok_or(error!(PoolError::AdapterNotRegistered))?;
         let allowed = &info.allowed_instructions[..info.allowed_instruction_count as usize];
         require!(
-            allowed.iter().any(|d| *d == adapter_ix_disc),
+            allowed.contains(&adapter_ix_disc),
             PoolError::AdapterNotRegistered
         );
 

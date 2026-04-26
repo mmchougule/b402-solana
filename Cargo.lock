@@ -643,6 +643,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "b402-verifier-adapt-v2"
+version = "0.0.1"
+dependencies = [
+ "anchor-lang",
+ "groth16-solana",
+ "hex",
+ "indexmap",
+ "serde",
+ "serde_json",
+ "solana-program 2.0.25",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "b402-verifier-transact"
 version = "0.0.1"
 dependencies = [
