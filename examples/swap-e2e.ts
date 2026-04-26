@@ -334,6 +334,30 @@ async function main() {
   await connection.confirmTransaction(swapSig, 'confirmed');
   console.log(`  sig = ${swapSig} (${Date.now() - adaptStart}ms)`);
 
+  // CU budget regression guard. Real measurements (devnet, mock adapter):
+  //   pool full invocation: ~325k CU
+  //   verifier_adapt CPI:   ~207k CU (Groth16, ≈99% of pool's nested cost)
+  //   mock adapter CPI:      ~16k CU
+  // Assert pool's outer instruction stays under 600k CU — gives us 800k+ of
+  // headroom inside the 1.4M cap for real adapter work (Jupiter 3-hop ~200k,
+  // Drift settle ~120k, Pyth update ~30k). If this trips, the pool grew
+  // before the adapter did and that's the regression to investigate.
+  const swapTx = await connection.getTransaction(swapSig, {
+    commitment: 'confirmed',
+    maxSupportedTransactionVersion: 0,
+  });
+  const poolCuLine = swapTx?.meta?.logMessages?.find(
+    (l) => l.includes(POOL_ID.toBase58()) && l.includes('consumed') && !l.includes('failed')
+  );
+  const m = poolCuLine?.match(/consumed (\d+) of (\d+) compute units/);
+  const poolCu = m ? Number(m[1]) : 0;
+  const POOL_CU_REGRESSION_CAP = 600_000;
+  console.log(`  pool CU: ${poolCu.toLocaleString()} / ${POOL_CU_REGRESSION_CAP.toLocaleString()} cap`);
+  if (poolCu === 0) throw new Error(`could not extract pool CU from logs`);
+  if (poolCu > POOL_CU_REGRESSION_CAP) {
+    throw new Error(`pool CU regression: ${poolCu} > ${POOL_CU_REGRESSION_CAP}`);
+  }
+
   // --- Verify vault state ---
   const inVaultAcct  = await getAccount(connection, vaultPda(POOL_ID, inMint));
   const outVaultAcct = await getAccount(connection, vaultPda(POOL_ID, outMint));
