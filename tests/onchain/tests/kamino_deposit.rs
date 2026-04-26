@@ -168,18 +168,32 @@ fn send_execute(
     setup.svm.send_transaction(tx).map(|_| ())
 }
 
-/// 7-account `remaining_accounts` block per PRD-09 §4.1 with placeholders.
-/// None of these need to exist — we only assert the adapter dispatches and
-/// attempts the CPI.
+/// `remaining_accounts` block laid out per `b402_kamino_adapter::ra_deposit`.
+/// 19 placeholders matching the verified account order for deposit_v2 +
+/// init prerequisites. None of these accounts need to exist — we only
+/// assert the adapter dispatches, decodes Borsh, and attempts the CPI to
+/// the real Kamino program ID.
 fn placeholder_remaining_accounts() -> Vec<AccountMeta> {
     vec![
-        AccountMeta::new_readonly(Pubkey::new_from_array([0xD0; 32]), false), // lending_market
-        AccountMeta::new_readonly(Pubkey::new_from_array([0xD1; 32]), false), // lending_market_authority
-        AccountMeta::new(Pubkey::new_from_array([0xD2; 32]), false),          // reserve
-        AccountMeta::new(Pubkey::new_from_array([0xD3; 32]), false),          // liquidity_supply_vault
-        AccountMeta::new(Pubkey::new_from_array([0xD4; 32]), false),          // collateral_mint
-        AccountMeta::new(Pubkey::new_from_array([0xD5; 32]), false),          // collateral_supply_vault
-        AccountMeta::new(Pubkey::new_from_array([0xD6; 32]), false),          // obligation
+        AccountMeta::new(Pubkey::new_from_array([0xD0; 32]), false),          // 0  reserve (w)
+        AccountMeta::new_readonly(Pubkey::new_from_array([0xD1; 32]), false), // 1  lending_market
+        AccountMeta::new_readonly(Pubkey::new_from_array([0xD2; 32]), false), // 2  lending_market_authority
+        AccountMeta::new(Pubkey::new_from_array([0xD3; 32]), false),          // 3  reserve_liquidity_supply (w)
+        AccountMeta::new(Pubkey::new_from_array([0xD4; 32]), false),          // 4  reserve_collateral_mint (w)
+        AccountMeta::new(Pubkey::new_from_array([0xD5; 32]), false),          // 5  reserve_coll_dest_supply (w)
+        AccountMeta::new_readonly(Pubkey::new_from_array([0xD6; 32]), false), // 6  oracle_pyth
+        AccountMeta::new_readonly(Pubkey::new_from_array([0xD7; 32]), false), // 7  oracle_swb_price
+        AccountMeta::new_readonly(Pubkey::new_from_array([0xD8; 32]), false), // 8  oracle_swb_twap
+        AccountMeta::new_readonly(Pubkey::new_from_array([0xD9; 32]), false), // 9  oracle_scope
+        AccountMeta::new_readonly(Pubkey::new_from_array([0xDA; 32]), false), // 10 reserve_liquidity_mint
+        AccountMeta::new_readonly(Pubkey::new_from_array([0xDB; 32]), false), // 11 farms_program
+        AccountMeta::new(Pubkey::new_from_array([0xDC; 32]), false),          // 12 user_metadata (w)
+        AccountMeta::new(Pubkey::new_from_array([0xDD; 32]), false),          // 13 obligation (w)
+        AccountMeta::new_readonly(Pubkey::new_from_array([0xDE; 32]), false), // 14 obligation_farm_or_sentinel
+        AccountMeta::new_readonly(Pubkey::new_from_array([0xDF; 32]), false), // 15 reserve_farm_state_or_sentinel
+        AccountMeta::new_readonly(Pubkey::new_from_array([0xE0; 32]), false), // 16 sysvar_instructions
+        AccountMeta::new_readonly(Pubkey::new_from_array([0xE1; 32]), false), // 17 system_program
+        AccountMeta::new_readonly(Pubkey::new_from_array([0xE2; 32]), false), // 18 rent_sysvar
     ]
 }
 
@@ -200,16 +214,20 @@ fn deposit_dispatches_and_attempts_kamino_cpi() {
         placeholder_remaining_accounts(),
     );
 
-    // Without a real Kamino program loaded into litesvm, the runtime
-    // rejects the CPI with `Unknown program <KAMINO_LEND_PROGRAM_ID>` AND
-    // `An account required by the instruction is missing` *before* the
-    // adapter's `map_err(KaminoCpiFailed)` runs. Both signals together
-    // are sufficient TDD proof that:
+    // Without the Kamino program loaded, the litesvm runtime cannot
+    // satisfy the CPI: it rejects with one of two equivalent signals
+    // depending on which account the adapter references first:
+    //   (a) `Unknown program <KAMINO_LEND_PROGRAM_ID>`, or
+    //   (b) `Instruction references an unknown account <KAMINO_LEND_PROGRAM_ID>`
+    //       (when the adapter passes Kamino's program ID as a None
+    //        sentinel in the init-prerequisite ixs, e.g.
+    //        referrer_user_metadata = klend_program_id).
+    // Either signal proves:
     //   1. Borsh decode worked       (else InvalidActionPayload=6001)
     //   2. ABI sanity passed         (else InvalidAmount=6004 / InsufficientInput=6005)
     //   3. Dispatch reached the CPI  (else NotYetImplemented or no logs)
-    //   4. The CPI was issued to KAMINO_LEND_PROGRAM_ID specifically
-    //      (else "Unknown program" wouldn't name Kamino's address).
+    //   4. The CPI was issued under KAMINO_LEND_PROGRAM_ID specifically
+    //      (else neither error message would name Kamino's address).
     // True KaminoCpiFailed mapping is exercised on the mainnet-fork suite
     // where a real Kamino program is loaded and returns its own errors.
     assert!(res.is_err(), "expected revert (no Kamino program loaded)");
@@ -218,8 +236,12 @@ fn deposit_dispatches_and_attempts_kamino_cpi() {
 
     // Mirrors KAMINO_LEND_PROGRAM_ID in programs/b402-kamino-adapter/src/lib.rs.
     let kamino_id_str = "KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD";
+    let saw_unknown_program = logs.contains(&format!("Unknown program {kamino_id_str}"));
+    let saw_unknown_account = logs.contains(&format!(
+        "Instruction references an unknown account {kamino_id_str}"
+    ));
     assert!(
-        logs.contains(&format!("Unknown program {kamino_id_str}")),
+        saw_unknown_program || saw_unknown_account,
         "expected runtime to reject CPI to Kamino program ID; logs:\n{logs}"
     );
     assert!(
