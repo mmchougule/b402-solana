@@ -42,3 +42,6 @@ docs/SUBMISSION.md
 ops/keypairs/
 BUILD-STATE.md
 ENGINEER-REVIEW.md
+
+# Sub-agent scratch
+.copilot-out/

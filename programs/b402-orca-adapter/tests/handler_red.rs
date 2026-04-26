@@ -1,21 +1,21 @@
 //! TDD red test — locks the next implementation step.
 //!
-//! `execute()` currently returns `KaminoAdapterError::NotYetImplemented`.
-//! When the handler ships per PRD-09 §5/§6, this test must be rewritten
-//! to assert successful execution against a Kamino mainnet-fork validator.
+//! `execute()` currently returns `OrcaAdapterError::NotYetImplemented`. When
+//! the handler ships per the Orca-adapter PRD, this test must be rewritten
+//! to assert successful execution against a Whirlpool mainnet-fork validator.
 //!
-//! Until then, this test asserts the explicit "not yet" failure mode so
-//! a casual contributor can't accidentally claim handler support without
-//! also writing the success path.
+//! Until then, this test asserts the explicit "not yet" failure mode so a
+//! casual contributor can't accidentally claim handler support without also
+//! writing the success path.
 
 use anchor_lang::error::ErrorCode as AnchorErrorCode;
 use anchor_lang::prelude::*;
-use b402_kamino_adapter::KaminoAdapterError;
+use b402_orca_adapter::OrcaAdapterError;
 
 #[test]
 fn handler_currently_errors_with_not_yet_implemented() {
     // The error code must be in Anchor's user-error range (>= 6000).
-    let err: anchor_lang::error::Error = error!(KaminoAdapterError::NotYetImplemented);
+    let err: anchor_lang::error::Error = error!(OrcaAdapterError::NotYetImplemented);
     let code = match err {
         anchor_lang::error::Error::AnchorError(e) => e.error_code_number,
         _ => panic!("expected AnchorError variant"),
@@ -33,7 +33,7 @@ fn implementation_marker_is_present() {
     // then add the real success-path tests against mainnet-fork.
     let msg = format!(
         "{:?}",
-        anchor_lang::error::Error::from(KaminoAdapterError::NotYetImplemented)
+        anchor_lang::error::Error::from(OrcaAdapterError::NotYetImplemented)
     );
     assert!(
         msg.contains("NotYetImplemented") || msg.contains("not yet implemented"),

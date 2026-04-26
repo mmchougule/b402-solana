@@ -575,11 +575,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "b402-jupiter-perps-adapter"
+version = "0.0.1"
+dependencies = [
+ "anchor-lang",
+ "anchor-spl",
+]
+
+[[package]]
 name = "b402-kamino-adapter"
 version = "0.0.1"
 dependencies = [
  "anchor-lang",
  "anchor-spl",
+ "indexmap",
 ]
 
 [[package]]
@@ -589,6 +598,14 @@ dependencies = [
  "anchor-lang",
  "anchor-spl",
  "indexmap",
+]
+
+[[package]]
+name = "b402-orca-adapter"
+version = "0.0.1"
+dependencies = [
+ "anchor-lang",
+ "anchor-spl",
 ]
 
 [[package]]
