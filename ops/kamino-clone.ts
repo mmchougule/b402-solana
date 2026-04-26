@@ -33,6 +33,7 @@ import fs from 'node:fs';
 import { Connection, PublicKey } from '@solana/web3.js';
 
 const KAMINO_LEND_PROGRAM = new PublicKey('KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD');
+const KAMINO_FARMS_PROGRAM = new PublicKey('FarmsPZpWu9i7Kky8tPN37rs2TpmMrAZrC7S7vJa91Hr');
 const PYTH_RECEIVER = new PublicKey('rec5EKMGg6MxZYaMdyBfgwp4d5rB9T1VQH5pJv5LtFJ');
 const PYTH_LEGACY = new PublicKey('FsJ3A3u2vn5cTVofAjvy6y5kwABJAqYWpe4975bi2epH');
 const SWITCHBOARD_ON_DEMAND = new PublicKey('SBondMDrcV3K4kxZR1HNVT7osZxAHVHgYXL5Ze1oMUv');
@@ -130,9 +131,14 @@ async function main() {
   );
   if (whale) data.push(whale.toBase58());
 
-  // Programs: Kamino itself + Pyth receiver/legacy if any candidate is
-  // owned by them (oracles).
-  const programs = [KAMINO_LEND_PROGRAM.toBase58(), PYTH_RECEIVER.toBase58(), PYTH_LEGACY.toBase58(), SWITCHBOARD_ON_DEMAND.toBase58()];
+  // Programs: Kamino lend + farms + oracle programs.
+  const programs = [
+    KAMINO_LEND_PROGRAM.toBase58(),
+    KAMINO_FARMS_PROGRAM.toBase58(),
+    PYTH_RECEIVER.toBase58(),
+    PYTH_LEGACY.toBase58(),
+    SWITCHBOARD_ON_DEMAND.toBase58(),
+  ];
 
   const out = {
     programs,
