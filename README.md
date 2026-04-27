@@ -19,9 +19,25 @@ RPC_URL=https://api.devnet.solana.com pnpm --filter=@b402ai/solana-examples e2e
 Shield 100, unshield 100 to a fresh recipient. Sender and recipient share no
 on-chain edge.
 
-Private swap (`shield → adapt CPI → unshield`): [Quickstart](#quickstart) steps
-7 and 8 (mock adapter on devnet; Jupiter and Kamino on a mainnet-forked
-validator). Instruction layout: [`docs/TX-WALKTHROUGH.md`](docs/TX-WALKTHROUGH.md).
+## Run private lending (mainnet-fork, ~2 minutes)
+
+Kamino isn't on devnet, so we boot a local validator with Kamino's mainnet
+program + USDC reserve + Pyth oracle cloned in. No real funds — the local
+validator mints alice 100 USDC.
+
+```bash
+./ops/setup-kamino-fork.sh                            # clones state, boots validator
+pnpm tsx examples/kamino-adapter-fork-deposit.ts      # private 1 USDC deposit
+```
+
+Goes through `b402_kamino_adapter::execute` → 7 nested CPIs into Kamino
+(`init_user_metadata`, `init_obligation`, `init_obligation_farms_for_reserve`,
+`refresh_reserve`, `refresh_obligation`, `deposit_v2`, sweep). Obligation account
+grows 0 → 3,344 B in a single tx. Alice's wallet shows the deposit; it does not
+show the Kamino position.
+
+For the private swap variant (Jupiter v6 on mainnet-fork): [Quickstart](#quickstart)
+step 8. Instruction layout for `adapt_execute`: [`docs/TX-WALKTHROUGH.md`](docs/TX-WALKTHROUGH.md).
 
 ## Numbers
 
