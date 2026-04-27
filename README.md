@@ -1,24 +1,41 @@
 # b402-solana
 
 **Private DeFi on Solana.** Shield once, then swap, lend, LP, or trade perps —
-all without your wallet appearing on-chain as the executing party. Real ZK,
-single-tx execution, composable with any Solana protocol via a registered adapter.
+all without your wallet appearing on-chain as the executing party. Single-tx
+execution, composable with any Solana protocol via a registered adapter.
 
 Same construction class as Railgun (Groth16 + Poseidon + UTXO commitments
 + nullifiers + viewing keys), compiled native to Solana's SVM as Anchor programs.
 
-## What to run (and where the detail lives)
+## Run it on devnet (~30 seconds)
 
-**Devnet:** The same private swap path (shield → Groth16 `adapt` proof → adapter CPI →
-unshield) is exercised by the [Quickstart](#quickstart) against the [devnet program IDs](#devnet-deployment).
-For instruction layout, accounts, logs, and size — not explorer screenshots — see
+```bash
+git clone https://github.com/mmchougule/b402-solana && cd b402-solana
+pnpm install
+solana airdrop 1 --url devnet                       # if you don't have devnet SOL
+RPC_URL=https://api.devnet.solana.com pnpm --filter=@b402ai/solana-examples e2e
+```
+
+You'll see two real signatures land on Solana devnet:
+
+1. **Shield** — 100 tokens of a fresh test mint move from your wallet into the
+   shielded pool vault. Your wallet signs; the commitment is public, the note
+   contents are not.
+2. **Unshield** — 100 tokens move from the shielded pool out to a recipient
+   address you've never used before. The unshield is signed by a relayer key
+   (= your CLI wallet on devnet); no on-chain field connects it back to the
+   shield.
+
+Open both signatures on [explorer.solana.com](https://explorer.solana.com/?cluster=devnet).
+Solana sees both transactions. The link between the sender and the recipient —
+the thing a wallet-watching bot would scrape to copy your strategy — isn't on
+chain. That's the privacy claim, against the deployed [devnet program IDs](#devnet-deployment),
+proven by two signatures any reader can fetch.
+
+For private *swap* (`shield → adapt CPI → unshield`, mock adapter on devnet,
+real Jupiter / Kamino on a mainnet-forked validator), see [Quickstart](#quickstart)
+steps 7 and 8. For instruction layout and account ordering, see
 [`docs/TX-WALKTHROUGH.md`](docs/TX-WALKTHROUGH.md).
-
-**Mainnet-fork (local validator):** Integration scripts load cloned mainnet program
-bytecode and state — no real funds. In [Quickstart](#quickstart) step 8, a real Jupiter v6
-route runs end-to-end (e.g. 0.1 wSOL → USDC via SolFi V2, ~660k CU, 1,231 B tx). Kamino
-coverage: USDC deposit through `b402_kamino_adapter` with the full CPI sequence (incl. refresh +
-deposit) against `klend-sdk@7.3.22` discriminators.
 
 ## Numbers
 
