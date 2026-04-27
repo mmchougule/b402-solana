@@ -56,16 +56,41 @@ step 8. Instruction layout for `adapt_execute`: [`docs/TX-WALKTHROUGH.md`](docs/
 
 ## Numbers
 
-| Op | Tx size | CU | Fee |
-|---|---|---|---|
-| Shield | 1,157 B | 239k | $0.001 |
-| Unshield | ~1,150 B | ~350k | $0.001 |
-| Private swap (mock adapter) | 1,214 B | ~600k | $0.001 |
-| Private swap (Jupiter SolFi V2 mainnet-fork) | 1,231 B | ~660k | $0.001 |
+Compute-unit cost per flow (litesvm probe against deployed bytecode, latest
+[assurance run](https://github.com/mmchougule/b402-solana-assurance/blob/main/artifacts/onchain-compute-units.json)):
 
-Single-instruction Groth16 verification under Solana's 1.4M CU cap. No multi-tx
-splits, no off-chain coordinator. ~325k CU consumed by the pool itself, ~1.07M
-CU of headroom for adapter work.
+| Flow | CU consumed | Source |
+|---|---|---|
+| Shield | 233,495 | `adapt_execute_full_path` litesvm probe |
+| Unshield | 223,413 | `unshield_success` litesvm probe |
+| `adapt_execute` end-to-end (mock adapter, real Groth16) | 313,725 | `adapt_execute_full_path` litesvm probe |
+| `verifier_adapt` CPI alone | ~178k | inside `adapt_execute_full_path` |
+| Kamino deposit through `b402_kamino_adapter` (mainnet-fork, 7 nested CPIs into Kamino) | not yet pinned in the probe — `kamino_deposit_full_path` scenario tracked in assurance roadmap | examples/kamino-adapter-fork-deposit.ts |
+| Jupiter swap through `b402_jupiter_adapter` (mainnet-fork) | ~660k observed in examples/swap-e2e.ts logs | examples/swap-e2e.ts |
+
+Solana per-tx limits and our headroom on the heaviest flow we ship today
+(`adapt_execute` end-to-end, full Groth16 verify + adapter CPI + delta check):
+
+| Limit | Solana cap | adapt_execute uses | Headroom |
+|---|---|---|---|
+| Compute units | 1,400,000 | 313,725 | ~77% free |
+| Transaction size (serialized v0) | 1,232 B | fits — see ALT note below | ALT-relieved |
+| CPI depth | 4 nested | 2 (pool → adapter → DeFi protocol) | 2 levels free |
+| Account meta count (with one ALT) | ~256 | scales with adapter; expanded via ALT, not inline | extend the ALT |
+| Per-instruction data | 10 KB | ~1.1 KB transact / ~1.4 KB adapt | ample |
+| Signatures | wire-cost per sig | 1 (relayer) | minimal |
+
+The 16-entry b402 Address Lookup Table is what makes `adapt_execute` a single
+v0 transaction in practice. It compresses every common account
+(pool program, both verifiers, USDC + wSOL mints, system + token programs,
+b402 vaults) from 32-byte inline pubkeys to 1-byte ALT indexes. Adding a new
+DeFi protocol = extend the ALT with that protocol's frequently-touched
+accounts; the wire format doesn't grow proportionally.
+
+The architectural claim: **the whole shielded-swap or shielded-deposit flow,
+once notes are in the pool, is one instruction in one v0 transaction with one
+signature**. CU has the most headroom; tx size is the tightest constraint and
+ALT is what makes it tractable.
 
 ## Architecture
 
