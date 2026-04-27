@@ -1,0 +1,7 @@
+[32;22m[INFO]  [39;1msnarkJS[0m: Curve: bn-128
+[32;22m[INFO]  [39;1msnarkJS[0m: # of Wires: 17328
+[32;22m[INFO]  [39;1msnarkJS[0m: # of Constraints: 17259
+[32;22m[INFO]  [39;1msnarkJS[0m: # of Private Inputs: 129
+[32;22m[INFO]  [39;1msnarkJS[0m: # of Public Inputs: 18
+[32;22m[INFO]  [39;1msnarkJS[0m: # of Labels: 60445
+[32;22m[INFO]  [39;1msnarkJS[0m: # of Outputs: 0
