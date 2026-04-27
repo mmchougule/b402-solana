@@ -99,9 +99,10 @@ Numbers from [TX-WALKTHROUGH.md](https://github.com/b402-ai/b402-solana/blob/mai
 | Adapt | 5,000 lamports | In-kind relayer fee + downstream protocol fees (Jupiter, Kamino, etc.) |
 | New nullifier shard rent | ~0.07 SOL | Paid by relayer, recovered via fee. One-time per shard (65,536 shards max protocol-wide) |
 
-**Protocol fee: 0%, immutable.** The pool program has no fee-collection
-code path. Adding one would require deploying a new program. See
-[`PRD-01 §11`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-01-architecture.md).
+**Protocol fee: 0%.** The v1 pool program has no fee-collection code path
+and no fee field in the public-input layout. Adding one would require a
+circuit-level change (new ceremony, new pool deployment), not an admin
+action. See [`PRD-01 §11`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-01-architecture.md).
 
 ### Why does `adapt_execute` need so many accounts?
 

@@ -7,9 +7,9 @@ description: "Private DeFi on Solana — shielded pool + composable execution pa
 execution layer on Solana. Built ground-up for the SVM: Circom 2 circuits,
 Anchor BPF programs, Groth16 verification through `alt_bn128_*` syscalls,
 Poseidon-bound UTXO commitments with nullifier-set membership and viewing-key
-separation. Not a port — the cryptographic primitives are standard
-(deliberately, so they're auditable against existing literature), the
-implementation, instruction surface, and adapter ABI are native.
+separation. The cryptographic primitives are standard (chosen for
+auditability against existing literature); the SVM-native runtime,
+instruction surface, and adapter ABI are the novelty.
 
 This is the engineering documentation. For the design rationale that
 pre-dates the code, read `docs/prds/PRD-01..PRD-23` in numeric order.
@@ -25,23 +25,28 @@ pre-dates the code, read `docs/prds/PRD-01..PRD-23` in numeric order.
 
 - **Shield** any whitelisted SPL token into the pool. Receive an opaque
   commitment that hides amount and identity.
-- **Unshield** any subset of notes back to a clear Solana address, with the
-  source notes cryptographically unlinkable from the destination.
+- **Unshield** any subset of notes back to a clear Solana address. The
+  Groth16 proof binds the spend without revealing which input commitment
+  was burned, so an observer of the unshield tx alone cannot link it to
+  any specific shield tx.
 - **Private DeFi** via `adapt_execute`: Jupiter swaps live on devnet and
-  validated against real Jupiter V6 on mainnet-fork; Kamino lend deposit
-  validated against cloned mainnet bytecode; Adrena, Orca, Drift adapters
-  scoped per [PRDs 09–16](https://github.com/b402-ai/b402-solana/tree/main/docs/prds).
+  validated against Jupiter V6 on mainnet-fork; Kamino deposit validated
+  against cloned mainnet bytecode (deposit only in v0.1 alpha;
+  withdraw / borrow / repay are gated until mainnet-fork tests cover them).
+  Adrena, Orca, Drift adapters scaffolded per
+  [PRDs 09–16](https://github.com/b402-ai/b402-solana/tree/main/docs/prds).
 
 ## What's actually shipped
 
 | Surface | Status |
 |---|---|
-| Shield / unshield with real Groth16 proofs (devnet) | Live |
-| `adapt_execute` with real ZK binding (devnet) | Live (Phase 2a, 2026-04-25) |
-| Real Jupiter V6 private swap (mainnet-fork) | Verified |
-| Kamino deposit (mainnet-fork) | Verified |
+| Shield / unshield with Groth16 proofs (devnet) | Live |
+| `adapt_execute` with full ZK binding (devnet) | Live (Phase 2a, 2026-04-25) |
+| Jupiter V6 private swap (mainnet-fork against cloned bytecode) | Verified |
+| Kamino deposit (mainnet-fork against cloned bytecode) | Verified |
+| Kamino withdraw / borrow / repay | Gated to `NotYetImplemented` in v0.1; handlers exist; mainnet-fork tests pending |
 | Per-user Kamino obligations | Designed (PRD-09 §7.2), gated, helpers exist |
-| Drift / Adrena / Orca adapters | PRDs only (10, 16, scaffolds) |
+| Drift / Adrena / Orca adapters | PRDs + scaffolds (10, 16) |
 | Multi-party trusted-setup ceremony | Not started |
 | External audits | Not started |
 
@@ -69,8 +74,9 @@ This protocol is not, and is not trying to be:
 - An MPC privacy layer. Trust model is ZK over BN254 with a multi-party
   trusted setup. Arcium / Umbra / Token-2022 Confidential Transfer are
   complementary, not competing — and not integrated in v1.
-- A governance-token system. The protocol fee is **0%**, immutable, and there
-  is no fee-collection code path to govern.
+- A governance-token system. The protocol fee is **0%** and there is no
+  fee-collection code path in the v1 program to govern; adding one would
+  require a circuit-level public-input change, not an admin action.
 
 ## Key locked decisions
 
@@ -84,7 +90,7 @@ without migrating user funds.
 - Merkle: incremental, **depth 26**, Poseidon node hash
 - Verifier: **`Lightprotocol/groth16-solana`** (audited, widely deployed)
 - Program framework: **Anchor 0.30+**
-- Protocol fee: **0%**, immutable
+- Protocol fee: **0%** — not configurable in v1 (no fee field in the program)
 
 Justifications and rejected alternatives are documented inline in the PRDs;
 nothing here is speculative.
