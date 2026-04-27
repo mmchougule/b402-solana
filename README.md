@@ -302,10 +302,15 @@ b402-solana/
 │   └── SUBMISSION.md              internal: submission strategy
 ├── circuits/                      Circom 2.2 source + scripts + tests
 ├── programs/
-│   ├── b402-pool/
-│   ├── b402-verifier-transact/
-│   ├── b402-jupiter-adapter/
-│   └── b402-mock-adapter/
+│   ├── b402-pool/                 commitments tree, nullifier set, adapt_execute
+│   ├── b402-verifier-transact/    Groth16 verifier, 18 PI (transact circuit)
+│   ├── b402-verifier-adapt/       Groth16 verifier, 23 PI (adapt circuit)
+│   ├── b402-jupiter-adapter/      Jupiter v6 CPI wrapper
+│   ├── b402-kamino-adapter/       Kamino lend CPI wrapper (deposit gated v0.1)
+│   ├── b402-mock-adapter/         test-only delta-invariant adapter
+│   ├── b402-adrena-adapter/       scaffold — perps, PRD-16
+│   ├── b402-orca-adapter/         scaffold — whirlpool LP
+│   └── b402-jupiter-perps-adapter/ scaffold — JLP perps
 ├── packages/
 │   ├── crypto/                    Rust Fr / Poseidon / Merkle (parity-tested ↔ TS)
 │   ├── shared/                    @b402ai/solana-shared — constants, codecs
