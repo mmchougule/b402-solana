@@ -103,9 +103,13 @@ impl Harness {
         let tx = Transaction::new(&[&admin], msg, svm.latest_blockhash());
         svm.send_transaction(tx).expect("init_pool");
 
-        // Plant mint + token config
+        // Plant mint + token config (max_tvl set high so shield tests that
+        // exercise valid amounts aren't gated by the cap; cap behavior has
+        // dedicated tests).
         mint::plant_mint(&mut svm, &mint, &admin.pubkey(), 6);
-        let data = discriminator::instruction("add_token_config").to_vec();
+        let mut data = discriminator::instruction("add_token_config").to_vec();
+        // AddTokenConfigArgs { max_tvl: u64::MAX }
+        data.extend_from_slice(&u64::MAX.to_le_bytes());
         let ix = Instruction {
             program_id: ids::b402_pool(),
             accounts: vec![

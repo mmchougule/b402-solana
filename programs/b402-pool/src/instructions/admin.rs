@@ -1,9 +1,9 @@
 use anchor_lang::prelude::*;
 
-use crate::constants::{SEED_ADAPTERS, SEED_CONFIG, VERSION_PREFIX};
+use crate::constants::{SEED_ADAPTERS, SEED_CONFIG, SEED_TOKEN, VERSION_PREFIX};
 use crate::error::PoolError;
-use crate::events::{AdapterRegistered, PoolPauseChanged};
-use crate::state::{AdapterInfo, AdapterRegistry, PoolConfig};
+use crate::events::{AdapterRegistered, MaxTvlUpdated, PoolPauseChanged};
+use crate::state::{AdapterInfo, AdapterRegistry, PoolConfig, TokenConfig};
 use crate::{AdapterRegistration, PauseFlag};
 
 /// v1 admin auth: the `admin_multisig` field on `PoolConfig` is a single pubkey
@@ -151,6 +151,38 @@ pub fn register_adapter(ctx: Context<RegisterAdapter>, info: AdapterRegistration
     emit!(AdapterRegistered {
         adapter_id,
         program_id: info.program_id,
+        slot: Clock::get()?.slot,
+    });
+    Ok(())
+}
+
+#[derive(Accounts)]
+pub struct AdminTokenConfigAction<'info> {
+    pub admin: Signer<'info>,
+
+    #[account(
+        seeds = [VERSION_PREFIX, SEED_CONFIG],
+        bump,
+    )]
+    pub pool_config: Account<'info, PoolConfig>,
+
+    #[account(
+        mut,
+        seeds = [VERSION_PREFIX, SEED_TOKEN, token_config.mint.as_ref()],
+        bump,
+    )]
+    pub token_config: Account<'info, TokenConfig>,
+}
+
+pub fn set_max_tvl(ctx: Context<AdminTokenConfigAction>, new_max_tvl: u64) -> Result<()> {
+    ensure_admin(&ctx.accounts.pool_config, &ctx.accounts.admin.key())?;
+    let tc = &mut ctx.accounts.token_config;
+    let old_max_tvl = tc.max_tvl;
+    tc.max_tvl = new_max_tvl;
+    emit!(MaxTvlUpdated {
+        mint: tc.mint,
+        old_max_tvl,
+        new_max_tvl,
         slot: Clock::get()?.slot,
     });
     Ok(())

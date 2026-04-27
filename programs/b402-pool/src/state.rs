@@ -37,10 +37,16 @@ pub struct TokenConfig {
     pub vault: Pubkey,
     pub enabled: bool,
     pub added_at_slot: u64,
-    pub _reserved: [u8; 32],
+    /// Hard cap on per-mint pool TVL (smallest units, e.g. 100_000_000_000 for
+    /// 100k USDC at 6 decimals). Shield is rejected if `vault.amount + amount > max_tvl`.
+    /// Carved from the original `_reserved[u8; 32]` so account layout stays the
+    /// same total size (8 + 32 + 1 + 32 + 1 + 8 + 8 + 24 = 114).
+    /// Zero means "no shielding allowed" (fail-closed default).
+    pub max_tvl: u64,
+    pub _reserved: [u8; 24],
 }
 impl TokenConfig {
-    pub const LEN: usize = 8 + 32 + 1 + 32 + 1 + 8 + 32;
+    pub const LEN: usize = 8 + 32 + 1 + 32 + 1 + 8 + 8 + 24;
 }
 
 /// Large account — zero-copy.

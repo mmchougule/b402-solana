@@ -26,6 +26,8 @@ pub enum PoolError {
     MintMismatch = 1202,
     #[msg("vault mismatch")]
     VaultMismatch = 1203,
+    #[msg("shield would exceed token max_tvl cap")]
+    MaxTvlExceeded = 1204,
 
     #[msg("merkle root not in recent history")]
     InvalidMerkleRoot = 1300,

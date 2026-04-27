@@ -19,6 +19,14 @@ pub struct TokenWhitelisted {
 }
 
 #[event]
+pub struct MaxTvlUpdated {
+    pub mint: Pubkey,
+    pub old_max_tvl: u64,
+    pub new_max_tvl: u64,
+    pub slot: u64,
+}
+
+#[event]
 pub struct CommitmentAppended {
     pub leaf_index: u64,
     pub commitment: [u8; 32],

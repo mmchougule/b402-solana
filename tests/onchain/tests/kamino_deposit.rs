@@ -51,11 +51,8 @@ const ERR_INVALID_AMOUNT: u32 = 6004;
 // `programs/b402-kamino-adapter/tests/payload.rs` — guarded by
 // `variants_are_discriminator_distinct`).
 const KAMINO_ACTION_DEPOSIT: u8 = 0;
-#[allow(dead_code)]
 const KAMINO_ACTION_WITHDRAW: u8 = 1;
-#[allow(dead_code)]
 const KAMINO_ACTION_BORROW: u8 = 2;
-#[allow(dead_code)]
 const KAMINO_ACTION_REPAY: u8 = 3;
 
 fn kamino_adapter_id() -> Pubkey {
@@ -292,4 +289,71 @@ fn zero_in_amount_rejected() {
             || logs.contains("InvalidAmount"),
         "expected InvalidAmount; logs:\n{logs}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// v0.1 mainnet alpha: Withdraw / Borrow / Repay are gated at dispatch with
+// NotYetImplemented until mainnet-fork integration tests cover them. These
+// three RED tests fix that gate so a re-enable can't accidentally regress
+// the safety property without a corresponding test removal.
+
+fn encode_withdraw(reserve: &Pubkey, kt_in: u64, min_underlying_out: u64) -> Vec<u8> {
+    let mut v = Vec::with_capacity(49);
+    v.push(KAMINO_ACTION_WITHDRAW);
+    v.extend_from_slice(reserve.as_ref());
+    v.extend_from_slice(&kt_in.to_le_bytes());
+    v.extend_from_slice(&min_underlying_out.to_le_bytes());
+    v
+}
+
+fn encode_borrow(reserve: &Pubkey, amount_out: u64, max_collateral_used_bps: u16) -> Vec<u8> {
+    let mut v = Vec::with_capacity(43);
+    v.push(KAMINO_ACTION_BORROW);
+    v.extend_from_slice(reserve.as_ref());
+    v.extend_from_slice(&amount_out.to_le_bytes());
+    v.extend_from_slice(&max_collateral_used_bps.to_le_bytes());
+    v
+}
+
+fn encode_repay(reserve: &Pubkey, amount_in: u64) -> Vec<u8> {
+    let mut v = Vec::with_capacity(41);
+    v.push(KAMINO_ACTION_REPAY);
+    v.extend_from_slice(reserve.as_ref());
+    v.extend_from_slice(&amount_in.to_le_bytes());
+    v
+}
+
+fn assert_not_yet_implemented(res: Result<(), litesvm::types::FailedTransactionMetadata>) {
+    assert!(res.is_err(), "gated action must revert");
+    let err = res.unwrap_err();
+    let logs = err.meta.logs.join("\n");
+    assert!(
+        logs.contains(&err_code_hex(ERR_NOT_YET_IMPLEMENTED))
+            || logs.contains("NotYetImplemented"),
+        "expected NotYetImplemented for gated action; logs:\n{logs}"
+    );
+}
+
+#[test]
+fn withdraw_gated_until_mainnet_fork_verified() {
+    let mut setup = fresh_svm();
+    let payload = encode_withdraw(&Pubkey::new_from_array([0xD0; 32]), 100, 0);
+    let res = send_execute(&mut setup, 100, 0, payload, placeholder_remaining_accounts());
+    assert_not_yet_implemented(res);
+}
+
+#[test]
+fn borrow_gated_until_mainnet_fork_verified() {
+    let mut setup = fresh_svm();
+    let payload = encode_borrow(&Pubkey::new_from_array([0xD0; 32]), 100, 5_000);
+    let res = send_execute(&mut setup, 100, 0, payload, placeholder_remaining_accounts());
+    assert_not_yet_implemented(res);
+}
+
+#[test]
+fn repay_gated_until_mainnet_fork_verified() {
+    let mut setup = fresh_svm();
+    let payload = encode_repay(&Pubkey::new_from_array([0xD0; 32]), 100);
+    let res = send_execute(&mut setup, 100, 0, payload, placeholder_remaining_accounts());
+    assert_not_yet_implemented(res);
 }

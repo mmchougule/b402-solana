@@ -272,7 +272,15 @@ async function initPool(connection: Connection, admin: Keypair): Promise<void> {
 }
 
 async function addTokenConfig(connection: Connection, admin: Keypair, mint: PublicKey): Promise<void> {
-  const data = Buffer.from(instructionDiscriminator('add_token_config'));
+  // AddTokenConfigArgs { max_tvl: u64 }. For test mints we set the cap as
+  // high as it goes — the cap is exercised by the dedicated TVL tests, not
+  // the e2e flow.
+  const maxTvl = Buffer.alloc(8);
+  maxTvl.writeBigUInt64LE(0xFFFFFFFFFFFFFFFFn, 0);
+  const data = Buffer.concat([
+    Buffer.from(instructionDiscriminator('add_token_config')),
+    maxTvl,
+  ]);
 
   const ix = new TransactionInstruction({
     programId: POOL_ID,

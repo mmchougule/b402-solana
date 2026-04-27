@@ -49,7 +49,14 @@ pub struct AddTokenConfig<'info> {
     pub rent: Sysvar<'info, Rent>,
 }
 
-pub fn handler(ctx: Context<AddTokenConfig>) -> Result<()> {
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, Default)]
+pub struct AddTokenConfigArgs {
+    /// Per-mint TVL cap in smallest units. 0 == no shielding allowed
+    /// (fail-closed default; admin must set explicitly via `set_max_tvl`).
+    pub max_tvl: u64,
+}
+
+pub fn handler(ctx: Context<AddTokenConfig>, args: AddTokenConfigArgs) -> Result<()> {
     super::admin::ensure_admin(&ctx.accounts.pool_config, &ctx.accounts.admin.key())?;
 
     let clock = Clock::get()?;
@@ -59,7 +66,8 @@ pub fn handler(ctx: Context<AddTokenConfig>) -> Result<()> {
     tc.vault = ctx.accounts.vault.key();
     tc.enabled = true;
     tc.added_at_slot = clock.slot;
-    tc._reserved = [0u8; 32];
+    tc.max_tvl = args.max_tvl;
+    tc._reserved = [0u8; 24];
 
     emit!(TokenWhitelisted {
         mint: tc.mint,

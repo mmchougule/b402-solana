@@ -165,7 +165,9 @@ fn deploy_and_init(register_mock_with_disc: Option<[u8; 8]>) -> Setup {
     let out_mint = Pubkey::new_from_array([0xA2; 32]);
     for m in [&in_mint, &out_mint] {
         mint::plant_mint(&mut svm, m, &admin.pubkey(), 6);
-        let data = discriminator::instruction("add_token_config").to_vec();
+        let mut data = discriminator::instruction("add_token_config").to_vec();
+        // AddTokenConfigArgs { max_tvl: u64::MAX } — cap not the focus of this test.
+        data.extend_from_slice(&u64::MAX.to_le_bytes());
         let ix = Instruction {
             program_id: ids::b402_pool(),
             accounts: vec![
