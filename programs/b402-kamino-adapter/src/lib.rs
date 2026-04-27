@@ -221,6 +221,12 @@ pub mod b402_kamino_adapter {
         let auth_seeds: &[&[u8]] = &[VERSION_PREFIX, SEED_ADAPTER, &[bump]];
         let signer_seeds = &[auth_seeds];
 
+        // v0.1 mainnet alpha: Deposit is the only path mainnet-fork-verified
+        // against cloned Kamino bytecode. Withdraw / Borrow / Repay handlers
+        // exist and have the same refresh-sequence pattern, but lack the
+        // mainnet-fork integration evidence Deposit has. Gate them at
+        // dispatch with NotYetImplemented until that test evidence lands —
+        // reversing this is a one-line change at audit-time.
         match &action {
             KaminoAction::Deposit {
                 reserve,
@@ -230,30 +236,10 @@ pub mod b402_kamino_adapter {
                 require!(*act_in == in_amount, KaminoAdapterError::AmountMismatch);
                 handle_deposit(&ctx, *reserve, *act_in, *min_kt_out, signer_seeds)?;
             }
-            KaminoAction::Withdraw {
-                reserve,
-                kt_in,
-                min_underlying_out,
-            } => {
-                require!(*kt_in == in_amount, KaminoAdapterError::AmountMismatch);
-                handle_withdraw(&ctx, *reserve, *kt_in, *min_underlying_out, signer_seeds)?;
-            }
-            KaminoAction::Borrow {
-                reserve,
-                amount_out,
-                max_collateral_used_bps,
-            } => {
-                handle_borrow(
-                    &ctx,
-                    *reserve,
-                    *amount_out,
-                    *max_collateral_used_bps,
-                    signer_seeds,
-                )?;
-            }
-            KaminoAction::Repay { reserve, amount_in } => {
-                require!(*amount_in == in_amount, KaminoAdapterError::AmountMismatch);
-                handle_repay(&ctx, *reserve, *amount_in, signer_seeds)?;
+            KaminoAction::Withdraw { .. }
+            | KaminoAction::Borrow { .. }
+            | KaminoAction::Repay { .. } => {
+                return err!(KaminoAdapterError::NotYetImplemented);
             }
         }
 
@@ -796,6 +782,10 @@ fn handle_deposit<'info>(
 }
 
 #[inline(never)]
+// Gated at dispatch (lib.rs:224) for v0.1 mainnet alpha until mainnet-fork
+// integration tests cover this path. Implementation kept in-tree so the
+// re-enable diff is one line and reviewable.
+#[allow(dead_code)]
 fn handle_withdraw<'info>(
     ctx: &Context<'_, '_, '_, 'info, Execute<'info>>,
     _reserve: Pubkey,
@@ -841,6 +831,7 @@ fn handle_withdraw<'info>(
 }
 
 #[inline(never)]
+#[allow(dead_code)]
 fn handle_borrow<'info>(
     ctx: &Context<'_, '_, '_, 'info, Execute<'info>>,
     _reserve: Pubkey,
@@ -881,6 +872,7 @@ fn handle_borrow<'info>(
 }
 
 #[inline(never)]
+#[allow(dead_code)]
 fn handle_repay<'info>(
     ctx: &Context<'_, '_, '_, 'info, Execute<'info>>,
     _reserve: Pubkey,

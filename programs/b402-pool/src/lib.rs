@@ -32,8 +32,18 @@ pub mod b402_pool {
         instructions::init_pool::handler(ctx, args)
     }
 
-    pub fn add_token_config(ctx: Context<AddTokenConfig>) -> Result<()> {
-        instructions::add_token_config::handler(ctx)
+    pub fn add_token_config(
+        ctx: Context<AddTokenConfig>,
+        args: instructions::add_token_config::AddTokenConfigArgs,
+    ) -> Result<()> {
+        instructions::add_token_config::handler(ctx, args)
+    }
+
+    pub fn set_max_tvl(
+        ctx: Context<AdminTokenConfigAction>,
+        new_max_tvl: u64,
+    ) -> Result<()> {
+        instructions::admin::set_max_tvl(ctx, new_max_tvl)
     }
 
     // Heavy fields inside ShieldArgs/TransactArgs/UnshieldArgs are `Vec<u8>`

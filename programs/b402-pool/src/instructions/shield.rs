@@ -130,6 +130,19 @@ pub fn handler(ctx: Context<Shield>, args: ShieldArgs) -> Result<()> {
         PoolError::MintMismatch
     );
 
+    // TVL cap. Vault balance + this shield amount must not exceed the cap.
+    // max_tvl == 0 means "no shielding allowed" (fail-closed default).
+    let new_tvl = ctx
+        .accounts
+        .vault
+        .amount
+        .checked_add(pi.public_amount_in)
+        .ok_or(PoolError::MaxTvlExceeded)?;
+    require!(
+        new_tvl <= ctx.accounts.token_config.max_tvl,
+        PoolError::MaxTvlExceeded
+    );
+
     // Nullifiers must both be zero for shield (no input notes).
     require!(
         pi.nullifier[0] == [0u8; 32] && pi.nullifier[1] == [0u8; 32],
