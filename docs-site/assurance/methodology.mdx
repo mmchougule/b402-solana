@@ -40,21 +40,42 @@ Six PRDs sequenced in order:
 
 ## Inputs
 
-The assurance workspace pulls path-dependencies from `b402-solana`:
+The assurance workspace imports `@b402ai/solana-shared` as a workspace
+file dep and reads path-relative TypeScript sources directly from
+`../b402-solana/`:
 
 - `circuits/` — circuit sources + build artifacts
 - `packages/crypto/` — Rust Fr / Poseidon / Merkle reference
-- `packages/prover/` — TS prover wrapper
-- `packages/sdk/` — TS SDK
-- `programs/b402-verifier-transact/` — Rust verifier crate
-- `programs/b402-pool/` — Pool program
+- `packages/prover/` — TS prover wrapper (imported as
+  `TransactProver`)
+- `packages/sdk/` — TS SDK (imported for `commitmentHash`,
+  `nullifierHash`, `merkleNodeHash`, `ClientMerkleTree`,
+  `buildWallet`, `encryptNote`, `tryDecryptNote`)
+- `programs/b402-verifier-transact/` — Rust verifier crate (built as
+  the `b402-verify-cli` binary for parity checks)
+- `programs/b402-verifier-adapt/` — Rust verifier-adapt crate (its
+  own `cargo test --tests` is invoked by the harness)
+- `programs/b402-pool/` — Pool program (LiteSVM probe path)
 - `programs/b402-jupiter-adapter/` — Jupiter adapter
 
-It does not touch sources beyond reading them.
+It does not modify any of these.
+
+## Source map
+
+| Harness file | Generates | PRD |
+|---|---|---|
+| [`src/index.ts`](https://github.com/b402-ai/b402-solana-assurance/blob/main/src/index.ts) | top-level orchestrator: builds Rust helpers, generates `vectors/`, dispatches sub-harnesses, writes `reports/assurance-summary.md` | A01 |
+| [`src/adapt.ts`](https://github.com/b402-ai/b402-solana-assurance/blob/main/src/adapt.ts) | `artifacts/adapt-assurance.json`, runs `cargo test` on `b402-verifier-adapt` | A02 |
+| [`src/invariants.ts`](https://github.com/b402-ai/b402-solana-assurance/blob/main/src/invariants.ts) | `artifacts/invariant-summary.json`: 128×4 property runs + 64+32+8 stateful sequences | A03 |
+| [`src/fuzz.ts`](https://github.com/b402-ai/b402-solana-assurance/blob/main/src/fuzz.ts) | `artifacts/fuzz-summary.json`: 256 Fr / 128 proof-mut / 128 PI-mut / 8 malformed / 32 note-payload mutations | A04 |
+| [`src/bench.ts`](https://github.com/b402-ai/b402-solana-assurance/blob/main/src/bench.ts) | `artifacts/bench-summary.json` + `baselines/{cubench,microbench,proofbench,scanbench}.json` | A05 |
+| [`src/onchain.ts`](https://github.com/b402-ai/b402-solana-assurance/blob/main/src/onchain.ts) | `artifacts/onchain-summary.json` + `artifacts/onchain-compute-units.json` from LiteSVM probe | — |
+| [`src/fv.ts`](https://github.com/b402-ai/b402-solana-assurance/blob/main/src/fv.ts) | `reports/fv/` formal-verification handoff bundle | A06 |
+| [`src/adapt-litesvm-fixture.ts`](https://github.com/b402-ai/b402-solana-assurance/blob/main/src/adapt-litesvm-fixture.ts) | `artifacts/adapt-litesvm-fixture.json` for the on-chain probe | A02/A03 |
 
 ## Outputs
 
-After a full assurance run (`pnpm run all`), the workspace emits:
+After a full assurance run (`pnpm assure`), the workspace emits:
 
 ```
 artifacts/
@@ -91,40 +112,57 @@ parity gold standard.
 
 ## What "assurance pass" means
 
-Generated [`reports/assurance-summary.md`](https://github.com/b402-ai/b402-solana-assurance/blob/main/reports/assurance-summary.md):
+Generated [`reports/assurance-summary.md`](https://github.com/b402-ai/b402-solana-assurance/blob/main/reports/assurance-summary.md)
+from the 2026-04-25T23:06Z run:
 
 ```
 Phase 2a status:
   Real ZK-bound adapt evidence is present through the adapt fixture and
   verifier-adapt Rust tests.
-  Adapt verifier tests:        6 passed, 0 failed.
-  Adapt public inputs:         23.
-  Adapt ceremony:              throwaway-devnet-only.
+  Adapt verifier tests:                  6 passed, 0 failed
+  Adapt public inputs:                   23
+  Adapt ceremony:                        throwaway-devnet-only
+  Adapt proof SHA-256:                   142c6007ee916a67d0c5f3cec6523907f121490b57967e3aa0d1d147fec7ae1c
 
 Scale:
-  Property runs:               128 wallet determinism, 128 note round-trip.
-  Stateful sequences:          104.
-  Root pressure appends:       512.
-  Nullifier shard samples:     4096; max bucket 4.
+  Wallet determinism runs:               128
+  Wallet separation runs:                128
+  Note round-trip runs:                  128
+  Merkle property sequences:              32
+  Stateful sequences (10/50/150 actions):  64 / 32 / 8 = 104
+  Root pressure appends:                 512
+  Nullifier shard samples:               4096; max bucket 4
 
 Fuzz and adversarial:
-  Proof mutation rejects:      128/128.
-  Public-input mutation rejects: 128/128.
-  Non-rejecting proof mutations captured: 0.
-  Adapt binding cases tracked: 6.
+  Fr canonical accepts:                   43 / 256
+  Fr canonical rejects:                  213 / 256
+  Proof mutation rejects:                128 / 128
+  Public-input mutation rejects:         128 / 128
+  Malformed verifier-input rejects:        8 / 8
+  Note-store malformed rejects:           32 / 32
+  Adapt binding mutation cases tracked:    6
+  Non-rejecting proof mutations:           0
 
-On-chain evidence:
-  Main-repo on-chain tests:    12 passed, 0 failed, 3 deferred.
-  Full adapt_execute LiteSVM coverage: true.
-  Adapt verifier configured in main on-chain harness: true.
+On-chain LiteSVM (assurance-side probe):
+  shield_success CU:                     233,495
+  unshield_success CU:                   223,413
+  adapt_execute_full_path CU:            313,725
+  Main-repo on-chain tests:              12 passed, 0 failed, 3 deferred
+  Full adapt_execute LiteSVM coverage:   present
+  Adapt verifier configured:             yes
 
-Benchmarks:
-  Transact proof generation avg ms: 733.357.
-  Verifier CLI avg ms:              116.791.
-  Adapt fixture load avg ms:        0.093.
+Benchmarks (Apple M4 Pro, Node v24.4.0):
+  Transact proof generation avg ms:      733.357
+  Verifier CLI avg ms:                   116.791
+  Wallet build avg ms:                   0.740
+  Merkle append avg ms:                  3.797
+  Note encrypt + decrypt avg ms:         3.064
+  Note scan + decrypt avg ms:            3.086
+  Adapt fixture load avg ms:             0.093
 ```
 
-Numbers come from a full machine-emitted run, not hand-collected.
+Numbers come from a full machine-emitted run; sources cited in
+`artifacts/*.json`.
 
 ## Mainnet readiness gate
 
@@ -179,23 +217,31 @@ configuration with full coverage. The main-repo fix is editorial.
 For the system-under-test team:
 
 1. Land a change in `b402-solana` (circuit, program, SDK, etc.).
-2. The assurance repo's CI re-runs `pnpm run all` against the new
-   path-dependency.
+2. The assurance repo re-runs `pnpm assure` against the new
+   path-dependency. The single entrypoint
+   ([`src/index.ts`](https://github.com/b402-ai/b402-solana-assurance/blob/main/src/index.ts))
+   builds Rust verifier helpers, regenerates `vectors/`, exercises the
+   property/invariant/fuzz/bench/onchain harnesses, and writes
+   `artifacts/` + `reports/`.
 3. New findings get filed; existing findings get re-categorized
    (`[gap]` → `[covered]` once fixed; `[covered]` → `[gap]` if a
    regression).
 4. Reports are reviewed at PR time; ad-hoc snapshots are taken before
    each release.
 
+For audit-grade fuzz depth, `pnpm assure:audit-fuzz` runs the same
+entrypoint with `B402_AUDIT_FUZZ=1` set, raising fuzz iteration counts
+beyond the gate-profile defaults.
+
 For external auditors:
 
 1. The assurance repo's `vectors/` + `reports/` + `artifacts/` are
    the canonical handoff package.
-2. Reproducible by `pnpm run all` against a specific
+2. Reproducible by `pnpm assure` against a specific
    `b402-solana` commit hash.
 3. PRD-A06 specs the additional FV-readiness artifacts (canonical
    semantics, reduction proofs, adversary models) the audit team
-   will ingest.
+   will ingest. Generated bundle lands under `reports/fv/`.
 
 ## Continue reading
 

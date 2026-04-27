@@ -1,17 +1,19 @@
 ---
 title: Orca Adapter
-description: "Private LP on Orca Whirlpools (designed-for, blocked on PRD-11 vector token bindings)."
+description: "Private LP on Orca Whirlpools (scaffold only; blocked on PRD-04 dual-delta amendment + PRD-11 vector token bindings)."
 ---
 
 <Warning>
-  **Designed, not shipped.** The `b402-orca-adapter` program is
-  scaffolded but cannot ship until the v2 vector-binding ABI lands.
-  Orca Whirlpool's `decrease_liquidity` and `collect_fees` instructions
-  return **two output mints simultaneously**, which the v1 single-mint
-  scalar binding cannot express.
+  **Scaffold only.** The `b402-orca-adapter` program builds but cannot
+  ship until the v2 ABI lands. Orca Whirlpool's `decrease_liquidity` and
+  `collect_fees` instructions each emit **two output mints
+  simultaneously** — the current single-mint delta-invariant in
+  `adapt_execute` doesn't fit. The v2 path is two pieces:
+  the PRD-04 dual-delta amendment (pool-side handler change), then
+  PRD-11 vector bindings (circuit + verifier change).
 </Warning>
 
-## Why Orca needs PRD-11
+## Why Orca needs PRD-04 dual-delta + PRD-11
 
 The v1 adapt circuit binds a **single** `expectedOutMint` and
 `expectedOutValue`. This works for swaps (one in, one out), Kamino

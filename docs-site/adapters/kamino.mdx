@@ -18,14 +18,16 @@ Spec: [`PRD-09`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-
 
 | Op | Status |
 |---|---|
-| `Deposit` | **Verified GREEN** against cloned klend mainnet bytecode 2026-04-26 |
-| `Withdraw` | Coded with v1 ix set + refresh sequence; mainnet-fork verification pending |
-| `Borrow` | Same |
-| `Repay` | Same |
+| `Deposit` | **Verified GREEN** against cloned klend mainnet bytecode 2026-04-26 (single tx, 7-CPI sequence: refresh_reserve + refresh_obligation + lazy `init_user_metadata` / `init_obligation` / `init_obligation_farms_for_reserve` if needed + `deposit_reserve_liquidity_and_obligation_collateral_v2` + sweep). End-to-end alice -1 USDC, obligation +3344 B observed. |
+| `Withdraw` | Coded with v1 ix layout (`withdraw_obligation_collateral_and_redeem_reserve_collateral`); mainnet-fork verification pending |
+| `Borrow` | Coded with v1 `borrow_obligation_liquidity`; mainnet-fork pending |
+| `Repay` | Coded with v1 `repay_obligation_liquidity`; mainnet-fork pending |
 
-The deposit gate is what proves the wiring works end-to-end. See
-[`examples/kamino-fork-deposit.ts`](https://github.com/b402-ai/b402-solana/blob/main/examples/kamino-fork-deposit.ts)
-for the verified flow.
+10 Kamino instruction discriminators are constant-defined in
+[`programs/b402-kamino-adapter/src/lib.rs`](https://github.com/b402-ai/b402-solana/blob/main/programs/b402-kamino-adapter/src/lib.rs)
+and matched against the GREEN run from
+[`examples/kamino-adapter-fork-deposit.ts`](https://github.com/b402-ai/b402-solana/blob/main/examples/kamino-adapter-fork-deposit.ts)
+(klend-sdk@7.3.22).
 
 ## Action variants
 

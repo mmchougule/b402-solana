@@ -39,44 +39,55 @@ shielded action. Optimization paths:
 
 ## On-chain compute units
 
-From [`reports/onchain-summary.md`](https://github.com/b402-ai/b402-solana-assurance/blob/main/reports/onchain-summary.md):
+From [`artifacts/onchain-compute-units.json`](https://github.com/b402-ai/b402-solana-assurance/blob/main/artifacts/onchain-compute-units.json):
 
-```
-Shield success CU:              233,495
-Unshield success CU:            223,413
-Full adapt_execute CU:          313,725  (LiteSVM, mock adapter)
-```
+| Scenario | LiteSVM CU | Devnet pin |
+|---|---|---|
+| `shield_success` | 233,495 | 239,224 |
+| `unshield_success` | 223,413 | 350,000 |
+| `adapt_execute_full_path` (real Groth16 verifier-adapt CPI, mock adapter) | 313,725 | — |
 
-These are litesvm measurements — same `.so` bytecode that ships, but
-in-process Solana VM. Compare to README's mainnet-fork numbers:
+`devnet pin` is the value that the LiteSVM harness asserts the devnet
+reading does not exceed; sourced from the README's observed-cost table.
 
-```
-Shield (devnet):                239,224 CU       1,157 B
-Unshield (devnet):              ~350,000 CU      ~1,150 B
-Adapt swap (mock, devnet):      ~600,000 CU      1,214 B
-Adapt swap (Jupiter SolFi V2):  ~660,000 CU      1,231 B
-```
+Mainnet-fork measurements from the live `swap-e2e-jupiter` run on the
+same `b402-pool` bytecode:
 
-The litesvm numbers are slightly lower than devnet because the litesvm
-test path doesn't include the verifier CPI overhead (the assurance
-harness has a "full adapt_execute" probe that does include it; that's
-the 313k figure).
+| Path | Tx size | CU |
+|---|---|---|
+| Shield (devnet) | 1,157 B | 239,224 |
+| Unshield (devnet) | ~1,150 B | ~350,000 |
+| Adapt swap, mock adapter | 1,214 B | ~600,000 |
+| Adapt swap, real Jupiter v6 SolFi V2 | 1,231 B | ~660,000 |
+
+The LiteSVM `adapt_execute_full_path` (313,725 CU) is the pool's
+own work plus one adapter CPI minus the actual downstream
+Jupiter+AMM cost. The devnet number for the same shape (mock adapter,
+real Groth16) is ~600k CU; the delta is the pool's pinned CU-budget
+request and the test-mock invariant overhead. The Jupiter mainnet-fork
+line at ~660k adds the real aggregator + SolFi V2 pool CPIs.
+
+Pool-side overhead is ~325k CU (313,725 LiteSVM probe + minor
+budget-request difference). This leaves ~1.07M CU of headroom under
+Solana's 1.4M cap — the remaining budget is what an adapter spends on
+the downstream protocol.
 
 ## CU budget per instruction
 
 From [`PRD-03 §8`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-03-program-spec.md#8-compute-budget-reservation),
 SDK helpers set these CU limits:
 
-| Instruction | Requested CU | Observed CU |
+| Instruction | Requested CU (PRD-03 §8) | Observed CU |
 |---|---|---|
 | init_pool | 300k | — |
 | add_token_config | 100k | — |
-| shield | 350k | 233k |
+| shield | 350k | 233,495 (LiteSVM), 239,224 (devnet) |
 | transact | 400k | — |
-| unshield | 400k | 223k |
-| adapt_execute (Jupiter 2-hop) | 900k | 660k (real Jupiter) |
-| adapt_execute (Kamino) | 700k | — |
-| adapt_execute (Drift) | 1,100k | — |
+| unshield | 400k | 223,413 (LiteSVM), ~350k (devnet) |
+| adapt_execute (mock adapter, full path) | 900k | 313,725 (LiteSVM), ~600k (devnet) |
+| adapt_execute (Jupiter 2-hop, mainnet-fork) | 900k | ~660k (real Jupiter SolFi V2) |
+| adapt_execute (Kamino) | 700k | — (mainnet-fork deposit verified, CU not pinned in artifacts) |
+| adapt_execute (Drift) | 1,100k | — (deferred) |
 | admin ops | 200k | — |
 
 Headroom is on purpose — leaving ~30% slack accounts for protocol

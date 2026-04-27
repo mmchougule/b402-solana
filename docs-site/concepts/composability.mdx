@@ -4,9 +4,10 @@ description: "adapt_execute, the adapter ABI, and the post-CPI delta invariant."
 ---
 
 `adapt_execute` is the b402 primitive for calling external DeFi programs with
-shielded funds. It is the Solana counterpart to Railgun's `RelayAdapt`
-contract on EVM. There is no `delegatecall` on Solana, so the design is
-different in the runtime details — but the safety invariant is identical:
+shielded funds. The construction is independent — Anchor program with CPI to
+a registered adapter — but the high-level safety invariant matches every
+delta-checking privacy-pool composability layer (Railgun's `RelayAdapt`,
+Aztec's bridge contracts):
 **the pool never trusts the downstream program with more than a proof-bound
 input, and must receive at least a proof-bound output.**
 

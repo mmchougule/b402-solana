@@ -138,9 +138,10 @@ Lifecycle:
 
 | Adapter | Status | Source |
 |---|---|---|
-| `b402_adrena_adapter` | Scaffold per [`PRD-16`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-16-adrena-adapter.md). PRD specifies `OpenPosition`, `IncreasePosition`, `DecreasePosition`, `ClosePosition`. **Designed-for, not yet shipped.** | [`programs/b402-adrena-adapter/`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-adrena-adapter) |
-| `b402_orca_adapter` | Scaffold. Multi-output (DecreaseLiquidity returns 2 mints) requires PRD-11 vector bindings. **v2 ABI dependent.** | [`programs/b402-orca-adapter/`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-orca-adapter) |
-| `b402_jupiter_perps_adapter` | Scaffold. Async settlement requires PRD-14 claim notes. **v2 + claim-note dependent.** | [`programs/b402-jupiter-perps-adapter/`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-jupiter-perps-adapter) |
+| `b402_adrena_adapter` | Scaffold per [`PRD-16`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-16-adrena-adapter.md). 8 instruction discriminators verified against `AdrenaFoundation/adrena-abi` master IDL. `execute()` returns `NotYetImplemented`. Generated program ID `9aUp3UKHk4JuHsLJm33Why7RhuW6CQCyQh6UEJeynKKZ`. | [`programs/b402-adrena-adapter/`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-adrena-adapter) |
+| `b402_orca_adapter` | Scaffold. Multi-output (`DecreaseLiquidity` and `CollectFees` each emit 2 mints) requires PRD-04 dual-delta amendment + PRD-11 vector bindings. **v2 ABI dependent.** | [`programs/b402-orca-adapter/`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-orca-adapter) |
+| `b402_jupiter_perps_adapter` | Scaffold. **Deferred** — Jupiter Perps uses an async request-queue model that doesn't fit the v1 synchronous adapter ABI. PRD-14 (two-phase claim notes) is the path forward; PRD-14 itself is deferred until the first async adapter actually lands. | [`programs/b402-jupiter-perps-adapter/`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-jupiter-perps-adapter) |
+| `b402_drift_adapter` | Spec only ([PRD-10](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-10-drift-adapter.md)). **Deferred** pending Drift's reboot post-$285M April 1 2026 incident. | n/a |
 
 ## v2 extensions (designed, not shipped)
 

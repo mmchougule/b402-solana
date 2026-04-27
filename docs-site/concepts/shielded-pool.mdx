@@ -1,6 +1,6 @@
 ---
 title: Shielded Pool
-description: "UTXO commitments, nullifiers, and viewing keys — the Railgun-style note model on Solana."
+description: "UTXO commitments, nullifiers, and viewing keys — the Groth16-privacy-pool note model implemented on Solana."
 ---
 
 A b402 shielded pool is a single global commitment tree plus a nullifier set.
@@ -77,8 +77,8 @@ byte-oriented cipher. ECDH over Curve25519 derives a shared secret cheaply,
 in standard libraries, without paying the in-circuit cost of EC ops.
 
 This separation lets a user disclose a viewing key (auditor: "show me your
-deposits") without disclosing spend authority. Parity with Railgun, parity
-with privacy-pools.
+deposits") without disclosing spend authority. The same key split is used
+across Railgun, Aztec, and other Groth16-privacy-pool designs.
 
 ## Note encryption (delivery)
 

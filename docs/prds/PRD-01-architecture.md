@@ -18,7 +18,7 @@ All **hard** decisions are the ones auditors will scrutinize. Change them only w
 
 ## 1. Executive summary
 
-b402-solana is a shielded asset pool + composable private DeFi execution layer on Solana mainnet. It mirrors the design of the b402 Railgun fork deployed on Base, Arbitrum, and BSC, ported to Solana's account model and CPI semantics.
+b402-solana is a shielded asset pool + composable private DeFi execution layer on Solana mainnet. It uses the same construction class as Railgun, Aztec, and Tornado Cash — Groth16 over BN254, Poseidon hashing, UTXO commitments with nullifiers, viewing-key separation — implemented natively against Solana's account model and CPI semantics. The b402 Railgun fork (Base, Arb, BSC) is a sibling EVM deployment, not the upstream of this code; nothing here is a port.
 
 **What users can do:**
 1. **Shield** SOL or supported SPL tokens into the pool, receiving a note that hides amount and identity.
@@ -519,6 +519,7 @@ No ERC-4337 equivalent is needed. The relayer is a regular Solana keypair that b
 | Version | Date | Author | Changes |
 |---|---|---|---|
 | 0.1 | 2026-04-23 | b402 core | Initial draft |
+| 0.2 | 2026-04-24 | b402 core | §1 reframed "mirrors / ported" Railgun language to construction-class language. No semantic change to architecture decisions. |
 
 ---
 

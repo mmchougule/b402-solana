@@ -4,9 +4,12 @@ description: "Private DeFi on Solana — shielded pool + composable execution pa
 ---
 
 `b402-solana` is a shielded asset pool plus a composable private DeFi execution
-layer on Solana. It mirrors the [b402 Railgun fork](https://github.com/b402-ai)
-deployed on Base, Arbitrum, and BSC, ported to Solana's account-centric runtime
-and CPI semantics.
+layer on Solana. It uses the same construction class that Railgun, Aztec, and
+Tornado Cash use — Groth16 over BN254, Poseidon hashing, UTXO commitments with
+nullifiers, viewing-key separation — implemented from primitives in Circom 2 +
+Anchor for the SVM. It is not a port of any of those projects; the EVM
+b402 Railgun fork (Base, Arbitrum, BSC) is a sibling deployment, not the
+upstream of this one.
 
 This is the engineering documentation. For the design rationale that pre-dates
 the code, read `docs/prds/PRD-01..PRD-23` in numeric order.
@@ -42,6 +45,10 @@ the code, read `docs/prds/PRD-01..PRD-23` in numeric order.
 | Multi-party trusted-setup ceremony | Not started |
 | External audits | Not started |
 
+For concrete observable proof points (R1CS counts, on-chain CU
+measurements, parity test counts, fuzz reject rates, mainnet-fork
+verifications), see [Reference → Metrics](/reference/metrics).
+
 ## Threat model in one paragraph
 
 b402-solana hides three things: the **amount** held in any single shielded
@@ -58,8 +65,7 @@ This protocol is not, and is not trying to be:
 - A consumer wallet. b402-solana is SDK-first; wallet UX comes from
   `@b402ai/kohaku` plugins.
 - A KYT / Chainalysis integration layer. Compliance is user-sovereign via
-  optional viewing-key disclosure, per Railgun's stance. There is no
-  protocol-level screening.
+  optional viewing-key disclosure. There is no protocol-level screening.
 - An MPC privacy layer. Trust model is ZK over BN254 with a multi-party
   trusted setup. Arcium / Umbra / Token-2022 Confidential Transfer are
   complementary, not competing — and not integrated in v1.
@@ -73,7 +79,8 @@ without migrating user funds.
 
 - Proof system: **Groth16** over BN254
 - Hash: **Poseidon** with `x^5` S-box (`iden3/circomlib v2.4.0`)
-- Note model: **Railgun-style UTXO** with viewing-key separation
+- Note model: **UTXO commitments + nullifiers** with viewing-key separation
+  (the standard Groth16-privacy-pool construction)
 - Merkle: incremental, **depth 26**, Poseidon node hash
 - Verifier: **`Lightprotocol/groth16-solana`** (audited, widely deployed)
 - Program framework: **Anchor 0.30+**
