@@ -25,6 +25,30 @@ authors = ["b402 core <contact@b402.ai>"]
 license = "UNLICENSED"
 repository = "https://github.com/b402-ai/b402-solana"
 
+# Allow Anchor + Solana SBF-only cfg flags when clippy runs on the host.
+# These are defined in the SBF target only; rustc's check-cfg lints them
+# as unknown when we run `cargo clippy` from the host. Adding them to the
+# known list quiets the noise without disabling the lint itself.
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+  'cfg(feature, values("anchor-debug"))',
+  'cfg(target_os, values("solana"))',
+  'cfg(feature, values("custom-panic"))',
+  'cfg(feature, values("custom-heap"))',
+] }
+# Anchor's `#[program]` macro emits a glob `pub use` that overlaps with our
+# explicit re-exports in instructions/mod.rs. Explicit wins (verified — no
+# behavior change), the warning is just informational.
+ambiguous_glob_reexports = "allow"
+
+# Cosmetic / Anchor-emitted lints we deliberately don't fail CI on.
+# Touching program code with auto-fixes pre-mainnet is the wrong tradeoff;
+# revisit post-audit.
+[workspace.lints.clippy]
+doc_overindented_list_items = "allow"
+cloned_ref_to_slice_refs = "allow"
+
+
 [workspace.dependencies]
 # Pinned to stay below edition2024-requiring releases until solana's bundled rustc bumps.
 indexmap = "=2.9.0"

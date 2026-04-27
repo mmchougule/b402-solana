@@ -84,7 +84,7 @@ fn payload_size_in_typical_range() {
     // ~4 hops * ~64 B route entries ≈ 268 B.
     let typical: Vec<u8> = {
         let mut v = JUPITER_ROUTE_DISCRIMINATOR.to_vec();
-        v.extend(std::iter::repeat(0xAB).take(260));
+        v.extend(std::iter::repeat_n(0xAB, 260));
         v
     };
     assert!(

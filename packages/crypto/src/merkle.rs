@@ -132,7 +132,7 @@ impl MerkleTree {
             };
 
             // Compute next level by pairing.
-            let mut next = Vec::with_capacity((level_nodes.len() + 1) / 2);
+            let mut next = Vec::with_capacity(level_nodes.len().div_ceil(2));
             for i in (0..level_nodes.len()).step_by(2) {
                 let l = level_nodes[i];
                 let r = if i + 1 < level_nodes.len() {

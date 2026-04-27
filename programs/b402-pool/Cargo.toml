@@ -25,3 +25,6 @@ anchor-spl.workspace = true
 thiserror.workspace = true
 bytemuck.workspace = true
 indexmap = { version = "=2.9.0" }
+
+[lints]
+workspace = true

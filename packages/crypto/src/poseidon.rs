@@ -31,7 +31,7 @@ impl From<PoseidonError> for HashError {
 /// Used internally; most call sites want the domain-tagged variants below.
 fn poseidon_raw(inputs: &[Fr]) -> Result<Fr, HashError> {
     let arity = inputs.len();
-    if !matches!(arity, 1 | 2 | 3 | 4 | 5) {
+    if !matches!(arity, 1..=5) {
         return Err(HashError::UnsupportedArity(arity));
     }
     let mut hasher = Poseidon::<ArkFr>::new_circom(arity)?;

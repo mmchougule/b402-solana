@@ -15,7 +15,6 @@
 use std::env;
 use std::process::exit;
 
-use ark_ff::PrimeField;
 
 use b402_crypto::{
     domain::DomainTag,
