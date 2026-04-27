@@ -303,7 +303,14 @@ async function addTokenConfig(connection: Connection, admin: Keypair, mint: Publ
   await sendAndConfirmTransaction(connection, new Transaction().add(cu, ix), [admin]);
 }
 
-main().catch((e) => {
-  console.error('\n❌ e2e failed:', e);
-  process.exit(1);
-});
+main().then(
+  // @solana/web3.js holds an open WebSocket subscription to the RPC slot
+  // updates after sendAndConfirmTransaction; nothing else cleans it up,
+  // so the event loop stays awake and the process hangs. Force-exit on
+  // success path. Failure path already exits via the catch.
+  () => process.exit(0),
+  (e) => {
+    console.error('\n❌ e2e failed:', e);
+    process.exit(1);
+  },
+);
