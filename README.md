@@ -7,18 +7,18 @@ single-tx execution, composable with any Solana protocol via a registered adapte
 Same construction class as Railgun (Groth16 + Poseidon + UTXO commitments
 + nullifiers + viewing keys), compiled native to Solana's SVM as Anchor programs.
 
-## Live, verifiable
+## What to run (and where the detail lives)
 
-**Private swap on devnet, three signatures, one v0 transaction:**
+**Devnet:** The same private swap path (shield → Groth16 `adapt` proof → adapter CPI →
+unshield) is exercised by the [Quickstart](#quickstart) against the [devnet program IDs](#devnet-deployment).
+For instruction layout, accounts, logs, and size — not explorer screenshots — see
+[`docs/TX-WALKTHROUGH.md`](docs/TX-WALKTHROUGH.md).
 
-- Shield 100 USDC: [`59ahVAQN…Qyk3u`](https://explorer.solana.com/tx/59ahVAQNKGce4d5QRcfZuxYcGsPuXXrgbGqSTQpi4ByCuAtJtPyipypb8jLJwiqQf64suYjWHz625ynPNcQyk3u?cluster=devnet)
-- Real Groth16 adapt proof, 23 public inputs, 1,214 B: [`5AVK983L…vzBf`](https://explorer.solana.com/tx/5AVK983LcxXN3851GpAiZG58cUGncRjfDYKLU1oziWyWVps8YYTnaDW2r27cYb65NUcYUSVYstPZNqq8RZMEvzBf?cluster=devnet)
-- Unshield 200 wSOL to charlie: [`e9KvuQn8…CEv6u`](https://explorer.solana.com/tx/e9KvuQn8F2iN9Gr8gzdVtKSHXjVPWyA623kUbqRAhYWhvwQP1GVsJwZfP1NCB8rGswmrVfgvxgmhVRzgRZCEv6u?cluster=devnet)
-
-**Verified end-to-end against real cloned mainnet bytecode:**
-
-- **Real Jupiter v6 private swap** on a mainnet-forked validator: 0.1 wSOL → 8.549 USDC routed through SolFi V2 — real aggregator program, real AMM state cloned from mainnet, ~660k CU, fits in 1,231 B.
-- **Real Kamino USDC reserve private deposit** through `b402_kamino_adapter`: 1 USDC deposited as collateral, obligation account grew 0 → 3344 B in a single tx with seven nested CPIs (init_user_metadata + init_obligation + init_obligation_farms + refresh_reserve + refresh_obligation + deposit_v2 + sweep). All Kamino discriminators verified against `klend-sdk@7.3.22`.
+**Mainnet-fork (local validator):** Integration scripts load cloned mainnet program
+bytecode and state — no real funds. In [Quickstart](#quickstart) step 8, a real Jupiter v6
+route runs end-to-end (e.g. 0.1 wSOL → USDC via SolFi V2, ~660k CU, 1,231 B tx). Kamino
+coverage: USDC deposit through `b402_kamino_adapter` with the full CPI sequence (incl. refresh +
+deposit) against `klend-sdk@7.3.22` discriminators.
 
 ## Numbers
 
@@ -68,8 +68,8 @@ v2 ABI extension that makes this strictly true going forward.
 
 | Adapter | Status | What it enables |
 |---|---|---|
-| Jupiter v6 | live on devnet, mainnet-fork verified | private swap on any Jupiter route |
-| Kamino lend | mainnet-fork verified through `b402_kamino_adapter::execute` | private collateral, borrow, repay |
+| Jupiter v6 | devnet + mainnet-fork integration tests | private swap on any Jupiter route |
+| Kamino lend | mainnet-fork through `b402_kamino_adapter::execute` | private collateral, borrow, repay |
 | Mock | live on devnet | adapter ABI invariant tests |
 | Adrena perps | scaffold; discriminators verified vs Adrena IDL | private leveraged trading (impl in progress) |
 | Orca LP | scaffold | private whirlpool positions |
@@ -276,4 +276,5 @@ for setup.
 
 ## License
 
-Apache 2.0 — see `LICENSE`.
+[Apache-2.0](LICENSE). Use [SECURITY.md](SECURITY.md) for responsible disclosure and
+[CONTRIBUTING.md](CONTRIBUTING.md) for pull requests.
