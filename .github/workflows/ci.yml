@@ -22,6 +22,8 @@ jobs:
           node-version: 20
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # shared exports compiled .d.ts; prover/sdk depend on those at typecheck.
+      - run: pnpm --filter='@b402ai/solana-shared' build
       - run: pnpm -r --if-present typecheck
 
   sdk-tests:
