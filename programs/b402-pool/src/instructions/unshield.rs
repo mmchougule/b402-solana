@@ -184,7 +184,7 @@ pub fn handler(ctx: Context<Unshield>, args: UnshieldArgs) -> Result<()> {
     );
 
     // Public inputs on the heap to conserve BPF stack.
-    let public_inputs: Vec<[u8; 32]> = build_public_inputs_for_unshield(&pi);
+    let public_inputs: Vec<[u8; 32]> = build_public_inputs_for_unshield(pi);
 
     let mut proof_bytes = [0u8; 256];
     proof_bytes.copy_from_slice(&args.proof);

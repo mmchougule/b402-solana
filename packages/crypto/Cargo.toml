@@ -19,3 +19,6 @@ hex = "0.4"
 [[bin]]
 name = "b402-parity"
 path = "src/bin/b402-parity.rs"
+
+[lints]
+workspace = true

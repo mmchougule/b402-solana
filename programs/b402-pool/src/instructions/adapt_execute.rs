@@ -252,7 +252,7 @@ pub fn handler<'info>(
             .ok_or(error!(PoolError::AdapterNotRegistered))?;
         let allowed = &info.allowed_instructions[..info.allowed_instruction_count as usize];
         require!(
-            allowed.iter().any(|d| *d == adapter_ix_disc),
+            allowed.contains(&adapter_ix_disc),
             PoolError::AdapterNotRegistered
         );
 

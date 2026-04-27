@@ -1,5 +1,5 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{Token, TokenAccount};
+use anchor_spl::token::Token;
 
 use crate::constants::{
     SEED_CONFIG, SEED_NULL, SEED_TREE, TAG_COMMIT, TAG_FEE_BIND, TAG_MK_NODE, TAG_NULLIFIER,
@@ -122,7 +122,7 @@ pub fn handler(ctx: Context<Transact>, args: TransactArgs) -> Result<()> {
     }
 
     // Verify proof. Build public inputs on the heap to conserve BPF stack.
-    let public_inputs: Vec<[u8; 32]> = build_public_inputs(&pi);
+    let public_inputs: Vec<[u8; 32]> = build_public_inputs(pi);
 
     let mut proof_bytes = [0u8; 256];
     proof_bytes.copy_from_slice(&args.proof);
@@ -134,7 +134,7 @@ pub fn handler(ctx: Context<Transact>, args: TransactArgs) -> Result<()> {
 
     // Insert nullifiers via AccountLoader.
     let clock = Clock::get()?;
-    if (args.in_dummy_mask >> 0) & 1 == 0 {
+    if args.in_dummy_mask & 1 == 0 {
         let mut shard = load_or_init_shard(
             &ctx.accounts.nullifier_shard_0,
             args.nullifier_shard_prefix[0],

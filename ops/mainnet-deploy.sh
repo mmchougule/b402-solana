@@ -27,6 +27,7 @@ PROGRAMS=(
   "b402_verifier_transact:Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK"
   "b402_verifier_adapt:3Y2tyhNSaUiW5AcZcmFGRyTMdnroxHxc5GqFQPcMTZae"
   "b402_jupiter_adapter:3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7"
+  "b402_kamino_adapter:2enwFgcGKJDqruHpCtvmhtxe3DYcV3k72VTvoGcdt2rX"
   "b402_pool:42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y"
 )
 

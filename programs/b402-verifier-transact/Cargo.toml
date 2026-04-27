@@ -35,3 +35,6 @@ hex = "0.4"
 name = "b402-verify-cli"
 path = "src/bin/b402-verify-cli.rs"
 required-features = ["host-bins"]
+
+[lints]
+workspace = true

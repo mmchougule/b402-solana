@@ -19,3 +19,6 @@ default = []
 anchor-lang.workspace = true
 anchor-spl.workspace = true
 indexmap = { version = "=2.9.0" }
+
+[lints]
+workspace = true

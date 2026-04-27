@@ -146,7 +146,7 @@ pub fn handler(ctx: Context<Shield>, args: ShieldArgs) -> Result<()> {
     }
 
     // Public inputs on the heap to conserve BPF stack.
-    let public_inputs: Vec<[u8; 32]> = build_public_inputs_for_shield(&pi);
+    let public_inputs: Vec<[u8; 32]> = build_public_inputs_for_shield(pi);
 
     // Verify proof.
     let mut proof_bytes = [0u8; 256];
