@@ -16,26 +16,12 @@ solana airdrop 1 --url devnet                       # if you don't have devnet S
 RPC_URL=https://api.devnet.solana.com pnpm --filter=@b402ai/solana-examples e2e
 ```
 
-You'll see two real signatures land on Solana devnet:
+Shield 100, unshield 100 to a fresh recipient. Sender and recipient share no
+on-chain edge.
 
-1. **Shield** — 100 tokens of a fresh test mint move from your wallet into the
-   shielded pool vault. Your wallet signs; the commitment is public, the note
-   contents are not.
-2. **Unshield** — 100 tokens move from the shielded pool out to a recipient
-   address you've never used before. The unshield is signed by a relayer key
-   (= your CLI wallet on devnet); no on-chain field connects it back to the
-   shield.
-
-Open both signatures on [explorer.solana.com](https://explorer.solana.com/?cluster=devnet).
-Solana sees both transactions. The link between the sender and the recipient —
-the thing a wallet-watching bot would scrape to copy your strategy — isn't on
-chain. That's the privacy claim, against the deployed [devnet program IDs](#devnet-deployment),
-proven by two signatures any reader can fetch.
-
-For private *swap* (`shield → adapt CPI → unshield`, mock adapter on devnet,
-real Jupiter / Kamino on a mainnet-forked validator), see [Quickstart](#quickstart)
-steps 7 and 8. For instruction layout and account ordering, see
-[`docs/TX-WALKTHROUGH.md`](docs/TX-WALKTHROUGH.md).
+Private swap (`shield → adapt CPI → unshield`): [Quickstart](#quickstart) steps
+7 and 8 (mock adapter on devnet; Jupiter and Kamino on a mainnet-forked
+validator). Instruction layout: [`docs/TX-WALKTHROUGH.md`](docs/TX-WALKTHROUGH.md).
 
 ## Numbers
 
@@ -44,11 +30,11 @@ steps 7 and 8. For instruction layout and account ordering, see
 | Shield | 1,157 B | 239k | $0.001 |
 | Unshield | ~1,150 B | ~350k | $0.001 |
 | Private swap (mock adapter) | 1,214 B | ~600k | $0.001 |
-| Private swap (real Jupiter SolFi V2 mainnet-fork) | 1,231 B | ~660k | $0.001 |
+| Private swap (Jupiter SolFi V2 mainnet-fork) | 1,231 B | ~660k | $0.001 |
 
 Single-instruction Groth16 verification under Solana's 1.4M CU cap. No multi-tx
 splits, no off-chain coordinator. ~325k CU consumed by the pool itself, ~1.07M
-CU of headroom for real adapter work.
+CU of headroom for adapter work.
 
 ## Architecture
 
@@ -71,8 +57,8 @@ CU of headroom for real adapter work.
                          └─────────┬────────┘
                                    │
                            ┌───────▼────────┐
-                           │ Real Solana    │
-                           │ DeFi protocol  │
+                           │ Solana DeFi    │
+                           │ (Jupiter, …)   │
                            └────────────────┘
 ```
 
@@ -206,7 +192,7 @@ cd examples && pnpm e2e                   # terminal 2 — runs shield → unshi
 # 6. Same e2e against devnet (uses CLI wallet + deployed programs)
 RPC_URL=https://api.devnet.solana.com pnpm --filter=@b402ai/solana-examples e2e
 
-# 7. Private swap on localnet (shield → real Groth16 adapt proof → mock adapter → unshield)
+# 7. Private swap on localnet (shield → adapt proof → mock adapter → unshield)
 ./ops/local-validator.sh --reset          # terminal 1
 cd examples && pnpm swap-e2e              # terminal 2
 
@@ -219,9 +205,9 @@ RPC_URL=https://api.devnet.solana.com pnpm --filter=@b402ai/solana-examples swap
 ./ops/local-validator.sh --reset          # terminal 1
 cd examples && pnpm scanner-e2e           # terminal 2
 
-# 8. Private swap on a mainnet-forked validator (shield → REAL Jupiter → unshield)
-#    Fetches a live Jupiter quote, boots validator with Jupiter + AMM state
-#    cloned from mainnet, runs the full flow. No real money, real bytecode.
+# 8. Private swap on a mainnet-forked validator (shield → Jupiter → unshield)
+#    Fetches a live Jupiter quote, boots a validator with Jupiter + AMM state
+#    cloned from mainnet, runs the flow against cloned bytecode.
 cd examples && pnpm tsx ../ops/jup-quote.ts \
   --in So11111111111111111111111111111111111111112 \
   --out EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v \
