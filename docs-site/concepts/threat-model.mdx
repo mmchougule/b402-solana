@@ -58,10 +58,9 @@ tooling. They look for "shield 1.234567 wSOL → 30 seconds → unshield
 1.234562 wSOL" patterns and infer the user from amount + timing
 correlation.
 
-This is a known limit of all pool-based privacy designs. It applies to
-Tornado, Railgun, Privacy.cash, and b402 equally. **The defense is
-high pool throughput.** At thin TVL, this attack works; at thick TVL,
-the analyst's signal-to-noise ratio degrades sharply.
+This is a fundamental limit of UTXO-mixer constructions, not a b402-specific
+weakness. **The defense is high pool throughput.** At thin TVL, this attack
+works; at thick TVL, the analyst's signal-to-noise ratio degrades sharply.
 
 Mitigations the SDK exposes:
 

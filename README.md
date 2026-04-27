@@ -7,8 +7,12 @@
 all without your wallet appearing on-chain as the executing party. Single-tx
 execution, composable with any Solana protocol via a registered adapter.
 
-Same construction class as Railgun (Groth16 + Poseidon + UTXO commitments
-+ nullifiers + viewing keys), compiled native to Solana's SVM as Anchor programs.
+Built ground-up for the SVM: Circom 2 circuits, Anchor BPF programs, Groth16
+verification through the `alt_bn128_*` syscalls, Poseidon-bound UTXO
+commitments with nullifier-set membership and viewing-key separation. The
+cryptographic primitives are off-the-shelf (deliberately — auditable against
+existing literature); the runtime, instruction surface, and adapter ABI are
+native to Solana.
 
 ## Run it on devnet (~30 seconds)
 
@@ -127,7 +131,7 @@ is the link between your wallet and your shielded actions:
 
 | Layer | What | Today |
 |---|---|---|
-| **L1: wallet ↔ action** | After shielding, your wallet doesn't appear in any subsequent shielded tx | broken cryptographically — same construction as Railgun, Tornado, Aztec |
+| **L1: wallet ↔ action** | After shielding, your wallet doesn't appear in any subsequent shielded tx | broken cryptographically — Groth16 proof binds the spend without revealing which note was spent |
 | **L2: action ↔ action** | Two shielded actions can't be trivially linked | broken at the note layer; per-user adapter PDAs land in v0.2 (helpers in `programs/b402-kamino-adapter/src/lib.rs` already, gated) |
 | **L3: pool-level clustering** | Timing + amount correlation across the pool boundary | scales with anonymity set — small pool weak, large pool strong |
 

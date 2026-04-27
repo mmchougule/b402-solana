@@ -148,10 +148,11 @@ no off-chain dependencies.
 
 ## RPC requirements
 
-For mainnet, **use a paid RPC.** Helius / Triton / Alchemy. The
-b402 EVM rule applies: free public RPC crashes Railgun-style flows
-because of subscription drops, archive request limits, and rate
-limits. From the user's memory: never free public RPC.
+For mainnet, **use a paid RPC.** Helius / Triton / Alchemy. Free public
+RPC crashes long-running shielded flows: subscription drops, archive
+request limits, and rate limits combine to break the SDK's note scanner
+and the relayer's confirmation polling. Never free public RPC for
+production.
 
 Cloud Run note from `feedback_cloudrun_ipv4.md` and
 `feedback_cloudrun_cpu_throttling.md`:

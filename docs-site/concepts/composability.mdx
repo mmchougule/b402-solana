@@ -3,13 +3,15 @@ title: Composability
 description: "adapt_execute, the adapter ABI, and the post-CPI delta invariant."
 ---
 
-`adapt_execute` is the b402 primitive for calling external DeFi programs with
-shielded funds. The construction is independent — Anchor program with CPI to
-a registered adapter — but the high-level safety invariant matches every
-delta-checking privacy-pool composability layer (Railgun's `RelayAdapt`,
-Aztec's bridge contracts):
-**the pool never trusts the downstream program with more than a proof-bound
-input, and must receive at least a proof-bound output.**
+`adapt_execute` is the b402 primitive for calling external DeFi programs
+with shielded funds. The pool transfers a proof-bound input amount into
+an adapter program, the adapter performs whatever DeFi action it wraps
+(swap, deposit, etc.) via CPI, and the pool checks the post-CPI delta
+against the proof-bound minimum output.
+
+Safety invariant:
+**the pool never trusts the downstream program with more than a
+proof-bound input, and must receive at least a proof-bound output.**
 
 ## What changes from `transact`
 
