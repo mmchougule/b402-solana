@@ -29,10 +29,17 @@ export const DomainTags = {
 
 export type DomainTagName = keyof typeof DomainTags;
 
+/**
+ * Devnet-deployed program IDs (also used as the default for mainnet alpha
+ * since the same program keypairs are used). See ops/mainnet-deploy.sh.
+ */
 export const PROGRAM_IDS = {
-  b402Pool:               'B402PooLFh4qZwRh3gkT1MkWN5z1jBTpLvZz5vE1Pool',
-  b402VerifierTransact:   'B402VrfYTrAnsCt1wBLxSxw9ZhQvA8LtQmP1VrfyTrx',
-  b402JupiterAdapter:     'B402JupTRSzWQZxNzEkR1pFsXJnKbQTp5eV1JuPAdpt',
+  b402Pool:               '42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y',
+  b402VerifierTransact:   'Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK',
+  b402VerifierAdapt:      '3Y2tyhNSaUiW5AcZcmFGRyTMdnroxHxc5GqFQPcMTZae',
+  b402JupiterAdapter:     '3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7',
+  b402KaminoAdapter:      '2enwFgcGKJDqruHpCtvmhtxe3DYcV3k72VTvoGcdt2rX',
+  b402MockAdapter:        '89kw33YDcbXfiayVNauz599LaDm51EuU8amWydpjYKgp',
 } as const;
 
 export const JUPITER_V6_PROGRAM_ID = 'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4';

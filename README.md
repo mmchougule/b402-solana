@@ -263,6 +263,9 @@ cd examples && pnpm e2e                   # terminal 2 — runs shield → unshi
 # 6. Same e2e against devnet (uses CLI wallet + deployed programs)
 RPC_URL=https://api.devnet.solana.com pnpm --filter=@b402ai/solana-examples e2e
 
+# 6b. Same flow via the high-level SDK class (B402Solana — recommended integration path)
+RPC_URL=https://api.devnet.solana.com pnpm --filter=@b402ai/solana-examples sdk-quick
+
 # 7. Private swap on localnet (shield → adapt proof → mock adapter → unshield)
 ./ops/local-validator.sh --reset          # terminal 1
 cd examples && pnpm swap-e2e              # terminal 2

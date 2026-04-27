@@ -22,7 +22,11 @@ import {
   PublicKey,
   clusterApiUrl,
 } from '@solana/web3.js';
-import { getAssociatedTokenAddress } from '@solana/spl-token';
+import {
+  getAssociatedTokenAddress,
+  createAssociatedTokenAccountInstruction,
+} from '@solana/spl-token';
+import { Transaction, sendAndConfirmTransaction } from '@solana/web3.js';
 import { PROGRAM_IDS } from '@b402ai/solana-shared';
 import { TransactProver, type ProverArtifacts } from '@b402ai/solana-prover';
 import type { SpendableNote } from '@b402ai/solana-shared';
@@ -178,6 +182,23 @@ export class B402Solana {
 
     const recipientAta =
       req.recipientAta ?? (await getAssociatedTokenAddress(mint, req.to));
+
+    // Ensure the recipient ATA exists — pool's unshield enforces it must be
+    // initialized before the transfer. Idempotent: skips if already there.
+    const ataInfo = await this.connection.getAccountInfo(recipientAta);
+    if (!ataInfo) {
+      const ix = createAssociatedTokenAccountInstruction(
+        this.relayer.publicKey,
+        recipientAta,
+        req.to,
+        mint,
+      );
+      await sendAndConfirmTransaction(
+        this.connection,
+        new Transaction().add(ix),
+        [this.relayer],
+      );
+    }
 
     const poolProgramId = new PublicKey(this.programIds.b402Pool);
     const tree = await fetchTreeState(

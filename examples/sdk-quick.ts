@@ -19,6 +19,7 @@ import { createMint, getOrCreateAssociatedTokenAccount, mintTo } from '@solana/s
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 import { B402Solana, instructionDiscriminator, poolConfigPda, tokenConfigPda, vaultPda } from '@b402ai/solana';
 import {
@@ -27,6 +28,7 @@ import {
 } from '@solana/web3.js';
 import { TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID } from '@solana/spl-token';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const RPC_URL = process.env.RPC_URL ?? 'https://api.devnet.solana.com';
 const POOL_ID = new PublicKey('42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y');
 const CIRCUITS = path.resolve(__dirname, '../circuits/build');
