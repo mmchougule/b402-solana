@@ -3,16 +3,16 @@ title: Introduction
 description: "Private DeFi on Solana — shielded pool + composable execution path for Jupiter, Kamino, and beyond."
 ---
 
-`b402-solana` is a shielded asset pool plus a composable private DeFi execution
-layer on Solana. It uses the same construction class that Railgun, Aztec, and
-Tornado Cash use — Groth16 over BN254, Poseidon hashing, UTXO commitments with
-nullifiers, viewing-key separation — implemented from primitives in Circom 2 +
-Anchor for the SVM. It is not a port of any of those projects; the EVM
-b402 Railgun fork (Base, Arbitrum, BSC) is a sibling deployment, not the
-upstream of this one.
+`b402-solana` is a shielded asset pool plus a composable private DeFi
+execution layer on Solana. Built ground-up for the SVM: Circom 2 circuits,
+Anchor BPF programs, Groth16 verification through `alt_bn128_*` syscalls,
+Poseidon-bound UTXO commitments with nullifier-set membership and viewing-key
+separation. Not a port — the cryptographic primitives are standard
+(deliberately, so they're auditable against existing literature), the
+implementation, instruction surface, and adapter ABI are native.
 
-This is the engineering documentation. For the design rationale that pre-dates
-the code, read `docs/prds/PRD-01..PRD-23` in numeric order.
+This is the engineering documentation. For the design rationale that
+pre-dates the code, read `docs/prds/PRD-01..PRD-23` in numeric order.
 
 <Warning>
   **Alpha, devnet only. Not audited.** The current trusted-setup ceremony is a

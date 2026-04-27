@@ -150,17 +150,18 @@ liability-on-mainnet.
 At thin TVL, an observer with infinite patience and timing data can do
 basic "shield-then-spend" clustering — if a 1.234567 SOL deposit lands
 and a 1.234567 SOL withdrawal happens 30 seconds later, those are
-probably the same user. This applies to **every** pool-based privacy
-design (Tornado, Railgun, Privacy.cash). It is not specific to b402.
+probably the same user. This is a fundamental property of UTXO-mixer
+designs at low throughput, not a b402-specific weakness.
 
 What helps:
 
 - **High pool throughput.** More concurrent shields and spends per
   minute. Adoption-driven, not protocol-driven.
-- **No fixed denominations.** b402 lets users shield arbitrary `u64`
+- **Variable-amount notes.** b402 lets users shield arbitrary `u64`
   amounts; an agent's 0.10 USDC and a treasury's 100k USDC sit in the
-  same anonymity set. Tornado's fixed-denomination approach is rejected
-  per [PRD-01 §8](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-01-architecture.md).
+  same anonymity set. Fixed-denomination designs are rejected per
+  [PRD-01 §8](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-01-architecture.md)
+  precisely because they make value-based clustering trivial.
 - **Aggregator routing through the pool.** The more legitimate volume
   flows through `adapt_execute` into Jupiter / Kamino / Orca, the
   noisier the L3 surface gets.

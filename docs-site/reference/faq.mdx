@@ -134,10 +134,10 @@ recipient re-derives the commitment and spends as normal.
 
 ### Can I shield arbitrary amounts?
 
-Yes. Notes hold any `u64` value. Tornado-style fixed denominations
-are explicitly rejected per
+Yes. Notes hold any `u64` value. Fixed-denomination designs are
+explicitly rejected per
 [`PRD-01 §8`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-01-architecture.md#8-anonymity-set-design)
-because they fragment the anonymity set.
+— they fragment the anonymity set and make value-based clustering trivial.
 
 ### Can I shield SPL tokens other than USDC and wSOL?
 

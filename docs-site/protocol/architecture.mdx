@@ -172,32 +172,29 @@ b402 ALT              9FPYufa1KDkrn1VgfjkR7R667hbnTA7CNtmy38QcsuNj
 
 See [Program IDs](/reference/program-ids) for the full reference.
 
-## Construction class vs EVM privacy pools
+## SVM-native design choices
 
-b402-solana uses the same Groth16-on-BN254 + Poseidon + UTXO + nullifier
-construction that Railgun, Aztec, and Tornado Cash all use. That
-construction class is shared; the implementation here is independent —
-Circom 2 sources, Anchor programs, SVM-native CPI semantics, no shared
-code with any EVM project.
+The cryptographic primitives (Groth16-on-BN254, Poseidon, UTXO commitments
+with nullifier-set membership, viewing-key separation) are off-the-shelf
+and well-studied — picked deliberately so the proofs are auditable against
+existing literature, not novel. The runtime design is where Solana
+specifics drive everything:
 
-Differences vs the canonical EVM design (using Railgun as the most
-similar reference):
-
-| | EVM Railgun | b402-solana |
-|---|---|---|
-| Composition primitive | `delegatecall` to RelayAdapt contract | `adapt_execute` instruction → CPI to per-protocol adapter program |
-| Fee payer | EntryPoint (ERC-4337) | Solana fee-payer keypair (distinct from signers; no AA layer needed) |
-| Pool state | Multiple slots in one contract | Multiple PDAs (TreeState, NullifierShard, Vault per mint) |
-| Verifier | One contract per circuit | One program per circuit, immutable (`upgrade_authority = None`) |
-| Tree append cost | Block gas | One Solana instruction; full adapt-execute observed at ~660k CU |
-| Tx-size cap | ~30k bytes (block-dependent) | 1,232 B hard cap, ALT-relieved |
-| Account budget | Unlimited | ~35 accounts per tx without ALT, ~256 with one ALT |
+| Aspect | b402-solana |
+|---|---|
+| Composition primitive | `adapt_execute` instruction → CPI to a per-protocol adapter program |
+| Fee payer | Solana fee-payer keypair (distinct from signers; no account-abstraction layer needed) |
+| Pool state | Multiple PDAs: `TreeState`, sharded `NullifierShard`, one `Vault` per mint |
+| Verifier | One program per circuit, immutable (`upgrade_authority = None`) at deploy |
+| Tree append cost | One Solana instruction; full `adapt_execute` observed at ~660k CU |
+| Tx-size cap | 1,232 B hard cap, ALT-relieved — the whole shielded swap fits in one v0 transaction |
+| Account budget | ~35 accounts per tx without ALT, ~256 with the b402 lookup table |
 
 The runtime difference matters: Solana's read-write set is explicit per
-transaction, so the b402 tree append fits in a single instruction —
-the runtime knows `TreeState` is locked for this tx and serializes
-appends without a changelog. EVM privacy pools rely on implicit slot
-locking and pay for it in gas variability.
+transaction, so the b402 tree append fits in a single instruction — the
+runtime knows `TreeState` is locked for this tx and serialises appends
+without a changelog. That's why a private swap end-to-end (shield → adapt
+CPI → unshield) lands in a single v0 transaction with one signature.
 
 ## What's intentionally stubbed (per README)
 
