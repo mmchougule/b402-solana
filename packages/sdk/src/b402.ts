@@ -1,72 +1,118 @@
 /**
  * `B402Solana` — top-level SDK class.
  *
- * Public API mirrors `@b402ai/sdk` on EVM so apps can use the same mental
- * model. See PRD-06 §1.
+ * Two-line shield + unshield against a deployed b402 pool. The class wires
+ * keypair, prover, connection, program IDs, ATA derivation, tree fetch, and
+ * merkle proof construction internally so callers don't need to assemble the
+ * primitives themselves.
  *
- * Status note: this v0 scaffold wires the architecture — wallet, note store,
- * poseidon, merkle — but the proof-generation + tx-building pipeline
- * requires the compiled circuit artifacts (`circuits/build/`) and the
- * deployed program IDs (post-devnet-deploy). The action methods throw
- * `NotImplemented` until `@b402ai/solana-prover` is wired and the devnet
- * deploy is complete.
+ * Status:
+ *   - shield, unshield: wired against deployed devnet pool
+ *   - privateSwap, privateLend, redeem: coming soon — use
+ *     `examples/swap-e2e.ts` / `examples/kamino-adapter-fork-deposit.ts` for
+ *     the underlying flows today
+ *   - NoteStore-backed auto-discovery for unshielding old notes is in
+ *     development; the current API spends the most-recently-shielded note
+ *     by default
  */
 
-import { Connection, Keypair, PublicKey, clusterApiUrl } from '@solana/web3.js';
+import {
+  Connection,
+  Keypair,
+  PublicKey,
+  clusterApiUrl,
+} from '@solana/web3.js';
+import {
+  getAssociatedTokenAddress,
+  createAssociatedTokenAccountInstruction,
+} from '@solana/spl-token';
+import { Transaction, sendAndConfirmTransaction } from '@solana/web3.js';
 import { PROGRAM_IDS } from '@b402ai/solana-shared';
-import type { ShieldIntent, UnshieldIntent, PrivateSwapIntent } from '@b402ai/solana-shared';
+import { TransactProver, type ProverArtifacts } from '@b402ai/solana-prover';
+import type { SpendableNote } from '@b402ai/solana-shared';
 
 import { buildWallet, type Wallet } from './wallet.js';
 import { NoteStore } from './note-store.js';
+import { shield, type ShieldResult } from './actions/shield.js';
+import { unshield, type UnshieldResult } from './actions/unshield.js';
+import { fetchTreeState } from './programs/tree-state.js';
+import { treeStatePda } from './programs/pda.js';
+import { buildZeroCache, proveMostRecentLeaf } from './merkle.js';
 import { B402Error, B402ErrorCode } from './errors.js';
 
 export interface B402SolanaConfig {
   cluster: 'mainnet' | 'devnet' | 'localnet';
+  /** Signer for shield/unshield txs. Used as depositor and (by default) as relayer. */
+  keypair: Keypair;
   rpcUrl?: string;
-  seed?: Uint8Array;
-  keypair?: Keypair;
-  relayerUrl?: string;
-  relayerFeeBps?: number;
+  /** Pre-built prover. If omitted, callers must pass `proverArtifacts`. */
+  prover?: TransactProver;
+  /** Paths to circuit wasm + zkey. Required if `prover` is not supplied. */
+  proverArtifacts?: ProverArtifacts;
+  /** Override relayer (= fee payer). Defaults to `keypair` for single-key dev. */
+  relayer?: Keypair;
   /** Optional program ID overrides (e.g. for localnet testing). */
   programIds?: Partial<typeof PROGRAM_IDS>;
+}
+
+export interface ShieldRequest {
+  mint: PublicKey;
+  amount: bigint;
+  /**
+   * Skip on-chain encrypted-note publication (~120 B saved). Safe for
+   * self-shields where the same wallet will later unshield. Default true.
+   */
+  omitEncryptedNotes?: boolean;
+}
+
+export interface UnshieldRequest {
+  /** Owner of the destination token account. */
+  to: PublicKey;
+  /** Override the destination ATA. Defaults to the canonical ATA of `to` for `mint`. */
+  recipientAta?: PublicKey;
+  /**
+   * Note to spend. Defaults to the most-recently-shielded note from this
+   * client instance.
+   */
+  note?: SpendableNote;
+  /** Mint of the note. Required if `note` is supplied; otherwise inferred from last shield. */
+  mint?: PublicKey;
 }
 
 export class B402Solana {
   readonly connection: Connection;
   readonly cluster: B402SolanaConfig['cluster'];
   readonly programIds: typeof PROGRAM_IDS;
-  readonly relayerUrl: string | undefined;
-  readonly relayerFeeBps: number;
+  readonly keypair: Keypair;
+  readonly relayer: Keypair;
 
   private _wallet: Wallet | null = null;
   private _notes: NoteStore | null = null;
-  private readonly _walletSeed: Uint8Array;
+  private _prover: TransactProver | null;
+  private _lastShield: { result: ShieldResult; mint: PublicKey } | null = null;
 
   constructor(config: B402SolanaConfig) {
     this.cluster = config.cluster;
     const rpcUrl = config.rpcUrl ?? defaultRpc(config.cluster);
     this.connection = new Connection(rpcUrl, 'confirmed');
     this.programIds = { ...PROGRAM_IDS, ...(config.programIds ?? {}) };
-    this.relayerUrl = config.relayerUrl;
-    this.relayerFeeBps = config.relayerFeeBps ?? 50;
+    this.keypair = config.keypair;
+    this.relayer = config.relayer ?? config.keypair;
 
-    if (config.seed) {
-      if (config.seed.length !== 32) {
-        throw new B402Error(B402ErrorCode.InvalidSeed, 'seed must be 32 bytes');
-      }
-      this._walletSeed = config.seed;
-    } else if (config.keypair) {
-      // Deterministic b402 seed from Solana keypair secret.
-      this._walletSeed = config.keypair.secretKey.slice(0, 32);
+    if (config.prover) {
+      this._prover = config.prover;
+    } else if (config.proverArtifacts) {
+      this._prover = new TransactProver(config.proverArtifacts);
     } else {
-      throw new B402Error(B402ErrorCode.InvalidSeed, 'seed or keypair required');
+      this._prover = null;
     }
   }
 
-  /** Lazy-initialize wallet + note store. */
+  /** Lazy-init wallet + note store. Idempotent. */
   async ready(): Promise<void> {
     if (!this._wallet) {
-      this._wallet = await buildWallet(this._walletSeed);
+      // Deterministic b402 wallet seeded from the Solana keypair's ed25519 secret.
+      this._wallet = await buildWallet(this.keypair.secretKey.slice(0, 32));
     }
     if (!this._notes) {
       this._notes = new NoteStore({
@@ -78,6 +124,134 @@ export class B402Solana {
     }
   }
 
+  /** Shield `amount` of `mint` from this caller's ATA into the pool. */
+  async shield(req: ShieldRequest): Promise<ShieldResult> {
+    await this.ready();
+    if (!this._prover) {
+      throw new B402Error(
+        B402ErrorCode.InvalidConfig,
+        'prover not initialised — pass `prover` or `proverArtifacts` to the constructor',
+      );
+    }
+
+    const depositorAta = await getAssociatedTokenAddress(
+      req.mint,
+      this.keypair.publicKey,
+    );
+
+    const result = await shield({
+      connection: this.connection,
+      poolProgramId: new PublicKey(this.programIds.b402Pool),
+      verifierProgramId: new PublicKey(this.programIds.b402VerifierTransact),
+      prover: this._prover,
+      wallet: this._wallet!,
+      mint: req.mint,
+      depositorAta,
+      depositor: this.keypair,
+      relayer: this.relayer,
+      amount: req.amount,
+      omitEncryptedNotes: req.omitEncryptedNotes,
+    });
+
+    this._lastShield = { result, mint: req.mint };
+    return result;
+  }
+
+  /**
+   * Unshield to a recipient. By default spends the most-recently-shielded
+   * note from this client instance. Pass `note` + `mint` explicitly to spend
+   * any other note (e.g. from a persisted client tree).
+   */
+  async unshield(req: UnshieldRequest): Promise<UnshieldResult> {
+    await this.ready();
+    if (!this._prover) {
+      throw new B402Error(
+        B402ErrorCode.InvalidConfig,
+        'prover not initialised — pass `prover` or `proverArtifacts` to the constructor',
+      );
+    }
+
+    const note = req.note ?? this._lastShield?.result.note;
+    const mint = req.mint ?? this._lastShield?.mint;
+    if (!note || !mint) {
+      throw new B402Error(
+        B402ErrorCode.InvalidConfig,
+        'no note to unshield — call shield() first or pass { note, mint } explicitly',
+      );
+    }
+
+    const recipientAta =
+      req.recipientAta ?? (await getAssociatedTokenAddress(mint, req.to));
+
+    // Ensure the recipient ATA exists — pool's unshield enforces it must be
+    // initialized before the transfer. Idempotent: skips if already there.
+    const ataInfo = await this.connection.getAccountInfo(recipientAta);
+    if (!ataInfo) {
+      const ix = createAssociatedTokenAccountInstruction(
+        this.relayer.publicKey,
+        recipientAta,
+        req.to,
+        mint,
+      );
+      await sendAndConfirmTransaction(
+        this.connection,
+        new Transaction().add(ix),
+        [this.relayer],
+      );
+    }
+
+    const poolProgramId = new PublicKey(this.programIds.b402Pool);
+    const tree = await fetchTreeState(
+      this.connection,
+      treeStatePda(poolProgramId),
+    );
+    const zeroCache = await buildZeroCache();
+    const zeroCacheLe = zeroCache.map(bigintToLe32);
+    const rootBig = leToBigEndian(tree.currentRoot);
+    const merkleProof = proveMostRecentLeaf(
+      note.commitment,
+      note.leafIndex,
+      rootBig,
+      tree.frontier,
+      zeroCacheLe,
+    );
+
+    return unshield({
+      connection: this.connection,
+      poolProgramId,
+      verifierProgramId: new PublicKey(this.programIds.b402VerifierTransact),
+      prover: this._prover,
+      wallet: this._wallet!,
+      mint,
+      note,
+      merkleProof,
+      recipientTokenAccount: recipientAta,
+      recipientOwner: req.to,
+      relayer: this.relayer,
+    });
+  }
+
+  /** Coming soon. Use `examples/swap-e2e.ts` for the underlying flow today. */
+  async privateSwap(): Promise<never> {
+    throw new B402Error(
+      B402ErrorCode.NotImplemented,
+      'privateSwap on B402Solana coming soon — use the standalone adapt_execute path in examples/swap-e2e.ts',
+    );
+  }
+
+  /** Coming soon. Use `examples/kamino-adapter-fork-deposit.ts` for the underlying flow today. */
+  async privateLend(): Promise<never> {
+    throw new B402Error(
+      B402ErrorCode.NotImplemented,
+      'privateLend on B402Solana coming soon — use examples/kamino-adapter-fork-deposit.ts',
+    );
+  }
+
+  /** Coming soon. */
+  async redeem(): Promise<never> {
+    throw new B402Error(B402ErrorCode.NotImplemented, 'redeem coming soon');
+  }
+
   get wallet(): Wallet {
     if (!this._wallet) throw new Error('call ready() first');
     return this._wallet;
@@ -86,24 +260,6 @@ export class B402Solana {
   get notes(): NoteStore {
     if (!this._notes) throw new Error('call ready() first');
     return this._notes;
-  }
-
-  async shield(_params: Omit<ShieldIntent, 'kind'>): Promise<{ signature: string; commitment: bigint }> {
-    await this.ready();
-    throw new B402Error(
-      B402ErrorCode.NotImplemented,
-      'shield requires compiled circuit + deployed pool — see PRD-06 §2',
-    );
-  }
-
-  async unshield(_params: Omit<UnshieldIntent, 'kind'>): Promise<{ signature: string }> {
-    await this.ready();
-    throw new B402Error(B402ErrorCode.NotImplemented, 'unshield pending prover+deploy');
-  }
-
-  async privateSwap(_params: Omit<PrivateSwapIntent, 'kind'>): Promise<{ signature: string }> {
-    await this.ready();
-    throw new B402Error(B402ErrorCode.NotImplemented, 'privateSwap pending adapter+deploy');
   }
 
   async status(): Promise<{
@@ -144,4 +300,20 @@ function defaultRpc(cluster: B402SolanaConfig['cluster']): string {
 
 function uint8ToHex(u: Uint8Array): string {
   return Array.from(u).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function bigintToLe32(v: bigint): Uint8Array {
+  const buf = new Uint8Array(32);
+  let x = v;
+  for (let i = 0; i < 32; i++) {
+    buf[i] = Number(x & 0xffn);
+    x >>= 8n;
+  }
+  return buf;
+}
+
+function leToBigEndian(le: Uint8Array): bigint {
+  let v = 0n;
+  for (let i = le.length - 1; i >= 0; i--) v = (v << 8n) | BigInt(le[i]);
+  return v;
 }

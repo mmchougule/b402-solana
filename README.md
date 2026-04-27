@@ -193,10 +193,33 @@ strategy-copying bots, not patient analysts — Layer 1 is sufficient.
 - Tests: primitives, Rust ↔ TS parity, witness generation, end-to-end snarkjs prove-verify (37 total)
 
 ### SDK (`packages/sdk/`)
-- `shield(params)` — build + submit a shield tx
-- `unshield(params)` — build + submit an unshield tx, supports merkle-proof override or `ClientMerkleTree`
-- `Scanner` — log-subscription + viewtag-filtered note discovery
-- `ClientMerkleTree`, `buildWallet`, `NoteStore` — client-side crypto primitives
+
+**`B402Solana`** — the recommended integration surface. Two-line shield + unshield:
+
+```ts
+import { B402Solana } from '@b402ai/solana';
+
+const b402 = new B402Solana({
+  cluster: 'devnet',
+  keypair,                                                  // your Solana signer
+  proverArtifacts: {
+    wasmPath: 'circuits/build/transact_js/transact.wasm',
+    zkeyPath: 'circuits/build/ceremony/transact_final.zkey',
+  },
+});
+
+const shieldRes   = await b402.shield({ mint: USDC, amount: 100_000_000n });
+const unshieldRes = await b402.unshield({ to: recipientPubkey });    // spends the just-shielded note
+```
+
+End-to-end runnable example: `examples/sdk-quick.ts`. Wraps wallet build,
+ATA derivation, tree fetch, and merkle-proof construction internally.
+`privateSwap` / `privateLend` / `redeem` on the same class — coming soon.
+
+Lower-level building blocks (use these for paths the class doesn't cover yet):
+- `shield(params)` / `unshield(params)` — standalone action functions
+- `AdaptProver`, `swap-e2e.ts` — full adapt-execute flow (private swap)
+- `Scanner`, `ClientMerkleTree`, `buildWallet`, `NoteStore` — client-side crypto primitives
 
 ### Prover (`packages/prover/`)
 - `TransactProver` — generates Groth16 proofs for transact (18 public inputs)
@@ -239,6 +262,9 @@ cd examples && pnpm e2e                   # terminal 2 — runs shield → unshi
 
 # 6. Same e2e against devnet (uses CLI wallet + deployed programs)
 RPC_URL=https://api.devnet.solana.com pnpm --filter=@b402ai/solana-examples e2e
+
+# 6b. Same flow via the high-level SDK class (B402Solana — recommended integration path)
+RPC_URL=https://api.devnet.solana.com pnpm --filter=@b402ai/solana-examples sdk-quick
 
 # 7. Private swap on localnet (shield → adapt proof → mock adapter → unshield)
 ./ops/local-validator.sh --reset          # terminal 1

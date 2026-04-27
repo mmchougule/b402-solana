@@ -28,4 +28,5 @@ export enum B402ErrorCode {
   InvalidRecipient         = 'INVALID_RECIPIENT',
   AmountOutOfRange         = 'AMOUNT_OUT_OF_RANGE',
   NotImplemented           = 'NOT_IMPLEMENTED',
+  InvalidConfig            = 'INVALID_CONFIG',
 }
