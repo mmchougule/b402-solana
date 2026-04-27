@@ -1,6 +1,5 @@
 node_modules/
 dist/
-build/
 target/
 .anchor/
 .DS_Store
@@ -16,11 +15,32 @@ test-ledger/
 *.so
 **/target/
 
-# Circom artifacts (keep only pinned release artifacts in artifacts/)
-circuits/**/build/
+# Circom intermediates — only the pinned prover artifacts below are tracked.
 circuits/**/*.r1cs
+circuits/**/*.r1cs.json
 circuits/**/*.sym
 circuits/**/witness.wtns
+circuits/build/**/*.cpp
+circuits/build/**/*.hpp
+circuits/build/**/*.c
+circuits/build/**/*.dat
+circuits/build/**/generate_witness.js
+circuits/build/**/witness_calculator.js
+circuits/build/test_artifacts/
+circuits/build/ceremony/*_0000.zkey
+circuits/build/ceremony/*_0001.zkey
+circuits/build/ceremony/*.zkey.tmp
+circuits/build/ceremony/*.ptau
+# adapt_v2 is on a feature branch; keep its build artifacts local-only.
+circuits/build/adapt_v2_js/
+circuits/build/ceremony/adapt_v2_*
+circuits/build/adapt_v2.r1cs.json
+circuits/build/adapt_v2.r1cs.info.txt
+# Tracked: circuits/build/{transact,adapt}_js/*.wasm
+#          circuits/build/ceremony/{transact,adapt}_final.zkey
+#          circuits/build/ceremony/*_verification_key.json
+# These are throwaway-devnet-only ceremony outputs (single contributor);
+# mainnet re-runs the ceremony per PRD-08, see docs/protocol/verifier.mdx.
 
 # snarkjs / ptau intermediate
 ops/ceremony/*.ptau
