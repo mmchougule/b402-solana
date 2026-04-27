@@ -16,7 +16,7 @@
     "circom_tester": "^0.0.20",
     "circomlib": "^2.0.5",
     "circomlibjs": "^0.1.7",
-    "fast-check": "^3.22.0",
+    "fast-check": "^4.7.0",
     "ffjavascript": "^0.3.1",
     "snarkjs": "^0.7.4",
     "typescript": "^5.6.3",
