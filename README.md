@@ -4,9 +4,9 @@
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 **Private DeFi on Solana.** Shield once, then swap, lend, LP, or trade perps
-from a private balance — without exposing your wallet as the spend authority
-on subsequent shielded actions. Composable with supported Solana protocols
-via a registered adapter; current flows fit in a single v0 transaction.
+from a private balance — without your wallet appearing on-chain as the
+executing party. Single-tx execution, composable with any Solana protocol
+via a registered adapter.
 
 Built ground-up for the SVM: Circom 2 circuits, Anchor BPF programs, Groth16
 verification through the `alt_bn128_*` syscalls, Poseidon-bound UTXO
@@ -23,8 +23,8 @@ solana airdrop 1 --url devnet                       # if you don't have devnet S
 RPC_URL=https://api.devnet.solana.com pnpm --filter=@b402ai/solana-examples e2e
 ```
 
-Shield 100, unshield 100 to a fresh recipient. Sender and recipient are not
-directly linked on-chain.
+Shield 100, unshield 100 to a fresh recipient. Sender and recipient share no
+on-chain edge.
 
 ## Run private lending (mainnet-fork, ~2 minutes)
 
@@ -87,9 +87,9 @@ b402 vaults) from 32-byte inline pubkeys to 1-byte ALT indexes. Adding a new
 DeFi protocol = extend the ALT with that protocol's frequently-touched
 accounts; the wire format doesn't grow proportionally.
 
-The architectural claim: **current flows fit within a single v0 transaction
-with a single relayer signature** once notes are in the pool. CU has the most
-headroom; tx size is the tightest constraint and ALT is what makes it
+The architectural claim: **the whole shielded-swap or shielded-deposit flow
+is one instruction in one v0 transaction with one signature.** CU has the
+most headroom; tx size is the tightest constraint and ALT is what makes it
 tractable.
 
 ## Architecture
@@ -120,9 +120,9 @@ tractable.
 ```
 
 Adding a new protocol = one Anchor crate (~200-300 LoC) implementing the
-`execute(action_payload)` ABI + a registry entry. No circuit changes, no new
-setup ceremony, no pool change. Six adapter crates in repo today; PRDs cover
-the v2 ABI extension that makes this strictly true going forward.
+`execute(action_payload)` ABI + a registry entry. No circuit recut, no
+ceremony, no pool change. Six adapter crates in repo today; PRDs cover the
+v2 ABI extension that makes this strictly true going forward.
 
 ## Adapter status
 
