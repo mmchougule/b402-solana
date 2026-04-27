@@ -11,8 +11,8 @@ importers:
   circuits:
     devDependencies:
       '@noble/hashes':
-        specifier: ^1.5.0
-        version: 1.8.0
+        specifier: ^2.2.0
+        version: 2.2.0
       '@types/node':
         specifier: ^22.9.0
         version: 22.19.17
@@ -53,8 +53,8 @@ importers:
         specifier: workspace:*
         version: link:../packages/shared
       '@noble/hashes':
-        specifier: ^1.5.0
-        version: 1.8.0
+        specifier: ^2.2.0
+        version: 2.2.0
       '@solana/spl-token':
         specifier: ^0.4.9
         version: 0.4.14(@solana/web3.js@1.98.4(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6))(bufferutil@4.1.0)(fastestsmallesttextencoderdecoder@1.0.22)(typescript@5.9.3)(utf-8-validate@6.0.6)
@@ -152,8 +152,8 @@ importers:
         specifier: ^1.6.0
         version: 1.9.7
       '@noble/hashes':
-        specifier: ^1.5.0
-        version: 1.8.0
+        specifier: ^2.2.0
+        version: 2.2.0
       '@solana/spl-token':
         specifier: ^0.4.9
         version: 0.4.14(@solana/web3.js@1.98.4(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6))(bufferutil@4.1.0)(fastestsmallesttextencoderdecoder@1.0.22)(typescript@5.9.3)(utf-8-validate@6.0.6)
@@ -627,6 +627,10 @@ packages:
   '@noble/hashes@1.8.0':
     resolution: {integrity: sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A==}
     engines: {node: ^14.21.3 || >=16}
+
+  '@noble/hashes@2.2.0':
+    resolution: {integrity: sha512-IYqDGiTXab6FniAgnSdZwgWbomxpy9FtYvLKs7wCUs2a8RkITG+DFGO1DM9cr+E3/RgADRpFjrKVaJ1z6sjtEg==}
+    engines: {node: '>= 20.19.0'}
 
   '@pinojs/redact@0.4.0':
     resolution: {integrity: sha512-k2ENnmBugE/rzQfEcdWHcCY+/FM3VLzH9cYEsbdsoqrvzAKRhUZeRNhAZvB8OitQJ1TBed3yqWtdjzS6wJKBwg==}
@@ -2257,6 +2261,8 @@ snapshots:
       '@noble/hashes': 1.8.0
 
   '@noble/hashes@1.8.0': {}
+
+  '@noble/hashes@2.2.0': {}
 
   '@pinojs/redact@0.4.0': {}
 

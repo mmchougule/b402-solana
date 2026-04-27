@@ -21,7 +21,7 @@
     "@b402ai/solana-prover": "workspace:*",
     "@solana/web3.js": "^1.95.8",
     "@solana/spl-token": "^0.4.9",
-    "@noble/hashes": "^1.5.0",
+    "@noble/hashes": "^2.2.0",
     "@noble/ciphers": "^1.0.0",
     "@noble/curves": "^1.6.0",
     "circomlibjs": "^0.1.7"
