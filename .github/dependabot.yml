@@ -1,0 +1,33 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      types:
+        patterns:
+          - "@types/*"
+      solana:
+        patterns:
+          - "@solana/*"
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      anchor:
+        patterns:
+          - "anchor-*"
+      solana:
+        patterns:
+          - "solana-*"
+          - "spl-*"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

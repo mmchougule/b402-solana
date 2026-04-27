@@ -1,5 +1,8 @@
 # b402-solana
 
+[![ci](https://github.com/mmchougule/b402-solana/actions/workflows/ci.yml/badge.svg)](https://github.com/mmchougule/b402-solana/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
 **Private DeFi on Solana.** Shield once, then swap, lend, LP, or trade perps —
 all without your wallet appearing on-chain as the executing party. Single-tx
 execution, composable with any Solana protocol via a registered adapter.
@@ -33,8 +36,16 @@ pnpm tsx examples/kamino-adapter-fork-deposit.ts      # private 1 USDC deposit
 Goes through `b402_kamino_adapter::execute` → 7 nested CPIs into Kamino
 (`init_user_metadata`, `init_obligation`, `init_obligation_farms_for_reserve`,
 `refresh_reserve`, `refresh_obligation`, `deposit_v2`, sweep). Obligation account
-grows 0 → 3,344 B in a single tx. Alice's wallet shows the deposit; it does not
-show the Kamino position.
+grows 0 → 3,344 B in a single tx.
+
+What this proves: real Kamino bytecode accepts the adapter's CPI sequence; the
+obligation is owned by the adapter PDA, not Alice — so Kamino's own lending
+records don't tie the position back to her wallet. What this does **not** prove:
+end-to-end pool-to-Kamino unlinkability. That requires shield → `adapt_execute` →
+adapter, where a relayer signs and the user's wallet doesn't appear in the tx
+at all. The pool path runs on devnet today through the mock adapter
+(`pnpm swap-e2e`); a Kamino-on-mainnet-fork variant of the same shielded path
+is the next integration milestone.
 
 For the private swap variant (Jupiter v6 on mainnet-fork): [Quickstart](#quickstart)
 step 8. Instruction layout for `adapt_execute`: [`docs/TX-WALKTHROUGH.md`](docs/TX-WALKTHROUGH.md).
