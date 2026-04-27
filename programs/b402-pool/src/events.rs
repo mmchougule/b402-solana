@@ -27,6 +27,22 @@ pub struct MaxTvlUpdated {
 }
 
 #[event]
+pub struct ProtocolFeeShareUpdated {
+    pub old_bps: u16,
+    pub new_bps: u16,
+    pub slot: u64,
+}
+
+#[event]
+pub struct ProtocolFeeAccrued {
+    pub mint: Pubkey,
+    pub amount: u64,
+    pub of_relayer_fee: u64,
+    pub share_bps: u16,
+    pub slot: u64,
+}
+
+#[event]
 pub struct CommitmentAppended {
     pub leaf_index: u64,
     pub commitment: [u8; 32],

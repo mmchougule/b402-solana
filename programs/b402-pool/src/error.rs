@@ -95,4 +95,9 @@ pub enum PoolError {
     ScopeTagMismatch = 2003,
     #[msg("shadow pda binding mismatch")]
     ShadowBindingMismatch = 2004,
+
+    #[msg("protocol fee share exceeds the circuit-enforced cap (2500 bps = 25%)")]
+    ProtocolFeeShareCapExceeded = 2100,
+    #[msg("treasury fee account mismatch")]
+    TreasuryFeeAccountMismatch = 2101,
 }

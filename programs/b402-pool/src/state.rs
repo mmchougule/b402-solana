@@ -23,11 +23,22 @@ pub struct PoolConfig {
     pub verifier_transact: Pubkey,
     pub verifier_adapt: Pubkey,
     pub verifier_disclose: Pubkey,
-    pub _reserved: [u8; 96],
+    /// Admin-settable share of the relayer-fee paid out by `adapt_execute_v2`
+    /// that gets routed to the treasury. Capped at `PROTOCOL_FEE_SHARE_BPS_MAX`
+    /// (2500 = 25%) by the `set_protocol_fee_share` handler so admin can't
+    /// rug. Default 0 — protocol-fee-free at deploy.
+    pub protocol_fee_share_bps: u16,
+    /// Carved from the original `_reserved[u8; 96]` so PoolConfig length stays
+    /// byte-identical (8 + 2 + 32 + 1 + 1 + 1 + 1 + 1 + 8 + 32 + 32 + 32 + 2 + 94 = 247).
+    pub _reserved: [u8; 94],
 }
 impl PoolConfig {
-    pub const LEN: usize = 8 + 2 + 32 + 1 + 1 + 1 + 1 + 1 + 8 + 32 + 32 + 32 + 96;
+    pub const LEN: usize = 8 + 2 + 32 + 1 + 1 + 1 + 1 + 1 + 8 + 32 + 32 + 32 + 2 + 94;
 }
+
+/// Hard cap on `protocol_fee_share_bps`. The admin handler enforces this.
+/// 25% of the relayer-fee is the upper bound; no instruction can set higher.
+pub const PROTOCOL_FEE_SHARE_BPS_MAX: u16 = 2_500;
 
 /// Small account.
 #[account]

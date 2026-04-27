@@ -46,6 +46,15 @@ pub mod b402_pool {
         instructions::admin::set_max_tvl(ctx, new_max_tvl)
     }
 
+    /// Set the protocol-fee share of the relayer-fee paid by `adapt_execute_v2`.
+    /// Capped at 2,500 bps (25%) by the handler. Default at deploy: 0.
+    pub fn set_protocol_fee_share(
+        ctx: Context<AdminAction>,
+        new_share_bps: u16,
+    ) -> Result<()> {
+        instructions::admin::set_protocol_fee_share(ctx, new_share_bps)
+    }
+
     // Heavy fields inside ShieldArgs/TransactArgs/UnshieldArgs are `Vec<u8>`
     // (heap-allocated by Borsh) to keep the BPF stack frame below 4 KiB.
     // Handlers assert the expected lengths on entry.

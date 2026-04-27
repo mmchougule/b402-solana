@@ -50,14 +50,16 @@ use anchor_lang::solana_program::program::invoke;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
 use crate::constants::{
-    SEED_ADAPTERS, SEED_CONFIG, SEED_NULL, SEED_TOKEN, SEED_TREE, SEED_VAULT, VERSION_PREFIX,
+    SEED_ADAPTERS, SEED_CONFIG, SEED_NULL, SEED_TOKEN, SEED_TREASURY, SEED_TREE, SEED_VAULT,
     TAG_ADAPT_BIND_V2, TAG_COMMIT, TAG_FEE_BIND, TAG_MK_NODE, TAG_NULLIFIER, TAG_RECIPIENT_BIND,
-    TAG_SPEND_KEY_PUB,
+    TAG_SPEND_KEY_PUB, VERSION_PREFIX,
     // TAG_SHADOW_BIND wired in handler shadow-binding follow-up (PRD-13 §3.3).
 };
 use crate::error::PoolError;
-use crate::events::{AdaptExecutedV2, CommitmentAppended, NullifierSpent};
-use crate::state::{AdapterRegistry, NullifierShard, PoolConfig, TokenConfig, TreeState};
+use crate::events::{AdaptExecutedV2, CommitmentAppended, NullifierSpent, ProtocolFeeAccrued};
+use crate::state::{
+    AdapterRegistry, NullifierShard, PoolConfig, TokenConfig, TreasuryConfig, TreeState,
+};
 use crate::util;
 
 use super::shield::EncryptedNote;
@@ -219,6 +221,24 @@ pub struct AdaptExecuteV2<'info> {
         constraint = relayer_fee_ta.mint == token_config_in.mint @ PoolError::MintMismatch,
     )]
     pub relayer_fee_ta: Box<Account<'info, TokenAccount>>,
+
+    /// Treasury ATA for the protocol-fee share of the relayer-fee. Owner must
+    /// match `treasury_config.treasury_pubkey`; mint must match `token_config_in`.
+    /// When `pool_config.protocol_fee_share_bps == 0`, this account is unused
+    /// (handler skips the transfer) but the slot is still required to keep
+    /// the v2 ix shape stable across fee-on / fee-off configurations.
+    #[account(
+        mut,
+        constraint = treasury_fee_ta.mint == token_config_in.mint @ PoolError::MintMismatch,
+        constraint = treasury_fee_ta.owner == treasury_config.treasury_pubkey @ PoolError::TreasuryFeeAccountMismatch,
+    )]
+    pub treasury_fee_ta: Box<Account<'info, TokenAccount>>,
+
+    #[account(
+        seeds = [VERSION_PREFIX, SEED_TREASURY],
+        bump,
+    )]
+    pub treasury_config: Account<'info, TreasuryConfig>,
 
     #[account(
         init_if_needed,
@@ -513,18 +533,48 @@ pub fn handler<'info>(
     }
 
     if pi.relayer_fee > 0 {
-        token::transfer(
-            CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                Transfer {
-                    from: ctx.accounts.in_vault.to_account_info(),
-                    to: ctx.accounts.relayer_fee_ta.to_account_info(),
-                    authority: pool_config_info.clone(),
-                },
-                signer,
-            ),
-            pi.relayer_fee,
-        )?;
+        // Split: protocol_fee_share_bps of the relayer-fee routes to the
+        // treasury ATA; the remainder goes to the relayer. share_bps == 0
+        // means full amount to relayer (v1 alpha default).
+        let share_bps = ctx.accounts.pool_config.protocol_fee_share_bps as u128;
+        let treasury_amount: u64 = ((pi.relayer_fee as u128) * share_bps / 10_000u128) as u64;
+        let relayer_amount: u64 = pi.relayer_fee.saturating_sub(treasury_amount);
+
+        if treasury_amount > 0 {
+            token::transfer(
+                CpiContext::new_with_signer(
+                    ctx.accounts.token_program.to_account_info(),
+                    Transfer {
+                        from: ctx.accounts.in_vault.to_account_info(),
+                        to: ctx.accounts.treasury_fee_ta.to_account_info(),
+                        authority: pool_config_info.clone(),
+                    },
+                    signer,
+                ),
+                treasury_amount,
+            )?;
+            emit!(ProtocolFeeAccrued {
+                mint: ctx.accounts.token_config_in.mint,
+                amount: treasury_amount,
+                of_relayer_fee: pi.relayer_fee,
+                share_bps: ctx.accounts.pool_config.protocol_fee_share_bps,
+                slot: Clock::get()?.slot,
+            });
+        }
+        if relayer_amount > 0 {
+            token::transfer(
+                CpiContext::new_with_signer(
+                    ctx.accounts.token_program.to_account_info(),
+                    Transfer {
+                        from: ctx.accounts.in_vault.to_account_info(),
+                        to: ctx.accounts.relayer_fee_ta.to_account_info(),
+                        authority: pool_config_info.clone(),
+                    },
+                    signer,
+                ),
+                relayer_amount,
+            )?;
+        }
     }
 
     // Pre-CPI snapshot of the OUT vault (slot 0). Multi-vault delta sums
