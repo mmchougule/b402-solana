@@ -83,8 +83,9 @@ CU of headroom for adapter work.
 ┌────▼───┐  ┌────▼────┐  ┌─▼────────────────┐
 │ Verif. │  │ Verif.  │  │ Adapter (any     │
 │ trans. │  │ adapt   │  │ registered)      │
-│ 18 PI  │  │ 23 PI   │  │ → Jupiter/Kamino │
-└────────┘  └─────────┘  │   /Adrena/Orca/… │
+│ 18 PI  │  │ 23 PI   │  │ → Jupiter, Kamino│
+└────────┘  └─────────┘  │   (perps + LP    │
+                         │    on roadmap)   │
                          └─────────┬────────┘
                                    │
                            ┌───────▼────────┐
@@ -103,7 +104,7 @@ v2 ABI extension that makes this strictly true going forward.
 | Adapter | Status | What it enables |
 |---|---|---|
 | Jupiter v6 | devnet + mainnet-fork integration tests | private swap on any Jupiter route |
-| Kamino lend | mainnet-fork through `b402_kamino_adapter::execute` | private collateral, borrow, repay |
+| Kamino lend | mainnet-fork through `b402_kamino_adapter::execute` | private deposit (v0.1 alpha; withdraw / borrow / repay are gated to `NotYetImplemented` until mainnet-fork integration tests cover them) |
 | Mock | live on devnet | adapter ABI invariant tests |
 | Adrena perps | scaffold; discriminators verified vs Adrena IDL | private leveraged trading (impl in progress) |
 | Orca LP | scaffold | private whirlpool positions |

@@ -39,7 +39,7 @@ b402-solana is a shielded asset pool + composable private DeFi execution layer o
 
 ### 2.1 Goals (v1)
 
-1. Shielded custody for SOL and native USDC (`EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`) with production-grade cryptography.
+1. Shielded custody for SOL and native USDC (`EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`) using Groth16 over BN254 + Poseidon — primitives that are well-studied and have a sub-200k-CU on-chain verifier on Solana today.
 2. Private swaps via Jupiter aggregator.
 3. Private lending via Kamino Liquid Vaults.
 4. Private perps via Drift V2.
