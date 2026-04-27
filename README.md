@@ -3,16 +3,16 @@
 [![ci](https://github.com/mmchougule/b402-solana/actions/workflows/ci.yml/badge.svg)](https://github.com/mmchougule/b402-solana/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**Private DeFi on Solana.** Shield once, then swap, lend, LP, or trade perps —
-all without your wallet appearing on-chain as the executing party. Single-tx
-execution, composable with any Solana protocol via a registered adapter.
+**Private DeFi on Solana.** Shield once, then swap, lend, LP, or trade perps
+from a private balance — without exposing your wallet as the spend authority
+on subsequent shielded actions. Composable with supported Solana protocols
+via a registered adapter; current flows fit in a single v0 transaction.
 
 Built ground-up for the SVM: Circom 2 circuits, Anchor BPF programs, Groth16
 verification through the `alt_bn128_*` syscalls, Poseidon-bound UTXO
 commitments with nullifier-set membership and viewing-key separation. The
-cryptographic primitives are off-the-shelf (deliberately — auditable against
-existing literature); the runtime, instruction surface, and adapter ABI are
-native to Solana.
+cryptographic primitives are standard (chosen for auditability against
+existing literature); the SVM-native runtime and adapter ABI are the novelty.
 
 ## Run it on devnet (~30 seconds)
 
@@ -23,8 +23,8 @@ solana airdrop 1 --url devnet                       # if you don't have devnet S
 RPC_URL=https://api.devnet.solana.com pnpm --filter=@b402ai/solana-examples e2e
 ```
 
-Shield 100, unshield 100 to a fresh recipient. Sender and recipient share no
-on-chain edge.
+Shield 100, unshield 100 to a fresh recipient. Sender and recipient are not
+directly linked on-chain.
 
 ## Run private lending (mainnet-fork, ~2 minutes)
 
@@ -43,8 +43,8 @@ Goes through `b402_kamino_adapter::execute` → 7 nested CPIs into Kamino
 grows 0 → 3,344 B in a single tx.
 
 What this proves: real Kamino bytecode accepts the adapter's CPI sequence; the
-obligation is owned by the adapter PDA, not Alice — so Kamino's own lending
-records don't tie the position back to her wallet. What this does **not** prove:
+obligation is owned by the adapter PDA, not Alice — so Kamino's lending records
+reference the adapter PDA rather than the user wallet. What this does **not** prove:
 end-to-end pool-to-Kamino unlinkability. That requires shield → `adapt_execute` →
 adapter, where a relayer signs and the user's wallet doesn't appear in the tx
 at all. The pool path runs on devnet today through the mock adapter
@@ -61,12 +61,12 @@ Compute-unit cost per flow (litesvm probe against deployed bytecode, latest
 
 | Flow | CU consumed | Source |
 |---|---|---|
-| Shield | 233,495 | `adapt_execute_full_path` litesvm probe |
-| Unshield | 223,413 | `unshield_success` litesvm probe |
-| `adapt_execute` end-to-end (mock adapter, real Groth16) | 313,725 | `adapt_execute_full_path` litesvm probe |
-| `verifier_adapt` CPI alone | ~178k | inside `adapt_execute_full_path` |
-| Kamino deposit through `b402_kamino_adapter` (mainnet-fork, 7 nested CPIs into Kamino) | not yet pinned in the probe — `kamino_deposit_full_path` scenario tracked in assurance roadmap | examples/kamino-adapter-fork-deposit.ts |
-| Jupiter swap through `b402_jupiter_adapter` (mainnet-fork) | ~660k observed in examples/swap-e2e.ts logs | examples/swap-e2e.ts |
+| Shield | 233,495 | litesvm probe (assurance run) |
+| Unshield | 223,413 | litesvm probe (assurance run) |
+| `adapt_execute` end-to-end (mock adapter, real Groth16) | 313,725 | litesvm probe (assurance run) |
+| `verifier_adapt` CPI alone | ~178k | sub-budget inside the adapt-execute probe |
+| Kamino deposit through `b402_kamino_adapter` (mainnet-fork, 7 nested CPIs into Kamino) | not yet pinned in the probe — assurance-roadmap item | mainnet-fork example |
+| Jupiter swap through `b402_jupiter_adapter` | ~660k observed in mainnet-fork execution | mainnet-fork example |
 
 Solana per-tx limits and our headroom on the heaviest flow we ship today
 (`adapt_execute` end-to-end, full Groth16 verify + adapter CPI + delta check):
@@ -87,10 +87,10 @@ b402 vaults) from 32-byte inline pubkeys to 1-byte ALT indexes. Adding a new
 DeFi protocol = extend the ALT with that protocol's frequently-touched
 accounts; the wire format doesn't grow proportionally.
 
-The architectural claim: **the whole shielded-swap or shielded-deposit flow,
-once notes are in the pool, is one instruction in one v0 transaction with one
-signature**. CU has the most headroom; tx size is the tightest constraint and
-ALT is what makes it tractable.
+The architectural claim: **current flows fit within a single v0 transaction
+with a single relayer signature** once notes are in the pool. CU has the most
+headroom; tx size is the tightest constraint and ALT is what makes it
+tractable.
 
 ## Architecture
 
@@ -120,9 +120,9 @@ ALT is what makes it tractable.
 ```
 
 Adding a new protocol = one Anchor crate (~200-300 LoC) implementing the
-`execute(action_payload)` ABI + a registry entry. No circuit recut, no
-ceremony, no pool change. Six adapter crates in repo today; PRDs cover the
-v2 ABI extension that makes this strictly true going forward.
+`execute(action_payload)` ABI + a registry entry. No circuit changes, no new
+setup ceremony, no pool change. Six adapter crates in repo today; PRDs cover
+the v2 ABI extension that makes this strictly true going forward.
 
 ## Adapter status
 
@@ -157,34 +157,25 @@ is the link between your wallet and your shielded actions:
 
 | Layer | What | Today |
 |---|---|---|
-| **L1: wallet ↔ action** | After shielding, your wallet doesn't appear in any subsequent shielded tx | broken cryptographically — Groth16 proof binds the spend without revealing which note was spent |
+| **L1: wallet ↔ action** | After shielding, your wallet isn't visible as the spend authority on subsequent shielded actions | a public-chain observer cannot cryptographically link a post-shield spend to the original wallet from the shielded action path alone — Groth16 proof binds the spend without revealing which note was spent |
 | **L2: action ↔ action** | Two shielded actions can't be trivially linked | broken at the note layer; per-user adapter PDAs land in v0.2 (helpers in `programs/b402-kamino-adapter/src/lib.rs` already, gated) |
 | **L3: pool-level clustering** | Timing + amount correlation across the pool boundary | scales with anonymity set — small pool weak, large pool strong |
 
-Wallet-watching bots and MEV searchers — the dominant real-world threat —
-hit Layer 1 and stop. Patient timing+amount analysts targeting a small pool
-defeat Layer 3 statistically. We cap alpha TVL while the anonymity set grows;
-that's the honest trade.
+**Defends against:** wallet-watching bots scraping mempool to copy
+strategies, MEV searchers targeting public DEX flow, surveillance-grade
+indexers (Chainalysis, Nansen, Arkham) building wallet-level histories.
+Layer 1 unlinkability covers all of these.
+
+**Does NOT fully defend against (yet):** patient clustering analysts
+running timing-and-amount correlation across the pool boundary at small
+TVL. This is a fundamental property of UTXO-mixer constructions, not a
+b402-specific weakness. It's solved by adoption — every shield strengthens
+every other user's privacy. We cap alpha TVL while the anonymity set grows.
 
 For autonomous agents specifically — where the adversary is automated
-strategy-copying, not patient analysis — Layer 1 alone solves the problem.
+strategy-copying bots, not patient analysts — Layer 1 is sufficient.
 
 [derive_owner_pda]: programs/b402-kamino-adapter/src/lib.rs
-
-**The threat model b402 defends against:** the dominant real-world adversary —
-bots scraping wallets to copy strategies, MEV searchers targeting public DEX
-flow, surveillance-grade indexers (Chainalysis, Nansen, Arkham) building
-wallet-level histories. Layer 1 unlinkability is complete protection here.
-
-**The threat model b402 does NOT fully defend against (yet):** patient
-clustering analysts running timing-and-amount correlation across the pool
-boundary at small TVL. This is a fundamental property of UTXO-mixer
-constructions, not a b402-specific weakness. It is solved by adoption — every
-shield strengthens every other user's privacy.
-
-For autonomous agents specifically — where the adversary is automated
-strategy-copying bots, not patient analysts — Layer 1 is sufficient. That's
-the use case we lead with.
 
 ## What's implemented
 
@@ -315,8 +306,10 @@ b402-solana/
   before integration.
 - **Permissionless.** No KYT, no allowlists. Optional opt-in viewing-key
   disclosure.
-- **0% protocol fee** (immutable). Maximizes the anonymity set. Relayer
-  fees are paid in-kind from unshield amount.
+- **0% protocol fee.** No fee field in the v1 program — adding one would
+  require a circuit-level public input change (i.e. a new ceremony and a
+  new pool deployment), not an admin instruction. Relayer fees are paid
+  in-kind from the unshield amount.
 - **Audit-first.** Designs written for auditor consumption. Cryptographic
   primitives and failure modes spelled out before implementation.
 
