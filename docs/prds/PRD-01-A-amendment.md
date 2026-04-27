@@ -51,7 +51,7 @@ This amendment addresses three items: (a) a correction to an incorrect CU/storag
   - Tree metadata (depth, zero-subtree hashes cache): ~900 B
   - Total: **< 4 KB**, one PDA, six orders of magnitude under the 10 MB ceiling.
 - Leaves themselves live in transaction logs. Clients (SDK + relayers) reconstruct the tree by replaying `CommitmentAppended` events.
-- This mirrors Railgun's design on EVM.
+- This is the standard frontier-only IMT pattern used across Groth16 privacy pools (Railgun, Aztec, Tornado), independently implemented here.
 
 **What we do need sharding for:** the **nullifier set**, as already specified in PRD-01 §5.7 (65,536 shard PDAs, prefix-keyed). That is an orthogonal concern.
 
@@ -218,5 +218,6 @@ If, during Track B prototype work, we discover that Solana's CU or latency profi
 |---|---|---|---|
 | 0.1 | 2026-04-23 | b402 core | Initial amendment |
 | 0.2 | 2026-04-23 | b402 core | Added §A7 rejection memo for hybrid MPC+ZK proposal |
+| 0.3 | 2026-04-24 | b402 core | §A2 reframed "mirrors Railgun's design" to construction-class language (frontier-only IMT pattern shared across Groth16 privacy pools). No semantic change. |
 
 Sign-off piggy-backs on PRD-01. Approval of PRD-01 + PRD-01-A unblocks PRD-02 and (if Track B approved) prototype scaffolding.

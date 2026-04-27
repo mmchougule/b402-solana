@@ -1,47 +1,81 @@
 ---
 title: Adrena Adapter
-description: "Private perpetuals on Solana via Adrena (designed-for, not yet shipped)."
+description: "Private perpetuals on Solana via Adrena (scaffold + verified discriminators; handler not implemented)."
 ---
 
 <Warning>
-  **Designed, not shipped.** The `b402-adrena-adapter` program is
-  scaffolded but the implementation is pending the v2 ABI work
-  (PRD-11–15). The PRD below specifies the target shape; do not deploy.
+  **Scaffold only.** The `b402-adrena-adapter` program builds and has
+  its 8 instruction discriminators verified against the upstream IDL,
+  but `execute()` returns `AdrenaAdapterError::NotYetImplemented`.
+  Generated program ID `9aUp3UKHk4JuHsLJm33Why7RhuW6CQCyQh6UEJeynKKZ`.
+  Do not deploy.
 </Warning>
 
-`b402-adrena-adapter` will integrate [Adrena](https://www.adrena.xyz/)
-for private leveraged perpetuals on SOL-PERP and ETH-PERP markets.
-Spec: [`PRD-16`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-16-adrena-adapter.md).
+`b402-adrena-adapter` is the planned integration with
+[Adrena](https://www.adrena.xyz/) for private leveraged perpetuals on
+SOL-PERP and ETH-PERP markets. Spec:
+[`PRD-16`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-16-adrena-adapter.md).
+Source:
+[`programs/b402-adrena-adapter/src/lib.rs`](https://github.com/b402-ai/b402-solana/blob/main/programs/b402-adrena-adapter/src/lib.rs).
+
+What's actually present in the crate today:
+
+- `declare_id!("9aUp3UKHk4JuHsLJm33Why7RhuW6CQCyQh6UEJeynKKZ")`.
+- `ADRENA_PROGRAM_ID = 13gDzEXCdocbj8iAiqrScGo47NiSuYENGsRqi3SEAwet`,
+  verified 2026-04-26 against `AdrenaFoundation/adrena-abi/idl/adrena.json::address`.
+- 8 instruction discriminators verified against the same IDL master:
+  `open_position_long`, `open_position_short`, `increase_position_long`,
+  `increase_position_short`, `close_position_long`, `close_position_short`,
+  `liquidate_long`, `liquidate_short`.
+- `AdrenaAction` enum variants: `OpenPosition`, `IncreasePosition`,
+  `DecreasePosition`, `ClosePosition`, `LiquidateGuardrail`.
+- Per-instruction `remaining_accounts` layout documented inline against
+  the IDL (17 / 17 / 16 / 15 accounts respectively).
+- `derive_shadow_pda()` and `derive_adrena_position_pda()` helpers
+  matching `AdrenaFoundation/adrena-abi/src/pda.rs::get_position_pda`.
+
+What's not present: the actual CPI dispatch. `execute()` returns
+`NotYetImplemented` and is gated on the v2 ABI work (PRD-11–15) for
+position binding via shadow PDAs.
 
 ## Why Adrena (not Drift, not Jupiter Perps)
 
 From PRD-16 §2:
 
-- **Jupiter Perps** uses a request-queue + keeper model. Async settlement
-  needs PRD-14 claim notes; deferred.
+- **Jupiter Perps** uses an async request-queue + keeper model. Doesn't
+  fit the v1 synchronous adapter ABI. The path forward is PRD-14
+  two-phase claim notes; PRD-14 itself is deferred until the first
+  async adapter is prioritized.
 - **Drift v2** experienced a $285M exploit on April 1, 2026 (DPRK
   durable-nonce admin takeover, fake CVT collateral). Tether-led
   rescue closed April 16; full reboot is pending fresh audits. Program
   ID will likely change post-reboot, so integrating against pre-reboot
   bytecode is wasted work.
 - **Adrena** is operational, audited (Ottersec — one shipped, second in
-  progress per Adrena docs), source-available under GPL-3.0
-  (`AdrenaFoundation/adrena-program`), synchronous (no keeper),
-  ~$50M+ TVL. Shape matches PRD-11 + PRD-15 cleanly.
+  progress per Adrena docs), synchronous (no keeper), and has a public
+  IDL at `AdrenaFoundation/adrena-abi`. The synchronous shape matches
+  the v1 adapter ABI; the per-position PDA fits PRD-13 shadow PDAs.
 
-GPL-3.0 licensing note: b402's adapter program **does not link to or
-redistribute Adrena's source** — it CPIs into the deployed Adrena
-program by program ID. Runtime CPI is not a derivative work under
-GPL-3.0; b402's licensing is unaffected.
+Adrena's program is GPL-3.0; b402's adapter does not link to or
+redistribute Adrena's source — it CPIs into the deployed Adrena program
+by program ID. Runtime CPI is not a derivative work under GPL-3.0;
+b402's licensing is unaffected.
 
 ## Operations (planned)
 
-| Op | Inputs | Outputs | State | Notes |
+Adrena does not expose generic `open_position` / `close_position`
+instructions — long and short are separate ixs, and partial close is
+`close_position_*` with `params.percentage`. The handler dispatches to
+the right pair via the `side` byte.
+
+| Action variant | Adrena ix | Inputs | Outputs | Notes |
 |---|---|---|---|---|
-| `OpenPosition` | `[(USDC, collateral)]` | `[]` (delta-zero) | Position PDA | Collateral in; position created |
-| `IncreasePosition` | `[(USDC, additional)]` | `[]` (delta-zero) | Position PDA | Mutates existing |
-| `DecreasePosition` | `[]` | `[(USDC, settlement_min)]` | Position PDA | Partial close |
-| `ClosePosition` | `[]` | `[(USDC, settlement_min)]` | Position PDA → closed | Full close |
+| `OpenPosition { side: 0 }` | `open_position_long` | `[(USDC, collateral)]` | `[]` (delta-zero) | Collateral in; position created |
+| `OpenPosition { side: 1 }` | `open_position_short` | `[(USDC, collateral)]` | `[]` (delta-zero) | |
+| `IncreasePosition` | `increase_position_long/short` | `[(USDC, additional)]` | `[]` (delta-zero) | Mutates existing position |
+| `DecreasePosition` | `close_position_long/short` w/ `percentage < 1e10` | `[]` | `[(USDC, settlement_min)]` | Partial close |
+| `ClosePosition` | `close_position_long/short` w/ `percentage = 1e10` | `[]` | `[(USDC, settlement_min)]` | Full close |
+| `LiquidateGuardrail` | `close_position_*` (NOT `liquidate_*`) | `[]` | `[(USDC, settlement_min)]` | Pre-liquidation user-side close, avoids paying the liquidator fee |
 
 `OpenPosition` and `IncreasePosition` are **delta-zero ops** — no
 tokens come back. This is the canonical use case for the
@@ -50,12 +84,31 @@ fully in [PRD-15](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD
 
 ## Action payload
 
+Verbatim from [`programs/b402-adrena-adapter/src/lib.rs`](https://github.com/b402-ai/b402-solana/blob/main/programs/b402-adrena-adapter/src/lib.rs):
+
 ```rust
 pub enum AdrenaAction {
-    Open     { market: Pubkey, side: Side, leverage_bp: u16, collateral: u64 },
-    Increase { collateral: u64 },
-    Decrease { size_to_close: u64, min_out: u64 },
-    Close    { min_out: u64 },
+    OpenPosition {
+        custody: Pubkey,
+        side: u8,                  // 0 = long, 1 = short
+        collateral_amount: u64,
+        size_usd: u64,
+        slippage_bps: u16,
+    },
+    IncreasePosition {
+        position: Pubkey,
+        collateral_delta: u64,
+        size_delta_usd: u64,
+        slippage_bps: u16,
+    },
+    DecreasePosition {
+        position: Pubkey,
+        collateral_delta: u64,
+        size_delta_usd: u64,
+        slippage_bps: u16,
+    },
+    ClosePosition { position: Pubkey, slippage_bps: u16 },
+    LiquidateGuardrail { position: Pubkey, max_health_factor_bps: u16 },
 }
 ```
 

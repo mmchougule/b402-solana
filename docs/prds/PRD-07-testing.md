@@ -128,9 +128,9 @@ Parity tests: generate 10,000 random inputs; each impl must produce bit-identica
 
 Each gets a named test. Missing any blocks audit sign-off.
 
-### 2.6 Differential against Railgun (where logic overlaps)
+### 2.6 Differential against the Groth16-privacy-pool construction class
 
-Spend/commit/nullifier math largely mirrors Railgun. For identical constructions we generate test vectors from Railgun's reference implementation and assert our Poseidon + merkle parity. Catches domain-tag mistakes early.
+Spend, commit, and nullifier math here uses the same construction class as Railgun, Aztec, and Tornado Cash (Groth16 + Poseidon + UTXO commitments + nullifiers). The implementation is independent (Circom 2 sources, no shared code), but the canonical primitives must remain byte-compatible with the published constructions for any third-party reference vector. Where a primitive overlaps with Railgun's published reference, we generate vectors from that reference and assert byte-equality on Poseidon + merkle path checks. Catches domain-tag mistakes and parameter drift early.
 
 ---
 
@@ -342,6 +342,7 @@ Auditors get full context without having to reconstruct it from the codebase.
 | Version | Date | Author | Changes |
 |---|---|---|---|
 | 0.1 | 2026-04-23 | b402 core | Initial draft |
+| 0.2 | 2026-04-24 | b402 core | §2.6 reframed "mirrors Railgun" to construction-class language. Same vectors, same byte-equality assertion. |
 
 ---
 

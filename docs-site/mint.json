@@ -106,6 +106,7 @@
         "reference/program-ids",
         "reference/instruction-reference",
         "reference/error-codes",
+        "reference/metrics",
         "reference/faq"
       ]
     }

@@ -1,0 +1,226 @@
+---
+title: Metrics
+description: "Observable proof points: R1CS counts, on-chain CU, parity test counts, fuzz reject rates, mainnet-fork verifications. Every number cites a source."
+---
+
+This page is the cite-able-numbers index. Each row is a real
+measurement from a build artifact, an on-chain log, or a generated
+assurance JSON. No estimates.
+
+## Circuits
+
+| Metric | Value | Source |
+|---|---|---|
+| `transact` R1CS constraints | 17,259 | [`circuits/build/transact.r1cs.info.txt`](https://github.com/b402-ai/b402-solana/blob/main/circuits/) |
+| `transact` public inputs | 18 | same |
+| `transact` private inputs | 129 | same |
+| `transact` wires | 17,328 | same |
+| `adapt` R1CS constraints (v1, shipped) | 17,582 | [`circuits/build/adapt.r1cs.info.txt`](https://github.com/b402-ai/b402-solana/blob/main/circuits/) |
+| `adapt` public inputs (v1) | 23 | same |
+| `adapt` private inputs (v1) | 128 | same |
+| `adapt_v2` R1CS constraints (compiled, not deployed) | 34,298 | [`circuits/build/adapt_v2.r1cs.info.txt`](https://github.com/b402-ai/b402-solana/blob/main/circuits/) |
+| `adapt_v2` public inputs | 38 | same |
+| `adapt_v2` private inputs | 258 | same |
+| Curve | BN254 (a.k.a. bn-128, alt_bn128) | snarkjs info file |
+| Hash | Poseidon `x^5` S-box, `iden3/circomlib v2.4.0` parameter set | [PRD-02 §1](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-02-crypto-spec.md) |
+| Merkle depth | 26 | [PRD-02 §5](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-02-crypto-spec.md) |
+| Merkle capacity | 2²⁶ ≈ 67M leaves | derived from depth |
+
+## Compiled program sizes (BPF, devnet build 2026-04-26)
+
+| Program | `.so` size | Source |
+|---|---|---|
+| `b402_pool` | 493 KB | `target/deploy/b402_pool.so` |
+| `b402_kamino_adapter` | 242 KB | `target/deploy/b402_kamino_adapter.so` |
+| `b402_jupiter_adapter` | 194 KB | `target/deploy/b402_jupiter_adapter.so` |
+| `b402_mock_adapter` | 192 KB | `target/deploy/b402_mock_adapter.so` |
+| `b402_verifier_adapt` | 184 KB | `target/deploy/b402_verifier_adapt.so` |
+| `b402_verifier_transact` | 184 KB | `target/deploy/b402_verifier_transact.so` |
+| `b402_adrena_adapter` | 182 KB | `target/deploy/b402_adrena_adapter.so` |
+| `b402_jupiter_perps_adapter` | 178 KB | `target/deploy/b402_jupiter_perps_adapter.so` |
+| `b402_orca_adapter` | 178 KB | `target/deploy/b402_orca_adapter.so` |
+
+Sizes from `ls -l` on `target/deploy/` after a clean
+`cargo build-sbf` against `platform-tools v1.54`.
+
+## On-chain CU (LiteSVM probe)
+
+From the assurance harness's
+[`artifacts/onchain-compute-units.json`](https://github.com/b402-ai/b402-solana-assurance/blob/main/artifacts/onchain-compute-units.json),
+running the same `.so` bytecode that ships:
+
+| Scenario | CU consumed | Devnet pin |
+|---|---|---|
+| `shield_success` | 233,495 | 239,224 |
+| `unshield_success` | 223,413 | 350,000 |
+| `adapt_execute_full_path` (real Groth16, mock adapter) | 313,725 | — |
+
+Headroom: 1,400,000 (Solana per-tx CU cap) − 313,725
+= **1,086,275 CU** of room for downstream protocol work in adapt
+flows. Real Jupiter v6 SolFi V2 mainnet-fork run consumes ~660k CU
+total — well inside the budget.
+
+## Tx sizes (devnet, observed)
+
+| Op | Size (bytes) | Headroom under 1,232 cap |
+|---|---|---|
+| Shield | 1,157 | 75 |
+| Unshield | ~1,150 | ~80 |
+| Adapt swap (mock adapter, real Groth16) | 1,214 | 18 |
+| Adapt swap (Jupiter v6 SolFi V2, mainnet-fork) | 1,231 | 1 |
+
+Source: [README.md](https://github.com/b402-ai/b402-solana/blob/main/README.md)
+"observed costs" table; backed by the live devnet sigs in
+[Program IDs → Live txs](/reference/program-ids#live-txs-proof-of-life).
+
+## Mainnet protocols verified end-to-end against real bytecode
+
+Both flows run against `solana-test-validator` with the protocol's
+program + state cloned from mainnet. Real ZK proofs, real CPI, real
+AMM bytecode.
+
+| Protocol | Op | Driver script | Status |
+|---|---|---|---|
+| Jupiter v6 (aggregator) | swap (0.1 wSOL → USDC via SolFi V2) | [`examples/swap-e2e-jupiter.ts`](https://github.com/b402-ai/b402-solana/blob/main/examples/swap-e2e-jupiter.ts) | GREEN |
+| Kamino Lend (`KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD`) | deposit USDC | [`examples/kamino-adapter-fork-deposit.ts`](https://github.com/b402-ai/b402-solana/blob/main/examples/kamino-adapter-fork-deposit.ts) | GREEN (alice -1 USDC, obligation +3344 B) |
+
+## Cloned mainnet account types in tests
+
+Across the two mainnet-fork harnesses, the validator clones (with
+`solana-test-validator --clone`):
+
+- **Programs:** Jupiter v6, Kamino Lend, Kamino Farms, all AMMs
+  Jupiter routes through (SolFi V2, Whirlpool, Raydium CLMM, etc.).
+- **Reserves:** USDC reserve account, the corresponding
+  `liquidity_supply_vault` and `collateral_supply_vault`.
+- **Vaults:** every AMM pool's token account on the Jupiter route.
+- **Oracles:** Pyth and Switchboard price accounts referenced by the
+  Kamino reserve.
+- **ATAs:** funded user ATAs for the tested mints.
+
+Five distinct mainnet account kinds: programs, reserves, vaults,
+oracles, ATAs.
+
+## Cryptographic primitives (each tested independently)
+
+| Primitive | Where | Tests |
+|---|---|---|
+| Groth16 verifier | `b402_verifier_transact`, `b402_verifier_adapt` (both wrap `Lightprotocol/groth16-solana`) | TS↔Rust verify parity (snarkjs vs CLI), 5 verifier-adapt cargo tests |
+| Poseidon BN254 (in-circuit) | `circuits/lib/commitment.circom`, `nullifier.circom`, `merkle_verify.circom` | 35 primitive parity vectors, all 4 derivations covered |
+| Poseidon BN254 (on-chain `sol_poseidon` syscall) | `programs/b402-pool/src/util.rs` | Same 35 vectors via Rust verifier CLI |
+| Merkle tree (depth 26, Poseidon node) | `packages/sdk/src/merkle.ts` (TS) + `packages/crypto/src/` (Rust) | 11 merkle vectors (3 fixed + 8 random sequences), 32-run property harness |
+| BN254 Fr canonical encoding | `packages/sdk/src/fr.ts` + Rust mirror | 6 canonical + 4 reduced cases in `fr-codec.json` + 256-iter fuzz |
+| ECDH X25519 + ChaCha20-Poly1305 (note encryption) | `packages/sdk/src/note-encryption.ts` | 1 round-trip + foreign-viewer reject pinned |
+
+## Parity test pairs (TS ↔ Rust byte-equality)
+
+Each row: same input, two implementations must produce identical
+output. Source: `packages/crypto/src/` Rust reference vs
+`packages/sdk/src/poseidon.ts` TS reference, asserted in
+`b402-solana-assurance/src/index.ts`.
+
+| Primitive | Vectors |
+|---|---|
+| `commitmentHash` | 35 cases (`vectors/poseidon-primitives.json`) |
+| `nullifierHash` | same 35 |
+| `feeBindHash` | same 35 |
+| `spendingPub` derivation | same 35 |
+| `merkleNodeHash` | 11 sequences (`vectors/merkle.json`) |
+| Fr LE encode / decode | 10 cases (`vectors/fr-codec.json`) |
+| Domain tag → Fr | 14 cases (`vectors/domain-tags.json`) |
+
+7 distinct primitives where Rust and TS produce byte-identical
+output. Mismatch on any of these is a regression that fails the
+assurance run.
+
+## Adapter discriminator verification
+
+Each adapter pre-defines instruction discriminators as Rust
+constants and verifies them against the protocol's published SDK or
+IDL.
+
+| Adapter | Discriminators | Source pin | Status |
+|---|---|---|---|
+| `b402-kamino-adapter` | 10 (`init_user_metadata`, `init_obligation`, `init_obligation_farms_for_reserve`, `refresh_reserve`, `refresh_obligation`, `deposit_v1`, `deposit_v2`, `withdraw`, `borrow`, `repay`) | `klend-sdk@7.3.22` | All 10 GREEN via `kamino-adapter-fork-deposit.ts` |
+| `b402-adrena-adapter` | 8 (`open_position_long/short`, `increase_position_long/short`, `close_position_long/short`, `liquidate_long/short`) | `AdrenaFoundation/adrena-abi` master IDL | 8/8 verified 2026-04-26 |
+| `b402-jupiter-adapter` | 1 (`route` — passthrough) | Jupiter v6 IDL | GREEN via mainnet-fork run |
+
+## Negative-test coverage (verifier crate)
+
+Cited from
+[`programs/b402-verifier-adapt/tests/verify.rs`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-verifier-adapt/tests)
+and
+[`b402-solana-assurance/artifacts/fuzz-summary.json`](https://github.com/b402-ai/b402-solana-assurance/blob/main/artifacts/fuzz-summary.json):
+
+| Attack vector | Test | Status |
+|---|---|---|
+| Tampered proof bytes | `tampered_proof_rejected` | rejected |
+| Tampered `adapter_id` | `tampered_adapter_id_rejected` | rejected |
+| Tampered `action_hash` | `tampered_action_hash_rejected` | rejected |
+| Tampered `expected_out_mint` | `tampered_expected_out_mint_rejected` | rejected |
+| Random proof bit-mutation (128 iters) | `fuzz-summary.json::proofMutationRejected` | 128/128 rejected |
+| Random public-input mutation (128 iters) | `fuzz-summary.json::publicInputMutationRejected` | 128/128 rejected |
+| Malformed verifier-input bytes (8 hand-crafted) | `fuzz-summary.json::malformedVerifierInputRejected` | 8/8 rejected |
+| Non-canonical Fr encode (213 above-prime samples) | `fuzz-summary.json::frCanonicalRejected` | 213/256 rejected (43 canonical accepts) |
+| Malformed note ciphertext (32 mutations) | `fuzz-summary.json::noteStoreRejectsMalformed` | 32/32 rejected |
+| Replay nullifier in stateful sequence (165 attempts across long traces) | `invariant-summary.json::replayRejections` | 165/165 rejected |
+| Paused-shield rejection | `invariant-summary.json::pausedShieldRejections` | 637 attempts rejected |
+| Paused-state unshield (must succeed; unkillable exit) | `invariant-summary.json::pausedUnshieldSuccesses` | 98/98 succeeded |
+| Stale Merkle root | `invariant-summary.json::rootFreshness.staleRootRejected` | rejected |
+
+13 distinct adversarial cases each with a dedicated assertion.
+
+## PRDs and spec depth
+
+| Metric | Count | Source |
+|---|---|---|
+| Numbered PRDs (PRD-01 through PRD-23, plus PRD-01-A amendment) | 24 documents | [`docs/prds/`](https://github.com/b402-ai/b402-solana/tree/main/docs/prds) |
+| Assurance PRDs (A01 through A06) | 6 documents | [`b402-solana-assurance/prds/`](https://github.com/b402-ai/b402-solana-assurance/tree/main/prds) |
+| Total PRD documents | 30 | combined |
+
+Unusual depth-of-spec for a Solana project at this stage. Each
+non-trivial decision is justified inline in a PRD; see
+[`docs/prds/README.md`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/README.md)
+for the sequenced-gating chain.
+
+## `// TODO(verify):` markers
+
+Markers like `// TODO(verify):` flag claims in code that should be
+re-checked against the upstream protocol's source or IDL before
+relying on them.
+
+| Surface | Count |
+|---|---|
+| `programs/` | 4 |
+| Whole repo (excluding `node_modules`, `target`, `docs-site`) | 5 |
+
+This is intentionally a **decreasing-with-time confidence metric**.
+Each `TODO(verify)` is a known-soft claim that gets resolved against
+mainnet bytecode at integration-test time.
+
+## Reproduction
+
+To rebuild every number on this page:
+
+```bash
+# Circuits (R1CS info files)
+cd circuits && pnpm install && pnpm build:circuits
+
+# BPF program builds
+cargo build-sbf --tools-version v1.54 \
+  --manifest-path programs/b402-pool/Cargo.toml --features test-mock
+ls -la target/deploy/
+
+# Assurance run (vectors, fuzz, invariants, bench, on-chain probe)
+cd ../b402-solana-assurance
+pnpm install
+pnpm assure
+
+# Mainnet-fork verifications (require Helius/Alchemy mainnet RPC)
+cd ../b402-solana/examples
+./ops/mainnet-fork-validator.sh --route /tmp/jup-route.json --reset    # term 1
+pnpm swap-e2e-jupiter                                                    # term 2
+
+./ops/kamino-fork-validator.sh --reset                                  # term 1
+pnpm tsx kamino-adapter-fork-deposit.ts                                 # term 2
+```

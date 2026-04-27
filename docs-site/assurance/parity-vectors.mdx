@@ -43,13 +43,13 @@ The assurance repo's parity harness is the safety net. From
 
 The vectors live under `b402-solana-assurance/vectors/`:
 
-| File | Cases |
-|---|---|
-| [`domain-tags.json`](https://github.com/b402-ai/b402-solana-assurance/blob/main/vectors/domain-tags.json) | 14 |
-| [`fr-codec.json`](https://github.com/b402-ai/b402-solana-assurance/blob/main/vectors/fr-codec.json) | many (canonical accept + non-canonical reject) |
-| [`poseidon-primitives.json`](https://github.com/b402-ai/b402-solana-assurance/blob/main/vectors/poseidon-primitives.json) | 35 |
-| [`merkle.json`](https://github.com/b402-ai/b402-solana-assurance/blob/main/vectors/merkle.json) | 11 sequences |
-| [`note-encryption.json`](https://github.com/b402-ai/b402-solana-assurance/blob/main/vectors/note-encryption.json) | round-trip + foreign-viewer reject |
+| File | Cases | Source |
+|---|---|---|
+| [`domain-tags.json`](https://github.com/b402-ai/b402-solana-assurance/blob/main/vectors/domain-tags.json) | 14 (`.caseCount`) | every `b402/v1/*` tag string |
+| [`fr-codec.json`](https://github.com/b402-ai/b402-solana-assurance/blob/main/vectors/fr-codec.json) | 6 canonical + 4 reduced (`.canonicalCases`, `.reducedCases`) | LE 32-byte buffers crossing the BN254 prime |
+| [`poseidon-primitives.json`](https://github.com/b402-ai/b402-solana-assurance/blob/main/vectors/poseidon-primitives.json) | 3 fixed + 32 random = 35 (`.counts.total`) | each primitive: `commitment`, `nullifier`, `feeBind`, `spendingPub` |
+| [`merkle.json`](https://github.com/b402-ai/b402-solana-assurance/blob/main/vectors/merkle.json) | 3 fixed roots + 8 random sequences | empty-tree root + append paths |
+| [`note-encryption.json`](https://github.com/b402-ai/b402-solana-assurance/blob/main/vectors/note-encryption.json) | 1 round-trip + foreign-viewer reject | ChaCha20-Poly1305 + X25519 ECDH |
 
 Any change to a primitive's semantics that mutates one of these is a
 **deliberate update commit**, reviewed alongside the corresponding
@@ -116,11 +116,18 @@ gets explicit review.
 ```bash
 cd b402-solana-assurance
 pnpm install
-pnpm run all  # runs everything; emits artifacts and reports
-
-# subset:
-pnpm run parity   # parity-only
+pnpm assure              # full run: vectors + property + fuzz + bench + onchain + FV bundle
+pnpm assure:audit-fuzz   # same entrypoint with raised fuzz iteration counts
 ```
 
-Outputs land in `artifacts/` and `reports/`. CI artifacts are
-attached to the assurance repo's CI runs (when CI is wired).
+Both commands resolve to
+[`src/index.ts`](https://github.com/b402-ai/b402-solana-assurance/blob/main/src/index.ts)
+under `tsx`. Outputs land in `artifacts/` and `reports/`; pinned vectors
+in `vectors/`. CI artifacts are attached to the assurance repo's CI
+runs (when CI is wired).
+
+Vector generation is deterministic — the harness uses a fixed RNG seed
+(`0xb402a55`) plus the commit-pinned circomlib parameters, so a
+re-run on the same `b402-solana` commit produces byte-identical
+`vectors/*.json`. Any divergence is a real semantic change and must be
+reviewed.

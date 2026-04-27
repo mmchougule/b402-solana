@@ -23,13 +23,13 @@ deployable, and **immutable** at deploy (`upgrade_authority = None`).
 
 Per circuit, the build pipeline:
 
-1. Compile the circuit: `circom <name>.circom -r <name>.r1cs --O1`.
+1. Compile the circuit: `circom NAME.circom -r NAME.r1cs --O1`.
 2. Phase 2 ceremony: `snarkjs zkey new` + contributions + `snarkjs zkey
    verify`.
-3. Export VK: `snarkjs zkey export verificationkey <name>.zkey
-   <name>_verification_key.json`.
-4. Convert to Rust constants: `scripts/vk-to-rust.mjs <name>_verification_key.json
-   > programs/b402-verifier-<name>/src/vk.rs`.
+3. Export VK: `snarkjs zkey export verificationkey NAME.zkey
+   NAME_verification_key.json`.
+4. Convert to Rust constants: `scripts/vk-to-rust.mjs NAME_verification_key.json
+   > programs/b402-verifier-NAME/src/vk.rs`.
 5. The verifier crate imports `vk.rs` as a `const VK: ...` and the
    compiled `.so` bakes it.
 
