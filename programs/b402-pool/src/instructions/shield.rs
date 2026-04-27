@@ -2,8 +2,8 @@ use anchor_lang::prelude::*;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
 use crate::constants::{
-    SEED_CONFIG, SEED_TOKEN, SEED_TREE, SEED_VAULT, VERSION_PREFIX,
-    TAG_COMMIT, TAG_NULLIFIER, TAG_MK_NODE, TAG_SPEND_KEY_PUB, TAG_FEE_BIND, TAG_RECIPIENT_BIND,
+    SEED_CONFIG, SEED_TOKEN, SEED_TREE, SEED_VAULT, TAG_COMMIT, TAG_FEE_BIND, TAG_MK_NODE,
+    TAG_NULLIFIER, TAG_RECIPIENT_BIND, TAG_SPEND_KEY_PUB, VERSION_PREFIX,
 };
 use crate::error::PoolError;
 use crate::events::{CommitmentAppended, ShieldExecuted};
@@ -42,7 +42,7 @@ pub struct EncryptedNote {
 /// frame limit. The handler asserts their lengths on entry.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
 pub struct ShieldArgs {
-    pub proof: Vec<u8>,                  // must be 256 bytes
+    pub proof: Vec<u8>, // must be 256 bytes
     pub public_inputs: TransactPublicInputs,
     pub encrypted_notes: Vec<EncryptedNote>, // must be 2 entries
     pub note_dummy_mask: u8,
@@ -103,7 +103,10 @@ pub fn handler(ctx: Context<Shield>, args: ShieldArgs) -> Result<()> {
     require!(args.proof.len() == 256, PoolError::InvalidInstructionData);
     // Accept 0..=2 encrypted_notes. Missing entries emit zero ciphertext on
     // chain; receiver-discovery for those notes happens via off-chain channel.
-    require!(args.encrypted_notes.len() <= 2, PoolError::InvalidInstructionData);
+    require!(
+        args.encrypted_notes.len() <= 2,
+        PoolError::InvalidInstructionData
+    );
 
     let cfg = &ctx.accounts.pool_config;
     require!(!cfg.paused_shields, PoolError::PoolPaused);
@@ -115,7 +118,10 @@ pub fn handler(ctx: Context<Shield>, args: ShieldArgs) -> Result<()> {
     // Shield constraints: public_amount_in > 0, public_amount_out == 0, fee == 0.
     let pi = &args.public_inputs;
     require!(pi.public_amount_in > 0, PoolError::PublicAmountExclusivity);
-    require!(pi.public_amount_out == 0, PoolError::PublicAmountExclusivity);
+    require!(
+        pi.public_amount_out == 0,
+        PoolError::PublicAmountExclusivity
+    );
     require!(pi.relayer_fee == 0, PoolError::InvalidFeeBinding);
 
     // Mint must match token_config.
@@ -169,7 +175,10 @@ pub fn handler(ctx: Context<Shield>, args: ShieldArgs) -> Result<()> {
         for (i, commitment) in pi.commitment_out.iter().enumerate() {
             let is_dummy = (args.note_dummy_mask >> i) & 1 == 1;
             if is_dummy {
-                require!(*commitment == [0u8; 32], PoolError::ProofPublicInputMismatch);
+                require!(
+                    *commitment == [0u8; 32],
+                    PoolError::ProofPublicInputMismatch
+                );
                 continue;
             }
             require!(*commitment != [0u8; 32], PoolError::InvalidCommitment);
@@ -220,7 +229,9 @@ fn build_public_inputs_for_shield(pi: &TransactPublicInputs) -> Vec<[u8; 32]> {
     v.push(pi.commitment_out[1]);
     v.push(u64_to_fr_le(pi.public_amount_in));
     v.push(u64_to_fr_le(pi.public_amount_out));
-    v.push(crate::util::reduce_le_mod_p(&pi.public_token_mint.to_bytes()));
+    v.push(crate::util::reduce_le_mod_p(
+        &pi.public_token_mint.to_bytes(),
+    ));
     v.push(u64_to_fr_le(pi.relayer_fee));
     v.push(pi.relayer_fee_bind);
     v.push(pi.root_bind);

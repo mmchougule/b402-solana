@@ -1,8 +1,8 @@
 //! Incremental Merkle Tree, depth 26, Poseidon-hashed, append-only.
 //! Specified in PRD-02 §5.
 
-use crate::Fr;
 use crate::poseidon;
+use crate::Fr;
 
 pub const TREE_DEPTH: usize = 26;
 
@@ -135,7 +135,11 @@ impl MerkleTree {
             let mut next = Vec::with_capacity((level_nodes.len() + 1) / 2);
             for i in (0..level_nodes.len()).step_by(2) {
                 let l = level_nodes[i];
-                let r = if i + 1 < level_nodes.len() { level_nodes[i + 1] } else { self.zero_cache[level] };
+                let r = if i + 1 < level_nodes.len() {
+                    level_nodes[i + 1]
+                } else {
+                    self.zero_cache[level]
+                };
                 next.push(poseidon::merkle_node(l, r).expect("poseidon"));
             }
             level_nodes = next;
@@ -147,7 +151,10 @@ impl MerkleTree {
             leaf_index: index,
             siblings,
             path_bits,
-            root: level_nodes.first().copied().unwrap_or(self.zero_cache[TREE_DEPTH]),
+            root: level_nodes
+                .first()
+                .copied()
+                .unwrap_or(self.zero_cache[TREE_DEPTH]),
         })
     }
 }

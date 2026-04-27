@@ -4,8 +4,8 @@ use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 use anchor_lang::solana_program::poseidon::{hashv, Endianness, Parameters};
 
 use crate::constants::{
-    SEED_CONFIG, SEED_NULL, SEED_TOKEN, SEED_TREE, SEED_VAULT, VERSION_PREFIX,
-    TAG_COMMIT, TAG_NULLIFIER, TAG_MK_NODE, TAG_SPEND_KEY_PUB, TAG_FEE_BIND, TAG_RECIPIENT_BIND,
+    SEED_CONFIG, SEED_NULL, SEED_TOKEN, SEED_TREE, SEED_VAULT, TAG_COMMIT, TAG_FEE_BIND,
+    TAG_MK_NODE, TAG_NULLIFIER, TAG_RECIPIENT_BIND, TAG_SPEND_KEY_PUB, VERSION_PREFIX,
 };
 use crate::error::PoolError;
 use crate::events::{CommitmentAppended, NullifierSpent, UnshieldExecuted};
@@ -17,7 +17,7 @@ use super::verifier_cpi;
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
 pub struct UnshieldArgs {
-    pub proof: Vec<u8>,                  // must be 256 bytes
+    pub proof: Vec<u8>, // must be 256 bytes
     pub public_inputs: TransactPublicInputs,
     pub encrypted_notes: Vec<EncryptedNote>, // must be 2 entries
     pub in_dummy_mask: u8,
@@ -100,7 +100,10 @@ pub struct Unshield<'info> {
 #[inline(never)]
 pub fn handler(ctx: Context<Unshield>, args: UnshieldArgs) -> Result<()> {
     require!(args.proof.len() == 256, PoolError::InvalidInstructionData);
-    require!(args.encrypted_notes.len() <= 2, PoolError::InvalidInstructionData);
+    require!(
+        args.encrypted_notes.len() <= 2,
+        PoolError::InvalidInstructionData
+    );
 
     // NOTE: unshield is NEVER paused — PRD-03 §4.5.
 
@@ -136,7 +139,10 @@ pub fn handler(ctx: Context<Unshield>, args: UnshieldArgs) -> Result<()> {
     for i in 0..2 {
         let is_dummy = (args.in_dummy_mask >> i) & 1 == 1;
         if is_dummy {
-            require!(pi.nullifier[i] == [0u8; 32], PoolError::ProofPublicInputMismatch);
+            require!(
+                pi.nullifier[i] == [0u8; 32],
+                PoolError::ProofPublicInputMismatch
+            );
             continue;
         }
         let actual_prefix = util::shard_prefix(&pi.nullifier[i]);
@@ -199,16 +205,36 @@ pub fn handler(ctx: Context<Unshield>, args: UnshieldArgs) -> Result<()> {
     let clock = Clock::get()?;
 
     if (args.in_dummy_mask & 0b01) == 0 {
-        let mut shard = load_or_init_shard(&ctx.accounts.nullifier_shard_0, args.nullifier_shard_prefix[0])?;
-        require!(shard.prefix == args.nullifier_shard_prefix[0], PoolError::NullifierShardMismatch);
+        let mut shard = load_or_init_shard(
+            &ctx.accounts.nullifier_shard_0,
+            args.nullifier_shard_prefix[0],
+        )?;
+        require!(
+            shard.prefix == args.nullifier_shard_prefix[0],
+            PoolError::NullifierShardMismatch
+        );
         util::nullifier_insert(&mut shard, pi.nullifier[0])?;
-        emit!(NullifierSpent { nullifier: pi.nullifier[0], shard: shard.prefix, slot: clock.slot });
+        emit!(NullifierSpent {
+            nullifier: pi.nullifier[0],
+            shard: shard.prefix,
+            slot: clock.slot
+        });
     }
     if (args.in_dummy_mask & 0b10) == 0 {
-        let mut shard = load_or_init_shard(&ctx.accounts.nullifier_shard_1, args.nullifier_shard_prefix[1])?;
-        require!(shard.prefix == args.nullifier_shard_prefix[1], PoolError::NullifierShardMismatch);
+        let mut shard = load_or_init_shard(
+            &ctx.accounts.nullifier_shard_1,
+            args.nullifier_shard_prefix[1],
+        )?;
+        require!(
+            shard.prefix == args.nullifier_shard_prefix[1],
+            PoolError::NullifierShardMismatch
+        );
         util::nullifier_insert(&mut shard, pi.nullifier[1])?;
-        emit!(NullifierSpent { nullifier: pi.nullifier[1], shard: shard.prefix, slot: clock.slot });
+        emit!(NullifierSpent {
+            nullifier: pi.nullifier[1],
+            shard: shard.prefix,
+            slot: clock.slot
+        });
     }
 
     // Append change commitments.
@@ -217,7 +243,10 @@ pub fn handler(ctx: Context<Unshield>, args: UnshieldArgs) -> Result<()> {
         for (i, commitment) in pi.commitment_out.iter().enumerate() {
             let is_dummy = (args.out_dummy_mask >> i) & 1 == 1;
             if is_dummy {
-                require!(*commitment == [0u8; 32], PoolError::ProofPublicInputMismatch);
+                require!(
+                    *commitment == [0u8; 32],
+                    PoolError::ProofPublicInputMismatch
+                );
                 continue;
             }
             let leaf_index = tree.leaf_count;
@@ -227,15 +256,20 @@ pub fn handler(ctx: Context<Unshield>, args: UnshieldArgs) -> Result<()> {
                 None => ([0u8; 89], [0u8; 32], [0u8; 2]),
             };
             emit!(CommitmentAppended {
-                leaf_index, commitment: *commitment,
-                ciphertext: ct, ephemeral_pub: ep, viewing_tag: vt,
-                tree_root_after: new_root, slot: clock.slot,
+                leaf_index,
+                commitment: *commitment,
+                ciphertext: ct,
+                ephemeral_pub: ep,
+                viewing_tag: vt,
+                tree_root_after: new_root,
+                slot: clock.slot,
             });
         }
     }
 
     // Transfer recipient amount (public_amount_out - relayer_fee).
-    let net = pi.public_amount_out
+    let net = pi
+        .public_amount_out
         .checked_sub(pi.relayer_fee)
         .ok_or(error!(PoolError::ValueOverflow))?;
 
@@ -248,7 +282,11 @@ pub fn handler(ctx: Context<Unshield>, args: UnshieldArgs) -> Result<()> {
     let seeds: &[&[u8]] = &[VERSION_PREFIX, SEED_CONFIG, &[ctx.bumps.pool_config]];
     let signer = &[seeds];
     token::transfer(
-        CpiContext::new_with_signer(ctx.accounts.token_program.to_account_info(), cpi_accounts, signer),
+        CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            cpi_accounts,
+            signer,
+        ),
         net,
     )?;
 
@@ -260,7 +298,11 @@ pub fn handler(ctx: Context<Unshield>, args: UnshieldArgs) -> Result<()> {
             authority: pool_config_info.clone(),
         };
         token::transfer(
-            CpiContext::new_with_signer(ctx.accounts.token_program.to_account_info(), cpi_fee, signer),
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                cpi_fee,
+                signer,
+            ),
             pi.relayer_fee,
         )?;
     }
@@ -307,7 +349,9 @@ fn build_public_inputs_for_unshield(pi: &TransactPublicInputs) -> Vec<[u8; 32]> 
     v.push(pi.commitment_out[1]);
     v.push(u64_to_fr_le(pi.public_amount_in));
     v.push(u64_to_fr_le(pi.public_amount_out));
-    v.push(crate::util::reduce_le_mod_p(&pi.public_token_mint.to_bytes()));
+    v.push(crate::util::reduce_le_mod_p(
+        &pi.public_token_mint.to_bytes(),
+    ));
     v.push(u64_to_fr_le(pi.relayer_fee));
     v.push(pi.relayer_fee_bind);
     v.push(pi.root_bind);

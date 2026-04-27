@@ -39,7 +39,10 @@ fn payload_minimum_length_is_eight() {
     // Pin the contract: anything < 8 bytes can't carry a discriminator, so
     // the adapter rejects without a CPI attempt.
     let too_short: Vec<u8> = vec![0x12, 0x34, 0x56];
-    assert!(too_short.len() < 8, "fixture must be sub-discriminator length");
+    assert!(
+        too_short.len() < 8,
+        "fixture must be sub-discriminator length"
+    );
 
     // Symmetric assertion: an 8-byte payload (discriminator only, no route
     // args) IS the minimum acceptable wire shape from this adapter's POV.

@@ -50,7 +50,9 @@ pub mod b402_mock_adapter {
             min_out_amount.saturating_add(delta as u64)
         } else {
             let abs = (-delta) as u64;
-            min_out_amount.checked_sub(abs).ok_or(MockError::Underflow)?
+            min_out_amount
+                .checked_sub(abs)
+                .ok_or(MockError::Underflow)?
         };
 
         // Transfer `to_send` from our scratch out_ta to the pool's out_vault.
@@ -111,7 +113,10 @@ pub struct Execute<'info> {
 
 #[error_code]
 pub enum MockError {
-    #[msg("invalid payload length")]                  InvalidPayload     = 4000,
-    #[msg("underflow computing output")]              Underflow          = 4001,
-    #[msg("adapter_in_ta has insufficient balance")]  InsufficientInput  = 4002,
+    #[msg("invalid payload length")]
+    InvalidPayload = 4000,
+    #[msg("underflow computing output")]
+    Underflow = 4001,
+    #[msg("adapter_in_ta has insufficient balance")]
+    InsufficientInput = 4002,
 }

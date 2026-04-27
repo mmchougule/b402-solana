@@ -42,22 +42,28 @@ fn fr_to_decimal(fr: Fr) -> String {
 
 fn tag_from_name(name: &str) -> DomainTag {
     match name {
-        "commit"      => DomainTag::Commit,
-        "nullifier"   => DomainTag::Nullifier,
-        "mk-node"     => DomainTag::MerkleNode,
-        "mk-zero"     => DomainTag::MerkleZero,
+        "commit" => DomainTag::Commit,
+        "nullifier" => DomainTag::Nullifier,
+        "mk-node" => DomainTag::MerkleNode,
+        "mk-zero" => DomainTag::MerkleZero,
         "spend-key-pub" => DomainTag::SpendKeyPub,
-        "fee-bind"    => DomainTag::FeeBind,
-        "root-bind"   => DomainTag::RootBind,
-        "adapt-bind"  => DomainTag::AdaptBind,
-        "view-tag"    => DomainTag::ViewTag,
-        other => { eprintln!("unknown tag: {}", other); exit(1); }
+        "fee-bind" => DomainTag::FeeBind,
+        "root-bind" => DomainTag::RootBind,
+        "adapt-bind" => DomainTag::AdaptBind,
+        "view-tag" => DomainTag::ViewTag,
+        other => {
+            eprintln!("unknown tag: {}", other);
+            exit(1);
+        }
     }
 }
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
-    if args.is_empty() { eprintln!("usage: b402-parity <cmd> ..."); exit(2); }
+    if args.is_empty() {
+        eprintln!("usage: b402-parity <cmd> ...");
+        exit(2);
+    }
 
     match args[0].as_str() {
         "poseidon-tagged" => {
@@ -97,7 +103,10 @@ fn main() {
             }
             println!("{}", fr_to_decimal(tree.root));
         }
-        other => { eprintln!("unknown cmd: {}", other); exit(2); }
+        other => {
+            eprintln!("unknown cmd: {}", other);
+            exit(2);
+        }
     }
 
     // Ensure we don't emit trailing debug info.

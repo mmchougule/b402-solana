@@ -61,7 +61,7 @@ pub struct AdapterRegistered {
 
 #[event]
 pub struct PoolPauseChanged {
-    pub flag: u8,              // 0 shields, 1 transacts, 2 adapts
+    pub flag: u8, // 0 shields, 1 transacts, 2 adapts
     pub paused: bool,
     pub slot: u64,
 }

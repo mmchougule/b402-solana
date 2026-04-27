@@ -1,10 +1,10 @@
 //! Shielded notes per PRD-02 §3.
 
-use crate::{Fr, poseidon};
+use crate::{poseidon, Fr};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Note {
-    pub token_mint: Fr,   // mint pubkey reduced mod p
+    pub token_mint: Fr, // mint pubkey reduced mod p
     pub value: u64,
     pub random: Fr,
     pub spending_pub: Fr,

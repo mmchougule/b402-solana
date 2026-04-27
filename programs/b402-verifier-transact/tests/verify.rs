@@ -21,20 +21,25 @@ struct Fixture {
 }
 
 fn load_fixture() -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<[u8; 32]>) {
-    let raw = std::fs::read_to_string(FIXTURE_PATH)
-        .unwrap_or_else(|_| panic!(
+    let raw = std::fs::read_to_string(FIXTURE_PATH).unwrap_or_else(|_| {
+        panic!(
             "missing fixture {FIXTURE_PATH}; run `cd circuits && node scripts/gen-test-proof.mjs`",
-        ));
+        )
+    });
     let f: Fixture = serde_json::from_str(&raw).expect("fixture json parse");
     let a = hex::decode(&f.proof_a_be).unwrap();
     let b = hex::decode(&f.proof_b_be).unwrap();
     let c = hex::decode(&f.proof_c_be).unwrap();
-    let pi: Vec<[u8; 32]> = f.public_inputs_be.iter().map(|h| {
-        let v = hex::decode(h).unwrap();
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&v);
-        arr
-    }).collect();
+    let pi: Vec<[u8; 32]> = f
+        .public_inputs_be
+        .iter()
+        .map(|h| {
+            let v = hex::decode(h).unwrap();
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&v);
+            arr
+        })
+        .collect();
     (a, b, c, pi)
 }
 
@@ -46,11 +51,16 @@ fn valid_proof_verifies() {
     assert_eq!(c.len(), 64);
     assert_eq!(pi.len(), PUBLIC_INPUT_COUNT);
 
-    let mut pa = [0u8; 64]; pa.copy_from_slice(&a);
-    let mut pb = [0u8; 128]; pb.copy_from_slice(&b);
-    let mut pc = [0u8; 64]; pc.copy_from_slice(&c);
+    let mut pa = [0u8; 64];
+    pa.copy_from_slice(&a);
+    let mut pb = [0u8; 128];
+    pb.copy_from_slice(&b);
+    let mut pc = [0u8; 64];
+    pc.copy_from_slice(&c);
     let mut pis = [[0u8; 32]; PUBLIC_INPUT_COUNT];
-    for i in 0..PUBLIC_INPUT_COUNT { pis[i] = pi[i]; }
+    for i in 0..PUBLIC_INPUT_COUNT {
+        pis[i] = pi[i];
+    }
 
     verify_proof_be(&pa, &pb, &pc, &pis).expect("valid proof must verify");
 }
@@ -59,11 +69,16 @@ fn valid_proof_verifies() {
 fn tampered_public_inputs_rejected() {
     let (a, b, c, pi) = load_fixture();
 
-    let mut pa = [0u8; 64]; pa.copy_from_slice(&a);
-    let mut pb = [0u8; 128]; pb.copy_from_slice(&b);
-    let mut pc = [0u8; 64]; pc.copy_from_slice(&c);
+    let mut pa = [0u8; 64];
+    pa.copy_from_slice(&a);
+    let mut pb = [0u8; 128];
+    pb.copy_from_slice(&b);
+    let mut pc = [0u8; 64];
+    pc.copy_from_slice(&c);
     let mut pis = [[0u8; 32]; PUBLIC_INPUT_COUNT];
-    for i in 0..PUBLIC_INPUT_COUNT { pis[i] = pi[i]; }
+    for i in 0..PUBLIC_INPUT_COUNT {
+        pis[i] = pi[i];
+    }
 
     // Flip the first bit of merkleRoot (public input 0).
     pis[0][31] ^= 0x01;
@@ -76,11 +91,16 @@ fn tampered_public_inputs_rejected() {
 fn tampered_proof_rejected() {
     let (a, b, c, pi) = load_fixture();
 
-    let mut pa = [0u8; 64]; pa.copy_from_slice(&a);
-    let mut pb = [0u8; 128]; pb.copy_from_slice(&b);
-    let mut pc = [0u8; 64]; pc.copy_from_slice(&c);
+    let mut pa = [0u8; 64];
+    pa.copy_from_slice(&a);
+    let mut pb = [0u8; 128];
+    pb.copy_from_slice(&b);
+    let mut pc = [0u8; 64];
+    pc.copy_from_slice(&c);
     let mut pis = [[0u8; 32]; PUBLIC_INPUT_COUNT];
-    for i in 0..PUBLIC_INPUT_COUNT { pis[i] = pi[i]; }
+    for i in 0..PUBLIC_INPUT_COUNT {
+        pis[i] = pi[i];
+    }
 
     // Flip a byte in proof A.
     pa[0] ^= 0x01;
@@ -98,11 +118,16 @@ fn tampered_proof_rejected() {
 ///   4  commitment_out[1]  9  relayer_fee_bind   14 mk_node_tag
 fn assert_tamper_rejected(idx: usize, byte: usize, mask: u8, what: &str) {
     let (a, b, c, pi) = load_fixture();
-    let mut pa = [0u8; 64]; pa.copy_from_slice(&a);
-    let mut pb = [0u8; 128]; pb.copy_from_slice(&b);
-    let mut pc = [0u8; 64]; pc.copy_from_slice(&c);
+    let mut pa = [0u8; 64];
+    pa.copy_from_slice(&a);
+    let mut pb = [0u8; 128];
+    pb.copy_from_slice(&b);
+    let mut pc = [0u8; 64];
+    pc.copy_from_slice(&c);
     let mut pis = [[0u8; 32]; PUBLIC_INPUT_COUNT];
-    for i in 0..PUBLIC_INPUT_COUNT { pis[i] = pi[i]; }
+    for i in 0..PUBLIC_INPUT_COUNT {
+        pis[i] = pi[i];
+    }
 
     pis[idx][byte] ^= mask;
 

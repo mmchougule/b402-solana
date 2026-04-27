@@ -103,12 +103,10 @@ pub const KAMINO_IX_WITHDRAW_OBLIGATION_COLLATERAL_AND_REDEEM_RESERVE_COLLATERAL
     [75, 93, 93, 220, 34, 150, 218, 196];
 
 /// `borrow_obligation_liquidity` (v1).
-pub const KAMINO_IX_BORROW_OBLIGATION_LIQUIDITY: [u8; 8] =
-    [121, 127, 18, 204, 73, 245, 225, 65];
+pub const KAMINO_IX_BORROW_OBLIGATION_LIQUIDITY: [u8; 8] = [121, 127, 18, 204, 73, 245, 225, 65];
 
 /// `repay_obligation_liquidity` (v1).
-pub const KAMINO_IX_REPAY_OBLIGATION_LIQUIDITY: [u8; 8] =
-    [145, 178, 13, 225, 76, 240, 147, 72];
+pub const KAMINO_IX_REPAY_OBLIGATION_LIQUIDITY: [u8; 8] = [145, 178, 13, 225, 76, 240, 147, 72];
 
 /// PDA seed prefix for per-user Kamino obligations (PRD-09 §7.2). Reserved
 /// for the per-user upgrade — currently unused (single shared obligation).
@@ -183,7 +181,10 @@ pub enum KaminoAction {
         amount_out: u64,
         max_collateral_used_bps: u16,
     },
-    Repay { reserve: Pubkey, amount_in: u64 },
+    Repay {
+        reserve: Pubkey,
+        amount_in: u64,
+    },
 }
 
 #[program]
@@ -221,15 +222,27 @@ pub mod b402_kamino_adapter {
         let signer_seeds = &[auth_seeds];
 
         match &action {
-            KaminoAction::Deposit { reserve, in_amount: act_in, min_kt_out } => {
+            KaminoAction::Deposit {
+                reserve,
+                in_amount: act_in,
+                min_kt_out,
+            } => {
                 require!(*act_in == in_amount, KaminoAdapterError::AmountMismatch);
                 handle_deposit(&ctx, *reserve, *act_in, *min_kt_out, signer_seeds)?;
             }
-            KaminoAction::Withdraw { reserve, kt_in, min_underlying_out } => {
+            KaminoAction::Withdraw {
+                reserve,
+                kt_in,
+                min_underlying_out,
+            } => {
                 require!(*kt_in == in_amount, KaminoAdapterError::AmountMismatch);
                 handle_withdraw(&ctx, *reserve, *kt_in, *min_underlying_out, signer_seeds)?;
             }
-            KaminoAction::Borrow { reserve, amount_out, max_collateral_used_bps } => {
+            KaminoAction::Borrow {
+                reserve,
+                amount_out,
+                max_collateral_used_bps,
+            } => {
                 handle_borrow(
                     &ctx,
                     *reserve,
@@ -475,13 +488,31 @@ fn handle_deposit<'info>(
         //   referrerUserMetadata(opt) rent system_program
         // Adapter authority signs as both owner + feePayer.
         let metas = [
-            KaminoMeta { key: auth_key, is_writable: true }, // owner
-            KaminoMeta { key: auth_key, is_writable: true }, // feePayer
-            KaminoMeta { key: user_metadata.key(), is_writable: true },
+            KaminoMeta {
+                key: auth_key,
+                is_writable: true,
+            }, // owner
+            KaminoMeta {
+                key: auth_key,
+                is_writable: true,
+            }, // feePayer
+            KaminoMeta {
+                key: user_metadata.key(),
+                is_writable: true,
+            },
             // referrer_user_metadata = None sentinel = klend program ID
-            KaminoMeta { key: KAMINO_LEND_PROGRAM_ID, is_writable: false },
-            KaminoMeta { key: rent_sysvar.key(), is_writable: false },
-            KaminoMeta { key: system_program.key(), is_writable: false },
+            KaminoMeta {
+                key: KAMINO_LEND_PROGRAM_ID,
+                is_writable: false,
+            },
+            KaminoMeta {
+                key: rent_sysvar.key(),
+                is_writable: false,
+            },
+            KaminoMeta {
+                key: system_program.key(),
+                is_writable: false,
+            },
         ];
         // Args: user_lookup_table: Pubkey (32 zeros = no LUT)
         let mut data = Vec::with_capacity(32);
@@ -500,15 +531,42 @@ fn handle_deposit<'info>(
         // For Vanilla obligation seed1/seed2 = default Pubkey (read).
         let default_pk = SolPubkey::default();
         let metas = [
-            KaminoMeta { key: auth_key, is_writable: true }, // obligationOwner
-            KaminoMeta { key: auth_key, is_writable: true }, // feePayer
-            KaminoMeta { key: obligation.key(), is_writable: true },
-            KaminoMeta { key: market.key(), is_writable: false },
-            KaminoMeta { key: default_pk, is_writable: false },
-            KaminoMeta { key: default_pk, is_writable: false },
-            KaminoMeta { key: user_metadata.key(), is_writable: false },
-            KaminoMeta { key: rent_sysvar.key(), is_writable: false },
-            KaminoMeta { key: system_program.key(), is_writable: false },
+            KaminoMeta {
+                key: auth_key,
+                is_writable: true,
+            }, // obligationOwner
+            KaminoMeta {
+                key: auth_key,
+                is_writable: true,
+            }, // feePayer
+            KaminoMeta {
+                key: obligation.key(),
+                is_writable: true,
+            },
+            KaminoMeta {
+                key: market.key(),
+                is_writable: false,
+            },
+            KaminoMeta {
+                key: default_pk,
+                is_writable: false,
+            },
+            KaminoMeta {
+                key: default_pk,
+                is_writable: false,
+            },
+            KaminoMeta {
+                key: user_metadata.key(),
+                is_writable: false,
+            },
+            KaminoMeta {
+                key: rent_sysvar.key(),
+                is_writable: false,
+            },
+            KaminoMeta {
+                key: system_program.key(),
+                is_writable: false,
+            },
         ];
         // Args: tag(u8) + id(u8) — Vanilla = (0, 0).
         let data = [0u8, 0u8];
@@ -525,17 +583,50 @@ fn handle_deposit<'info>(
         //   reserve(w) reserveFarmState(w) obligationFarm(w)
         //   lendingMarket farmsProgram rent system_program
         let metas = [
-            KaminoMeta { key: auth_key, is_writable: true }, // payer
-            KaminoMeta { key: auth_key, is_writable: false }, // owner
-            KaminoMeta { key: obligation.key(), is_writable: true },
-            KaminoMeta { key: market_authority.key(), is_writable: false },
-            KaminoMeta { key: reserve.key(), is_writable: true },
-            KaminoMeta { key: reserve_farm_state_or_sentinel.key(), is_writable: true },
-            KaminoMeta { key: obligation_farm_or_sentinel.key(), is_writable: true },
-            KaminoMeta { key: market.key(), is_writable: false },
-            KaminoMeta { key: farms_program.key(), is_writable: false },
-            KaminoMeta { key: rent_sysvar.key(), is_writable: false },
-            KaminoMeta { key: system_program.key(), is_writable: false },
+            KaminoMeta {
+                key: auth_key,
+                is_writable: true,
+            }, // payer
+            KaminoMeta {
+                key: auth_key,
+                is_writable: false,
+            }, // owner
+            KaminoMeta {
+                key: obligation.key(),
+                is_writable: true,
+            },
+            KaminoMeta {
+                key: market_authority.key(),
+                is_writable: false,
+            },
+            KaminoMeta {
+                key: reserve.key(),
+                is_writable: true,
+            },
+            KaminoMeta {
+                key: reserve_farm_state_or_sentinel.key(),
+                is_writable: true,
+            },
+            KaminoMeta {
+                key: obligation_farm_or_sentinel.key(),
+                is_writable: true,
+            },
+            KaminoMeta {
+                key: market.key(),
+                is_writable: false,
+            },
+            KaminoMeta {
+                key: farms_program.key(),
+                is_writable: false,
+            },
+            KaminoMeta {
+                key: rent_sysvar.key(),
+                is_writable: false,
+            },
+            KaminoMeta {
+                key: system_program.key(),
+                is_writable: false,
+            },
         ];
         let data = [0u8]; // mode = 0 (collateral)
         let ix = build_kamino_ix(
@@ -551,12 +642,30 @@ fn handle_deposit<'info>(
     // --- 4. refresh_reserve -------------------------------------------------
     {
         let metas = [
-            KaminoMeta { key: reserve.key(), is_writable: true },
-            KaminoMeta { key: market.key(), is_writable: false },
-            KaminoMeta { key: oracle_pyth.key(), is_writable: false },
-            KaminoMeta { key: oracle_swb_price.key(), is_writable: false },
-            KaminoMeta { key: oracle_swb_twap.key(), is_writable: false },
-            KaminoMeta { key: oracle_scope.key(), is_writable: false },
+            KaminoMeta {
+                key: reserve.key(),
+                is_writable: true,
+            },
+            KaminoMeta {
+                key: market.key(),
+                is_writable: false,
+            },
+            KaminoMeta {
+                key: oracle_pyth.key(),
+                is_writable: false,
+            },
+            KaminoMeta {
+                key: oracle_swb_price.key(),
+                is_writable: false,
+            },
+            KaminoMeta {
+                key: oracle_swb_twap.key(),
+                is_writable: false,
+            },
+            KaminoMeta {
+                key: oracle_scope.key(),
+                is_writable: false,
+            },
         ];
         let ix = build_kamino_ix(auth_key, &metas, KAMINO_IX_REFRESH_RESERVE, &[]);
         invoke_signed(&ix, &infos, signer_seeds)
@@ -566,8 +675,14 @@ fn handle_deposit<'info>(
     // --- 5. refresh_obligation ---------------------------------------------
     {
         let metas = [
-            KaminoMeta { key: market.key(), is_writable: false },
-            KaminoMeta { key: obligation.key(), is_writable: true },
+            KaminoMeta {
+                key: market.key(),
+                is_writable: false,
+            },
+            KaminoMeta {
+                key: obligation.key(),
+                is_writable: true,
+            },
         ];
         let ix = build_kamino_ix(auth_key, &metas, KAMINO_IX_REFRESH_OBLIGATION, &[]);
         invoke_signed(&ix, &infos, signer_seeds)
@@ -596,20 +711,62 @@ fn handle_deposit<'info>(
     let coll_token_program = token_program.key(); // both coll + liq are SPL token v1
     let liq_token_program = token_program.key();
     let metas = [
-        KaminoMeta { key: auth_key, is_writable: true },                       // 0
-        KaminoMeta { key: obligation.key(), is_writable: true },               // 1
-        KaminoMeta { key: market.key(), is_writable: false },                  // 2
-        KaminoMeta { key: market_authority.key(), is_writable: false },        // 3
-        KaminoMeta { key: reserve.key(), is_writable: true },                  // 4
-        KaminoMeta { key: reserve_liq_mint.key(), is_writable: false },        // 5
-        KaminoMeta { key: reserve_liq_supply.key(), is_writable: true },       // 6
-        KaminoMeta { key: reserve_coll_mint.key(), is_writable: true },        // 7
-        KaminoMeta { key: reserve_coll_supply.key(), is_writable: true },      // 8
-        KaminoMeta { key: adapter_in_ta.key(), is_writable: true },            // 9
-        KaminoMeta { key: KAMINO_LEND_PROGRAM_ID, is_writable: false },        // 10
-        KaminoMeta { key: coll_token_program, is_writable: false },            // 11
-        KaminoMeta { key: liq_token_program, is_writable: false },             // 12
-        KaminoMeta { key: sysvar_instructions.key(), is_writable: false },     // 13
+        KaminoMeta {
+            key: auth_key,
+            is_writable: true,
+        }, // 0
+        KaminoMeta {
+            key: obligation.key(),
+            is_writable: true,
+        }, // 1
+        KaminoMeta {
+            key: market.key(),
+            is_writable: false,
+        }, // 2
+        KaminoMeta {
+            key: market_authority.key(),
+            is_writable: false,
+        }, // 3
+        KaminoMeta {
+            key: reserve.key(),
+            is_writable: true,
+        }, // 4
+        KaminoMeta {
+            key: reserve_liq_mint.key(),
+            is_writable: false,
+        }, // 5
+        KaminoMeta {
+            key: reserve_liq_supply.key(),
+            is_writable: true,
+        }, // 6
+        KaminoMeta {
+            key: reserve_coll_mint.key(),
+            is_writable: true,
+        }, // 7
+        KaminoMeta {
+            key: reserve_coll_supply.key(),
+            is_writable: true,
+        }, // 8
+        KaminoMeta {
+            key: adapter_in_ta.key(),
+            is_writable: true,
+        }, // 9
+        KaminoMeta {
+            key: KAMINO_LEND_PROGRAM_ID,
+            is_writable: false,
+        }, // 10
+        KaminoMeta {
+            key: coll_token_program,
+            is_writable: false,
+        }, // 11
+        KaminoMeta {
+            key: liq_token_program,
+            is_writable: false,
+        }, // 12
+        KaminoMeta {
+            key: sysvar_instructions.key(),
+            is_writable: false,
+        }, // 13
         KaminoMeta {
             key: obligation_farm_or_sentinel.key(),
             is_writable: reserve_has_farm,
@@ -618,7 +775,10 @@ fn handle_deposit<'info>(
             key: reserve_farm_state_or_sentinel.key(),
             is_writable: reserve_has_farm,
         }, // 15
-        KaminoMeta { key: farms_program.key(), is_writable: false },           // 16
+        KaminoMeta {
+            key: farms_program.key(),
+            is_writable: false,
+        }, // 16
     ];
 
     let mut data = Vec::with_capacity(8);
@@ -648,17 +808,17 @@ fn handle_withdraw<'info>(
     // the deposit gate is what proves the wiring works end-to-end.
     let auth_key = ctx.accounts.adapter_authority.key();
     let ra = ctx.remaining_accounts;
-    require!(
-        ra.len() >= 7,
-        KaminoAdapterError::MissingRemainingAccounts
-    );
+    require!(ra.len() >= 7, KaminoAdapterError::MissingRemainingAccounts);
 
     let infos = forward_infos(ctx);
     // Forward all remaining accounts as-is (preserve their writability),
     // mark adapter_authority as signer.
     let metas: Vec<KaminoMeta> = ra
         .iter()
-        .map(|a| KaminoMeta { key: a.key(), is_writable: a.is_writable })
+        .map(|a| KaminoMeta {
+            key: a.key(),
+            is_writable: a.is_writable,
+        })
         .collect();
 
     let ix = build_kamino_ix(auth_key, &metas, KAMINO_IX_REFRESH_RESERVE, &[]);
@@ -690,15 +850,15 @@ fn handle_borrow<'info>(
 ) -> Result<()> {
     let auth_key = ctx.accounts.adapter_authority.key();
     let ra = ctx.remaining_accounts;
-    require!(
-        ra.len() >= 7,
-        KaminoAdapterError::MissingRemainingAccounts
-    );
+    require!(ra.len() >= 7, KaminoAdapterError::MissingRemainingAccounts);
 
     let infos = forward_infos(ctx);
     let metas: Vec<KaminoMeta> = ra
         .iter()
-        .map(|a| KaminoMeta { key: a.key(), is_writable: a.is_writable })
+        .map(|a| KaminoMeta {
+            key: a.key(),
+            is_writable: a.is_writable,
+        })
         .collect();
 
     let ix = build_kamino_ix(auth_key, &metas, KAMINO_IX_REFRESH_RESERVE, &[]);
@@ -729,15 +889,15 @@ fn handle_repay<'info>(
 ) -> Result<()> {
     let auth_key = ctx.accounts.adapter_authority.key();
     let ra = ctx.remaining_accounts;
-    require!(
-        ra.len() >= 5,
-        KaminoAdapterError::MissingRemainingAccounts
-    );
+    require!(ra.len() >= 5, KaminoAdapterError::MissingRemainingAccounts);
 
     let infos = forward_infos(ctx);
     let metas: Vec<KaminoMeta> = ra
         .iter()
-        .map(|a| KaminoMeta { key: a.key(), is_writable: a.is_writable })
+        .map(|a| KaminoMeta {
+            key: a.key(),
+            is_writable: a.is_writable,
+        })
         .collect();
 
     let ix = build_kamino_ix(auth_key, &metas, KAMINO_IX_REFRESH_RESERVE, &[]);
@@ -841,15 +1001,12 @@ pub fn derive_owner_pda(viewing_pub_hash: &[u8; 32]) -> (Pubkey, u8) {
 /// Derive the per-user Kamino Vanilla obligation PDA. Used by the SDK for
 /// the per-user upgrade — currently informational only.
 #[allow(dead_code)]
-pub fn derive_obligation_pda(
-    owner_pda: &Pubkey,
-    lending_market: &Pubkey,
-) -> (Pubkey, u8) {
+pub fn derive_obligation_pda(owner_pda: &Pubkey, lending_market: &Pubkey) -> (Pubkey, u8) {
     let default_pk = Pubkey::default();
     Pubkey::find_program_address(
         &[
-            &[0u8],            // tag (Vanilla)
-            &[0u8],            // id
+            &[0u8], // tag (Vanilla)
+            &[0u8], // id
             owner_pda.as_ref(),
             lending_market.as_ref(),
             default_pk.as_ref(),

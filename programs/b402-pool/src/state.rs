@@ -6,8 +6,8 @@
 //! the Anchor-generated instruction dispatcher would blow BPF's 4 KiB
 //! stack limit on `transact` and `unshield` (each pulls tree + 2 shards).
 
-use anchor_lang::prelude::*;
 use crate::constants::{ROOT_HISTORY_SIZE, TREE_DEPTH};
+use anchor_lang::prelude::*;
 
 /// Small account, Borsh-serialized is fine.
 #[account]
@@ -26,9 +26,7 @@ pub struct PoolConfig {
     pub _reserved: [u8; 96],
 }
 impl PoolConfig {
-    pub const LEN: usize = 8
-        + 2 + 32 + 1 + 1 + 1 + 1 + 1 + 8
-        + 32 + 32 + 32 + 96;
+    pub const LEN: usize = 8 + 2 + 32 + 1 + 1 + 1 + 1 + 1 + 8 + 32 + 32 + 32 + 96;
 }
 
 /// Small account.
@@ -50,21 +48,23 @@ impl TokenConfig {
 #[repr(C)]
 pub struct TreeState {
     pub version: u16,
-    pub _pad0: [u8; 6],                                // align to 8
+    pub _pad0: [u8; 6], // align to 8
     pub leaf_count: u64,
     pub ring_head: u8,
     pub _pad1: [u8; 7],
-    pub root_ring: [[u8; 32]; ROOT_HISTORY_SIZE],      // 2048
-    pub frontier: [[u8; 32]; TREE_DEPTH],              // 832
-    pub zero_cache: [[u8; 32]; TREE_DEPTH],            // 832
+    pub root_ring: [[u8; 32]; ROOT_HISTORY_SIZE], // 2048
+    pub frontier: [[u8; 32]; TREE_DEPTH],         // 832
+    pub zero_cache: [[u8; 32]; TREE_DEPTH],       // 832
     pub _reserved: [u8; 64],
 }
 impl TreeState {
     // 8 (discriminator) + struct contents. With #[repr(C)] + zero_copy:
     pub const LEN: usize = 8
-        + 2 + 6
+        + 2
+        + 6
         + 8
-        + 1 + 7
+        + 1
+        + 7
         + (32 * ROOT_HISTORY_SIZE)
         + (32 * TREE_DEPTH)
         + (32 * TREE_DEPTH)
@@ -109,10 +109,7 @@ pub struct NullifierShard {
     pub nullifiers_bytes: NullifierBuf,
 }
 impl NullifierShard {
-    pub const LEN: usize = 8
-        + 2 + 2
-        + 4
-        + NULLIFIER_BYTES_PER_SHARD;
+    pub const LEN: usize = 8 + 2 + 2 + 4 + NULLIFIER_BYTES_PER_SHARD;
 
     /// View the nullifiers as a slice of 32-byte arrays. Panics if `count`
     /// exceeds capacity (should be unreachable given `util::nullifier_insert`

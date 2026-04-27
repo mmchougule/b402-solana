@@ -92,47 +92,39 @@ pub const ADRENA_PROGRAM_ID: Pubkey =
 
 /// `open_position_long` discriminator.
 /// IDL: verified 2026-04-26 against AdrenaFoundation/adrena-abi master.
-pub const ADRENA_IX_OPEN_POSITION_LONG: [u8; 8] =
-    [224, 114, 146, 60, 127, 166, 244, 56];
+pub const ADRENA_IX_OPEN_POSITION_LONG: [u8; 8] = [224, 114, 146, 60, 127, 166, 244, 56];
 
 /// `open_position_short` discriminator.
 /// IDL: verified 2026-04-26 against AdrenaFoundation/adrena-abi master.
-pub const ADRENA_IX_OPEN_POSITION_SHORT: [u8; 8] =
-    [196, 212, 161, 82, 250, 39, 201, 102];
+pub const ADRENA_IX_OPEN_POSITION_SHORT: [u8; 8] = [196, 212, 161, 82, 250, 39, 201, 102];
 
 /// `increase_position_long` discriminator.
 /// IDL: verified 2026-04-26 against AdrenaFoundation/adrena-abi master.
-pub const ADRENA_IX_INCREASE_POSITION_LONG: [u8; 8] =
-    [253, 45, 99, 159, 1, 124, 132, 43];
+pub const ADRENA_IX_INCREASE_POSITION_LONG: [u8; 8] = [253, 45, 99, 159, 1, 124, 132, 43];
 
 /// `increase_position_short` discriminator.
 /// IDL: verified 2026-04-26 against AdrenaFoundation/adrena-abi master.
-pub const ADRENA_IX_INCREASE_POSITION_SHORT: [u8; 8] =
-    [115, 188, 112, 206, 233, 246, 231, 166];
+pub const ADRENA_IX_INCREASE_POSITION_SHORT: [u8; 8] = [115, 188, 112, 206, 233, 246, 231, 166];
 
 /// `close_position_long` discriminator. Adrena uses `params.percentage` (u64,
 /// 1e10 = 100%) for partial closes — no separate `decrease_position` ix.
 /// IDL: verified 2026-04-26 against AdrenaFoundation/adrena-abi master.
-pub const ADRENA_IX_CLOSE_POSITION_LONG: [u8; 8] =
-    [50, 66, 35, 214, 218, 31, 152, 68];
+pub const ADRENA_IX_CLOSE_POSITION_LONG: [u8; 8] = [50, 66, 35, 214, 218, 31, 152, 68];
 
 /// `close_position_short` discriminator.
 /// IDL: verified 2026-04-26 against AdrenaFoundation/adrena-abi master.
-pub const ADRENA_IX_CLOSE_POSITION_SHORT: [u8; 8] =
-    [158, 216, 38, 16, 140, 37, 15, 131];
+pub const ADRENA_IX_CLOSE_POSITION_SHORT: [u8; 8] = [158, 216, 38, 16, 140, 37, 15, 131];
 
 /// `liquidate_long` discriminator. Permissionless on Adrena — anyone can call
 /// once `get_liquidation_state` returns liquidatable. b402's
 /// `LiquidateGuardrail` action front-runs Adrena's own keepers when the
 /// adapter caller specifies a health-factor floor.
 /// IDL: verified 2026-04-26 against AdrenaFoundation/adrena-abi master.
-pub const ADRENA_IX_LIQUIDATE_LONG: [u8; 8] =
-    [132, 118, 230, 137, 241, 193, 136, 93];
+pub const ADRENA_IX_LIQUIDATE_LONG: [u8; 8] = [132, 118, 230, 137, 241, 193, 136, 93];
 
 /// `liquidate_short` discriminator.
 /// IDL: verified 2026-04-26 against AdrenaFoundation/adrena-abi master.
-pub const ADRENA_IX_LIQUIDATE_SHORT: [u8; 8] =
-    [197, 62, 252, 198, 25, 93, 177, 131];
+pub const ADRENA_IX_LIQUIDATE_SHORT: [u8; 8] = [197, 62, 252, 198, 25, 93, 177, 131];
 
 // --------- Anchor-namespace discriminators per PRD-16 brief ----------------
 //
@@ -147,33 +139,28 @@ pub const ADRENA_IX_LIQUIDATE_SHORT: [u8; 8] =
 /// `sha256("global:open_position")[..8]` — NOT an Adrena ix; reference only.
 /// IDL: pending verification — confirm against AdrenaFoundation/adrena-program master.
 #[doc(hidden)]
-pub const ADRENA_IX_OPEN_POSITION_GENERIC: [u8; 8] =
-    [135, 128, 47, 77, 15, 152, 240, 49];
+pub const ADRENA_IX_OPEN_POSITION_GENERIC: [u8; 8] = [135, 128, 47, 77, 15, 152, 240, 49];
 
 /// `sha256("global:increase_position")[..8]` — NOT an Adrena ix; reference only.
 /// IDL: pending verification — confirm against AdrenaFoundation/adrena-program master.
 #[doc(hidden)]
-pub const ADRENA_IX_INCREASE_POSITION_GENERIC: [u8; 8] =
-    [253, 234, 128, 104, 192, 188, 45, 91];
+pub const ADRENA_IX_INCREASE_POSITION_GENERIC: [u8; 8] = [253, 234, 128, 104, 192, 188, 45, 91];
 
 /// `sha256("global:decrease_position")[..8]` — NOT an Adrena ix; reference only.
 /// Adrena uses `close_position_*` with `percentage` instead.
 /// IDL: pending verification — confirm against AdrenaFoundation/adrena-program master.
 #[doc(hidden)]
-pub const ADRENA_IX_DECREASE_POSITION_GENERIC: [u8; 8] =
-    [57, 125, 21, 59, 200, 137, 179, 108];
+pub const ADRENA_IX_DECREASE_POSITION_GENERIC: [u8; 8] = [57, 125, 21, 59, 200, 137, 179, 108];
 
 /// `sha256("global:close_position")[..8]` — NOT an Adrena ix; reference only.
 /// IDL: pending verification — confirm against AdrenaFoundation/adrena-program master.
 #[doc(hidden)]
-pub const ADRENA_IX_CLOSE_POSITION_GENERIC: [u8; 8] =
-    [123, 134, 81, 0, 49, 68, 98, 98];
+pub const ADRENA_IX_CLOSE_POSITION_GENERIC: [u8; 8] = [123, 134, 81, 0, 49, 68, 98, 98];
 
 /// `sha256("global:liquidate_position")[..8]` — NOT an Adrena ix; reference only.
 /// IDL: pending verification — confirm against AdrenaFoundation/adrena-program master.
 #[doc(hidden)]
-pub const ADRENA_IX_LIQUIDATE_POSITION_GENERIC: [u8; 8] =
-    [187, 74, 229, 149, 102, 81, 221, 68];
+pub const ADRENA_IX_LIQUIDATE_POSITION_GENERIC: [u8; 8] = [187, 74, 229, 149, 102, 81, 221, 68];
 
 /// PDA seed prefix for the Adrena scope (PRD-13 / PRD-16 §4).
 pub const SEED_ADRENA_SHADOW: &[u8] = b"adrena:position:v1";

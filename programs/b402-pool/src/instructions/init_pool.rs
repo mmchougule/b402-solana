@@ -1,7 +1,9 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::poseidon::{hashv, Endianness, Parameters};
 
-use crate::constants::{SEED_ADAPTERS, SEED_CONFIG, SEED_TREASURY, SEED_TREE, TAG_MK_ZERO, TREE_DEPTH, VERSION_PREFIX};
+use crate::constants::{
+    SEED_ADAPTERS, SEED_CONFIG, SEED_TREASURY, SEED_TREE, TAG_MK_ZERO, TREE_DEPTH, VERSION_PREFIX,
+};
 use crate::error::PoolError;
 use crate::events::PoolInitialized;
 use crate::state::{AdapterRegistry, PoolConfig, TreasuryConfig, TreeState};
