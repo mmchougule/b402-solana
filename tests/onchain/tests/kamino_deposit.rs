@@ -148,7 +148,10 @@ fn send_execute(
     args.serialize(&mut data).unwrap();
 
     let mut accounts = vec![
-        AccountMeta::new_readonly(adapter_authority(), false),
+        // adapter_authority is `mut` in the Execute accounts struct because
+        // Kamino's init_user_metadata / init_obligation use it as feePayer
+        // (signer-writable). Outer slot must mirror that.
+        AccountMeta::new(adapter_authority(), false),
         AccountMeta::new(setup.in_vault, false),
         AccountMeta::new(setup.out_vault, false),
         AccountMeta::new(setup.adapter_in_ta, false),
