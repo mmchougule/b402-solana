@@ -7,11 +7,12 @@
     "node": ">=20"
   },
   "scripts": {
-    "e2e": "tsx e2e.ts",
-    "swap-e2e": "tsx swap-e2e.ts",
-    "swap-e2e-jupiter": "tsx swap-e2e-jupiter.ts",
-    "scanner-e2e": "tsx scanner-e2e.ts",
-    "alt": "tsx ../ops/alt/create-alt.ts"
+    "build-deps": "pnpm --filter='@b402ai/solana-shared' --filter='@b402ai/solana-prover' --filter='@b402ai/solana' build",
+    "e2e": "pnpm build-deps && tsx e2e.ts",
+    "swap-e2e": "pnpm build-deps && tsx swap-e2e.ts",
+    "swap-e2e-jupiter": "pnpm build-deps && tsx swap-e2e-jupiter.ts",
+    "scanner-e2e": "pnpm build-deps && tsx scanner-e2e.ts",
+    "alt": "pnpm build-deps && tsx ../ops/alt/create-alt.ts"
   },
   "dependencies": {
     "@b402ai/solana": "workspace:*",
