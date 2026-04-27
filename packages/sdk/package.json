@@ -23,7 +23,7 @@
     "@solana/spl-token": "^0.4.9",
     "@noble/hashes": "^1.5.0",
     "@noble/ciphers": "^1.0.0",
-    "@noble/curves": "^1.6.0",
+    "@noble/curves": "^2.2.0",
     "circomlibjs": "^0.1.7"
   },
   "devDependencies": {
