@@ -13,11 +13,11 @@
 
 use anchor_lang::prelude::*;
 
+pub mod constants;
 pub mod error;
 pub mod events;
-pub mod state;
 pub mod instructions;
-pub mod constants;
+pub mod state;
 pub mod util;
 
 use instructions::*;
@@ -67,7 +67,10 @@ pub mod b402_pool {
         instructions::admin::set_verifier(ctx, kind, new_id)
     }
 
-    pub fn register_adapter(ctx: Context<RegisterAdapter>, info: AdapterRegistration) -> Result<()> {
+    pub fn register_adapter(
+        ctx: Context<RegisterAdapter>,
+        info: AdapterRegistration,
+    ) -> Result<()> {
         instructions::admin::register_adapter(ctx, info)
     }
 

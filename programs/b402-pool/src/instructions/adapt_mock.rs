@@ -50,10 +50,7 @@ pub struct CheckAdapterDeltaMock<'info> {
 }
 
 #[inline(never)]
-pub fn handler(
-    ctx: Context<CheckAdapterDeltaMock>,
-    args: CheckAdapterDeltaArgs,
-) -> Result<()> {
+pub fn handler(ctx: Context<CheckAdapterDeltaMock>, args: CheckAdapterDeltaArgs) -> Result<()> {
     // 1. Snapshot pre-balance.
     ctx.accounts.out_vault.reload()?;
     let pre = ctx.accounts.out_vault.amount;
@@ -74,13 +71,17 @@ pub fn handler(
 
     // Forward all remaining accounts to the adapter. Caller arranges them in
     // the exact order the adapter expects.
-    let account_metas: Vec<AccountMeta> = ctx.remaining_accounts.iter().map(|a| {
-        if a.is_writable {
-            AccountMeta::new(*a.key, a.is_signer)
-        } else {
-            AccountMeta::new_readonly(*a.key, a.is_signer)
-        }
-    }).collect();
+    let account_metas: Vec<AccountMeta> = ctx
+        .remaining_accounts
+        .iter()
+        .map(|a| {
+            if a.is_writable {
+                AccountMeta::new(*a.key, a.is_signer)
+            } else {
+                AccountMeta::new_readonly(*a.key, a.is_signer)
+            }
+        })
+        .collect();
 
     let ix = Instruction {
         program_id: *ctx.accounts.adapter_program.key,
@@ -88,8 +89,7 @@ pub fn handler(
         data,
     };
 
-    invoke(&ix, ctx.remaining_accounts)
-        .map_err(|_| error!(PoolError::AdapterCallReverted))?;
+    invoke(&ix, ctx.remaining_accounts).map_err(|_| error!(PoolError::AdapterCallReverted))?;
 
     // 3. Post-CPI balance delta check — the invariant.
     ctx.accounts.out_vault.reload()?;

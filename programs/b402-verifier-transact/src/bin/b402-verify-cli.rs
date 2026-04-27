@@ -25,10 +25,16 @@ fn decode_hex(s: &str) -> Vec<u8> {
 
 fn main() {
     let mut input = String::new();
-    std::io::stdin().read_to_string(&mut input).expect("read stdin");
+    std::io::stdin()
+        .read_to_string(&mut input)
+        .expect("read stdin");
     let lines: Vec<&str> = input.lines().collect();
     if lines.len() != 1 + PUBLIC_INPUT_COUNT {
-        println!("FAIL: expected {} lines, got {}", 1 + PUBLIC_INPUT_COUNT, lines.len());
+        println!(
+            "FAIL: expected {} lines, got {}",
+            1 + PUBLIC_INPUT_COUNT,
+            lines.len()
+        );
         std::process::exit(1);
     }
 

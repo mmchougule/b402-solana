@@ -32,9 +32,8 @@ use anchor_lang::prelude::*;
 declare_id!("DsyuZDwGPryBNK3aAUG4TTx9P5kxk4tbU7aD3DYRvQhT");
 
 /// Orca Whirlpool program ID (verify against live IDL at deploy time).
-pub const ORCA_WHIRLPOOL_PROGRAM_ID: Pubkey = anchor_lang::pubkey!(
-    "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"
-);
+pub const ORCA_WHIRLPOOL_PROGRAM_ID: Pubkey =
+    anchor_lang::pubkey!("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc");
 
 /// Action variants the adapter exposes. Borsh-encoded inside `action_payload`.
 ///
@@ -109,17 +108,13 @@ pub enum OrcaAction {
 
     /// Sweep accumulated fees on an existing position to the user's shielded
     /// note vault. No liquidity change.
-    CollectFees {
-        position: Pubkey,
-    },
+    CollectFees { position: Pubkey },
 
     /// Burn the position NFT and reclaim rent. Whirlpool requires the
     /// position to have zero liquidity and zero unclaimed fees first (the
     /// caller chains DecreaseLiquidity + CollectFees + ClosePosition into
     /// a single shielded action group at the SDK layer).
-    ClosePosition {
-        position: Pubkey,
-    },
+    ClosePosition { position: Pubkey },
 }
 
 #[program]

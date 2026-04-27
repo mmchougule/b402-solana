@@ -1,9 +1,9 @@
-pub mod init_pool;
 pub mod add_token_config;
+pub mod admin;
+pub mod init_pool;
 pub mod shield;
 pub mod transact;
 pub mod unshield;
-pub mod admin;
 pub mod verifier_cpi;
 
 // TEST-ONLY MODULE: the `check_adapter_delta_mock` HANDLER (in lib.rs) is
@@ -19,11 +19,11 @@ pub mod adapt_mock;
 // Slotted for removal once the real adapt circuit + verifier land.
 pub mod adapt_execute;
 
-pub use init_pool::*;
+pub use adapt_execute::*;
+pub use adapt_mock::*;
 pub use add_token_config::*;
+pub use admin::*;
+pub use init_pool::*;
 pub use shield::*;
 pub use transact::*;
 pub use unshield::*;
-pub use admin::*;
-pub use adapt_mock::*;
-pub use adapt_execute::*;

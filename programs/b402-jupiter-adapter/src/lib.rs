@@ -52,15 +52,20 @@ pub mod b402_jupiter_adapter {
         // expects userTransferAuthority to be a signer. Without this flag
         // the CPI fails with "signer privilege escalated".
         let auth_key = ctx.accounts.adapter_authority.key();
-        let accounts_for_cpi: Vec<anchor_lang::solana_program::instruction::AccountMeta> =
-            ctx.remaining_accounts.iter().map(|a| {
+        let accounts_for_cpi: Vec<anchor_lang::solana_program::instruction::AccountMeta> = ctx
+            .remaining_accounts
+            .iter()
+            .map(|a| {
                 let is_signer = a.is_signer || *a.key == auth_key;
                 if a.is_writable {
                     anchor_lang::solana_program::instruction::AccountMeta::new(*a.key, is_signer)
                 } else {
-                    anchor_lang::solana_program::instruction::AccountMeta::new_readonly(*a.key, is_signer)
+                    anchor_lang::solana_program::instruction::AccountMeta::new_readonly(
+                        *a.key, is_signer,
+                    )
                 }
-            }).collect();
+            })
+            .collect();
 
         let ix = anchor_lang::solana_program::instruction::Instruction {
             program_id: JUPITER_V6_PROGRAM_ID,
@@ -78,7 +83,8 @@ pub mod b402_jupiter_adapter {
             &ix,
             ctx.remaining_accounts,
             signer_seeds,
-        ).map_err(|_| AdapterError::JupiterCpiFailed)?;
+        )
+        .map_err(|_| AdapterError::JupiterCpiFailed)?;
 
         // Refresh adapter_out_ta and transfer net output to pool's out_vault.
         let out_ta = &mut ctx.accounts.adapter_out_ta;

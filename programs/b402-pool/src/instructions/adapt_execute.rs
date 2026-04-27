@@ -36,9 +36,9 @@ use anchor_lang::solana_program::program::invoke;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
 use crate::constants::{
-    SEED_ADAPTERS, SEED_CONFIG, SEED_NULL, SEED_TOKEN, SEED_TREE, SEED_VAULT, VERSION_PREFIX,
-    TAG_ADAPT_BIND, TAG_COMMIT, TAG_FEE_BIND, TAG_MK_NODE, TAG_NULLIFIER, TAG_RECIPIENT_BIND,
-    TAG_SPEND_KEY_PUB,
+    SEED_ADAPTERS, SEED_CONFIG, SEED_NULL, SEED_TOKEN, SEED_TREE, SEED_VAULT, TAG_ADAPT_BIND,
+    TAG_COMMIT, TAG_FEE_BIND, TAG_MK_NODE, TAG_NULLIFIER, TAG_RECIPIENT_BIND, TAG_SPEND_KEY_PUB,
+    VERSION_PREFIX,
 };
 use crate::error::PoolError;
 use crate::events::{AdaptExecuted, CommitmentAppended, NullifierSpent};
@@ -54,21 +54,21 @@ pub struct AdaptPublicInputs {
     pub nullifier: [[u8; 32]; 2],
     pub commitment_out: [[u8; 32]; 2],
     pub public_amount_in: u64,
-    pub public_amount_out: u64,         // adapt requires this to be zero
-    pub public_token_mint: Pubkey,       // IN mint
+    pub public_amount_out: u64,    // adapt requires this to be zero
+    pub public_token_mint: Pubkey, // IN mint
     pub relayer_fee: u64,
     pub relayer_fee_bind: [u8; 32],
     pub root_bind: [u8; 32],
     pub recipient_bind: [u8; 32],
-    pub adapter_id: [u8; 32],            // keccak(adapter_program_id) mod p
-    pub action_hash: [u8; 32],           // Poseidon_3(adaptBindTag, keccakFr, expectedOutMint_Fr)
+    pub adapter_id: [u8; 32],  // keccak(adapter_program_id) mod p
+    pub action_hash: [u8; 32], // Poseidon_3(adaptBindTag, keccakFr, expectedOutMint_Fr)
     pub expected_out_value: u64,
-    pub expected_out_mint: Pubkey,       // OUT mint
+    pub expected_out_mint: Pubkey, // OUT mint
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
 pub struct AdaptExecuteArgs {
-    pub proof: Vec<u8>,                  // must be 256 bytes
+    pub proof: Vec<u8>, // must be 256 bytes
     pub public_inputs: AdaptPublicInputs,
     pub encrypted_notes: Vec<EncryptedNote>, // 0..=2 entries
     pub in_dummy_mask: u8,
@@ -200,8 +200,14 @@ pub fn handler<'info>(
     args: Box<AdaptExecuteArgs>,
 ) -> Result<()> {
     require!(args.proof.len() == 256, PoolError::InvalidInstructionData);
-    require!(args.encrypted_notes.len() <= 2, PoolError::InvalidInstructionData);
-    require!(args.raw_adapter_ix_data.len() >= 8, PoolError::InvalidInstructionData);
+    require!(
+        args.encrypted_notes.len() <= 2,
+        PoolError::InvalidInstructionData
+    );
+    require!(
+        args.raw_adapter_ix_data.len() >= 8,
+        PoolError::InvalidInstructionData
+    );
 
     let cfg = &ctx.accounts.pool_config;
     require!(!cfg.paused_adapts, PoolError::PoolPaused);
@@ -211,7 +217,10 @@ pub fn handler<'info>(
     );
     let pi = &args.public_inputs;
 
-    require!(pi.public_amount_out == 0, PoolError::PublicAmountExclusivity);
+    require!(
+        pi.public_amount_out == 0,
+        PoolError::PublicAmountExclusivity
+    );
     require!(pi.public_amount_in > 0, PoolError::PublicAmountExclusivity);
 
     // Mint bindings: token_config PDAs are validated by their seeds, so
@@ -268,7 +277,11 @@ pub fn handler<'info>(
         let expected_action_hash = hashv(
             Parameters::Bn254X5,
             Endianness::LittleEndian,
-            &[&TAG_ADAPT_BIND[..], &payload_keccak_fr[..], &expected_out_mint_fr[..]],
+            &[
+                &TAG_ADAPT_BIND[..],
+                &payload_keccak_fr[..],
+                &expected_out_mint_fr[..],
+            ],
         )
         .map_err(|_| error!(PoolError::InvalidInstructionData))?
         .to_bytes();
@@ -557,4 +570,3 @@ fn build_public_inputs_for_adapt(pi: &AdaptPublicInputs) -> Vec<[u8; 32]> {
     v.push(TAG_ADAPT_BIND);
     v
 }
-

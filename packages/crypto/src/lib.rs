@@ -8,14 +8,14 @@
 #![deny(unsafe_code)]
 
 pub mod domain;
-pub mod poseidon;
+pub mod fr;
 pub mod merkle;
 pub mod note;
-pub mod fr;
+pub mod poseidon;
 
 pub use domain::DomainTag;
 pub use fr::Fr;
-pub use merkle::{MerkleTree, MerkleProof, TREE_DEPTH};
-pub use note::{Note, Commitment, Nullifier};
+pub use merkle::{MerkleProof, MerkleTree, TREE_DEPTH};
+pub use note::{Commitment, Note, Nullifier};
 
 pub const TREE_ROOT_HISTORY: usize = 64;

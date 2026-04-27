@@ -96,10 +96,8 @@ pub fn shard_prefix(nullifier: &[u8; 32]) -> u16 {
 
 /// BN254 scalar field modulus, little-endian.
 const FR_MODULUS_LE: [u8; 32] = [
-    0x01, 0x00, 0x00, 0xf0, 0x93, 0xf5, 0xe1, 0x43,
-    0x91, 0x70, 0xb9, 0x79, 0x48, 0xe8, 0x33, 0x28,
-    0x5d, 0x58, 0x81, 0x81, 0xb6, 0x45, 0x50, 0xb8,
-    0x29, 0xa0, 0x31, 0xe1, 0x72, 0x4e, 0x64, 0x30,
+    0x01, 0x00, 0x00, 0xf0, 0x93, 0xf5, 0xe1, 0x43, 0x91, 0x70, 0xb9, 0x79, 0x48, 0xe8, 0x33, 0x28,
+    0x5d, 0x58, 0x81, 0x81, 0xb6, 0x45, 0x50, 0xb8, 0x29, 0xa0, 0x31, 0xe1, 0x72, 0x4e, 0x64, 0x30,
 ];
 
 /// Reduce 32 LE bytes mod p. Used to convert raw Pubkey bytes (which may
@@ -120,8 +118,12 @@ pub fn reduce_le_mod_p(b: &[u8; 32]) -> [u8; 32] {
 /// most-significant byte (LE index 31) downward.
 fn cmp_le_lt(a: &[u8; 32], b: &[u8; 32]) -> bool {
     for i in (0..32).rev() {
-        if a[i] < b[i] { return true; }
-        if a[i] > b[i] { return false; }
+        if a[i] < b[i] {
+            return true;
+        }
+        if a[i] > b[i] {
+            return false;
+        }
     }
     false
 }
@@ -146,7 +148,10 @@ fn sub_le_in_place(a: &mut [u8; 32], b: &[u8; 32]) {
 mod tests {
     use super::*;
     use crate::constants::{ROOT_HISTORY_SIZE, TREE_DEPTH};
-    use crate::state::{NullifierBuf, NullifierShard, TreeState, MAX_NULLIFIERS_PER_SHARD, NULLIFIER_BYTES_PER_SHARD};
+    use crate::state::{
+        NullifierBuf, NullifierShard, TreeState, MAX_NULLIFIERS_PER_SHARD,
+        NULLIFIER_BYTES_PER_SHARD,
+    };
 
     // ---------- helpers ----------
 

@@ -23,12 +23,16 @@ fn load_fixture() -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<[u8; 32]>) {
     let a = hex::decode(&f.proof_a_be).unwrap();
     let b = hex::decode(&f.proof_b_be).unwrap();
     let c = hex::decode(&f.proof_c_be).unwrap();
-    let pi: Vec<[u8; 32]> = f.public_inputs_be.iter().map(|h| {
-        let v = hex::decode(h).unwrap();
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&v);
-        arr
-    }).collect();
+    let pi: Vec<[u8; 32]> = f
+        .public_inputs_be
+        .iter()
+        .map(|h| {
+            let v = hex::decode(h).unwrap();
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&v);
+            arr
+        })
+        .collect();
     (a, b, c, pi)
 }
 
@@ -38,13 +42,22 @@ fn valid_adapt_proof_verifies() {
     assert_eq!(a.len(), 64);
     assert_eq!(b.len(), 128);
     assert_eq!(c.len(), 64);
-    assert_eq!(pi.len(), PUBLIC_INPUT_COUNT, "adapt must have 23 public inputs");
+    assert_eq!(
+        pi.len(),
+        PUBLIC_INPUT_COUNT,
+        "adapt must have 23 public inputs"
+    );
 
-    let mut pa = [0u8; 64]; pa.copy_from_slice(&a);
-    let mut pb = [0u8; 128]; pb.copy_from_slice(&b);
-    let mut pc = [0u8; 64]; pc.copy_from_slice(&c);
+    let mut pa = [0u8; 64];
+    pa.copy_from_slice(&a);
+    let mut pb = [0u8; 128];
+    pb.copy_from_slice(&b);
+    let mut pc = [0u8; 64];
+    pc.copy_from_slice(&c);
     let mut pis = [[0u8; 32]; PUBLIC_INPUT_COUNT];
-    for i in 0..PUBLIC_INPUT_COUNT { pis[i] = pi[i]; }
+    for i in 0..PUBLIC_INPUT_COUNT {
+        pis[i] = pi[i];
+    }
 
     verify_proof_be(&pa, &pb, &pc, &pis).expect("valid adapt proof must verify");
 }
@@ -56,11 +69,16 @@ fn tampered_adapter_id_rejected() {
     // being replayed against adapter Y.
     let (a, b, c, pi) = load_fixture();
 
-    let mut pa = [0u8; 64]; pa.copy_from_slice(&a);
-    let mut pb = [0u8; 128]; pb.copy_from_slice(&b);
-    let mut pc = [0u8; 64]; pc.copy_from_slice(&c);
+    let mut pa = [0u8; 64];
+    pa.copy_from_slice(&a);
+    let mut pb = [0u8; 128];
+    pb.copy_from_slice(&b);
+    let mut pc = [0u8; 64];
+    pc.copy_from_slice(&c);
     let mut pis = [[0u8; 32]; PUBLIC_INPUT_COUNT];
-    for i in 0..PUBLIC_INPUT_COUNT { pis[i] = pi[i]; }
+    for i in 0..PUBLIC_INPUT_COUNT {
+        pis[i] = pi[i];
+    }
 
     pis[18][31] ^= 0x01;
 
@@ -74,11 +92,16 @@ fn tampered_expected_out_mint_rejected() {
     // output commitment's mint to this value; tampering must be caught.
     let (a, b, c, pi) = load_fixture();
 
-    let mut pa = [0u8; 64]; pa.copy_from_slice(&a);
-    let mut pb = [0u8; 128]; pb.copy_from_slice(&b);
-    let mut pc = [0u8; 64]; pc.copy_from_slice(&c);
+    let mut pa = [0u8; 64];
+    pa.copy_from_slice(&a);
+    let mut pb = [0u8; 128];
+    pb.copy_from_slice(&b);
+    let mut pc = [0u8; 64];
+    pc.copy_from_slice(&c);
     let mut pis = [[0u8; 32]; PUBLIC_INPUT_COUNT];
-    for i in 0..PUBLIC_INPUT_COUNT { pis[i] = pi[i]; }
+    for i in 0..PUBLIC_INPUT_COUNT {
+        pis[i] = pi[i];
+    }
 
     pis[21][31] ^= 0x01;
 
@@ -92,11 +115,16 @@ fn tampered_action_hash_rejected() {
     // expectedOutMint. Tampering = replay or payload swap attack.
     let (a, b, c, pi) = load_fixture();
 
-    let mut pa = [0u8; 64]; pa.copy_from_slice(&a);
-    let mut pb = [0u8; 128]; pb.copy_from_slice(&b);
-    let mut pc = [0u8; 64]; pc.copy_from_slice(&c);
+    let mut pa = [0u8; 64];
+    pa.copy_from_slice(&a);
+    let mut pb = [0u8; 128];
+    pb.copy_from_slice(&b);
+    let mut pc = [0u8; 64];
+    pc.copy_from_slice(&c);
     let mut pis = [[0u8; 32]; PUBLIC_INPUT_COUNT];
-    for i in 0..PUBLIC_INPUT_COUNT { pis[i] = pi[i]; }
+    for i in 0..PUBLIC_INPUT_COUNT {
+        pis[i] = pi[i];
+    }
 
     pis[19][31] ^= 0x01;
 
@@ -108,11 +136,16 @@ fn tampered_action_hash_rejected() {
 fn tampered_proof_rejected() {
     let (a, b, c, pi) = load_fixture();
 
-    let mut pa = [0u8; 64]; pa.copy_from_slice(&a);
-    let mut pb = [0u8; 128]; pb.copy_from_slice(&b);
-    let mut pc = [0u8; 64]; pc.copy_from_slice(&c);
+    let mut pa = [0u8; 64];
+    pa.copy_from_slice(&a);
+    let mut pb = [0u8; 128];
+    pb.copy_from_slice(&b);
+    let mut pc = [0u8; 64];
+    pc.copy_from_slice(&c);
     let mut pis = [[0u8; 32]; PUBLIC_INPUT_COUNT];
-    for i in 0..PUBLIC_INPUT_COUNT { pis[i] = pi[i]; }
+    for i in 0..PUBLIC_INPUT_COUNT {
+        pis[i] = pi[i];
+    }
 
     pa[0] ^= 0x01;
 

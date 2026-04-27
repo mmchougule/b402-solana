@@ -43,9 +43,8 @@ use anchor_lang::prelude::*;
 declare_id!("GRAiy9K5w2GCbicwJKNbKzaKRcr3PmvSqYGp4XZgfBYm");
 
 /// Jupiter Perpetuals program ID (verify against live IDL at deploy time).
-pub const JUPITER_PERPS_PROGRAM_ID: Pubkey = anchor_lang::pubkey!(
-    "PERPHjGBqRHArX4DySjwM6UJHiR3sWAatqfdBS2qQJu"
-);
+pub const JUPITER_PERPS_PROGRAM_ID: Pubkey =
+    anchor_lang::pubkey!("PERPHjGBqRHArX4DySjwM6UJHiR3sWAatqfdBS2qQJu");
 
 /// Action variants the adapter exposes. Borsh-encoded inside `action_payload`.
 ///

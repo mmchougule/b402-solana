@@ -6,12 +6,12 @@
 //! a bug in `light-poseidon` and must be caught by the parity tests in
 //! `tests/parity/`.
 
-use light_poseidon::{Poseidon, PoseidonBytesHasher, PoseidonError};
 use ark_bn254::Fr as ArkFr;
 use ark_ff::PrimeField;
+use light_poseidon::{Poseidon, PoseidonBytesHasher, PoseidonError};
 
-use crate::Fr;
 use crate::domain::DomainTag;
+use crate::Fr;
 
 #[derive(Debug, thiserror::Error)]
 pub enum HashError {
@@ -22,7 +22,9 @@ pub enum HashError {
 }
 
 impl From<PoseidonError> for HashError {
-    fn from(e: PoseidonError) -> Self { Self::Poseidon(e) }
+    fn from(e: PoseidonError) -> Self {
+        Self::Poseidon(e)
+    }
 }
 
 /// Hash `k` field elements with a raw Poseidon of width `k+1`.
@@ -49,12 +51,23 @@ pub fn poseidon_tagged(tag: DomainTag, inputs: &[Fr]) -> Result<Fr, HashError> {
     poseidon_raw(&all)
 }
 
-pub fn commitment(token_mint: Fr, value: u64, random: Fr, spending_pub: Fr) -> Result<Fr, HashError> {
-    poseidon_tagged(DomainTag::Commit, &[token_mint, Fr::from_u64(value), random, spending_pub])
+pub fn commitment(
+    token_mint: Fr,
+    value: u64,
+    random: Fr,
+    spending_pub: Fr,
+) -> Result<Fr, HashError> {
+    poseidon_tagged(
+        DomainTag::Commit,
+        &[token_mint, Fr::from_u64(value), random, spending_pub],
+    )
 }
 
 pub fn nullifier(spending_priv: Fr, leaf_index: u64) -> Result<Fr, HashError> {
-    poseidon_tagged(DomainTag::Nullifier, &[spending_priv, Fr::from_u64(leaf_index)])
+    poseidon_tagged(
+        DomainTag::Nullifier,
+        &[spending_priv, Fr::from_u64(leaf_index)],
+    )
 }
 
 pub fn merkle_node(left: Fr, right: Fr) -> Result<Fr, HashError> {
@@ -75,7 +88,10 @@ pub fn fee_bind(recipient_as_fr: Fr, fee: u64) -> Result<Fr, HashError> {
 }
 
 pub fn adapt_bind(action_keccak_as_fr: Fr, expected_out_mint: Fr) -> Result<Fr, HashError> {
-    poseidon_tagged(DomainTag::AdaptBind, &[action_keccak_as_fr, expected_out_mint])
+    poseidon_tagged(
+        DomainTag::AdaptBind,
+        &[action_keccak_as_fr, expected_out_mint],
+    )
 }
 
 #[cfg(test)]
@@ -101,8 +117,14 @@ mod tests {
 
         assert_ne!(base, commitment(Fr::from_u64(43), 1_000_000, r, p).unwrap());
         assert_ne!(base, commitment(t, 1_000_001, r, p).unwrap());
-        assert_ne!(base, commitment(t, 1_000_000, Fr::from_u64(1338), p).unwrap());
-        assert_ne!(base, commitment(t, 1_000_000, r, Fr::from_u64(10000)).unwrap());
+        assert_ne!(
+            base,
+            commitment(t, 1_000_000, Fr::from_u64(1338), p).unwrap()
+        );
+        assert_ne!(
+            base,
+            commitment(t, 1_000_000, r, Fr::from_u64(10000)).unwrap()
+        );
     }
 
     #[test]

@@ -46,7 +46,11 @@ pub fn pause(ctx: Context<AdminAction>, which: PauseFlag) -> Result<()> {
             (2u8, prev)
         }
     };
-    emit!(PoolPauseChanged { flag: flag_byte, paused: true, slot: Clock::get()?.slot });
+    emit!(PoolPauseChanged {
+        flag: flag_byte,
+        paused: true,
+        slot: Clock::get()?.slot
+    });
     Ok(())
 }
 
@@ -54,23 +58,40 @@ pub fn unpause(ctx: Context<AdminAction>, which: PauseFlag) -> Result<()> {
     ensure_admin(&ctx.accounts.pool_config, &ctx.accounts.admin.key())?;
     let cfg = &mut ctx.accounts.pool_config;
     let flag_byte = match which {
-        PauseFlag::Shields => { cfg.paused_shields = false; 0u8 }
-        PauseFlag::Transacts => { cfg.paused_transacts = false; 1u8 }
-        PauseFlag::Adapts => { cfg.paused_adapts = false; 2u8 }
+        PauseFlag::Shields => {
+            cfg.paused_shields = false;
+            0u8
+        }
+        PauseFlag::Transacts => {
+            cfg.paused_transacts = false;
+            1u8
+        }
+        PauseFlag::Adapts => {
+            cfg.paused_adapts = false;
+            2u8
+        }
     };
-    emit!(PoolPauseChanged { flag: flag_byte, paused: false, slot: Clock::get()?.slot });
+    emit!(PoolPauseChanged {
+        flag: flag_byte,
+        paused: false,
+        slot: Clock::get()?.slot
+    });
     Ok(())
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum VerifierKind { Transact, Adapt, Disclose }
+pub enum VerifierKind {
+    Transact,
+    Adapt,
+    Disclose,
+}
 
 pub fn set_verifier(ctx: Context<AdminAction>, kind: VerifierKind, new_id: Pubkey) -> Result<()> {
     ensure_admin(&ctx.accounts.pool_config, &ctx.accounts.admin.key())?;
     let cfg = &mut ctx.accounts.pool_config;
     match kind {
         VerifierKind::Transact => cfg.verifier_transact = new_id,
-        VerifierKind::Adapt    => cfg.verifier_adapt    = new_id,
+        VerifierKind::Adapt => cfg.verifier_adapt = new_id,
         VerifierKind::Disclose => cfg.verifier_disclose = new_id,
     }
     Ok(())
@@ -95,10 +116,7 @@ pub struct RegisterAdapter<'info> {
     pub adapter_registry: Account<'info, AdapterRegistry>,
 }
 
-pub fn register_adapter(
-    ctx: Context<RegisterAdapter>,
-    info: AdapterRegistration,
-) -> Result<()> {
+pub fn register_adapter(ctx: Context<RegisterAdapter>, info: AdapterRegistration) -> Result<()> {
     ensure_admin(&ctx.accounts.pool_config, &ctx.accounts.admin.key())?;
     require!(
         info.allowed_instructions.len() <= 8,

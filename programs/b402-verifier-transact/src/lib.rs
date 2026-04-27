@@ -20,7 +20,9 @@ pub const PUBLIC_INPUT_COUNT: usize = 18;
 /// we reverse on the way in.
 pub fn reverse_endianness(input: &[u8; 32]) -> [u8; 32] {
     let mut out = [0u8; 32];
-    for i in 0..32 { out[i] = input[31 - i]; }
+    for i in 0..32 {
+        out[i] = input[31 - i];
+    }
     out
 }
 
@@ -36,11 +38,12 @@ pub fn verify_proof_be(
     proof_c: &[u8; 64],
     public_inputs_be: &[[u8; 32]; PUBLIC_INPUT_COUNT],
 ) -> std::result::Result<(), VerifierError> {
-    let mut verifier = Groth16Verifier::new(
-        proof_a, proof_b, proof_c, public_inputs_be, &TRANSACT_VK,
-    )
-    .map_err(|_| VerifierError::InvalidProof)?;
-    verifier.verify().map_err(|_| VerifierError::VerificationFailed)?;
+    let mut verifier =
+        Groth16Verifier::new(proof_a, proof_b, proof_c, public_inputs_be, &TRANSACT_VK)
+            .map_err(|_| VerifierError::InvalidProof)?;
+    verifier
+        .verify()
+        .map_err(|_| VerifierError::VerificationFailed)?;
     Ok(())
 }
 
@@ -77,8 +80,7 @@ pub mod b402_verifier_transact {
             public_inputs[i] = reverse_endianness(&le);
         }
 
-        verify_proof_be(&proof_a, &proof_b, &proof_c, &public_inputs)
-            .map_err(|e| error!(e))?;
+        verify_proof_be(&proof_a, &proof_b, &proof_c, &public_inputs).map_err(|e| error!(e))?;
 
         Ok(())
     }
@@ -86,7 +88,6 @@ pub mod b402_verifier_transact {
 
 #[derive(Accounts)]
 pub struct Verify {}
-
 
 #[error_code]
 pub enum VerifierError {
