@@ -1,7 +1,8 @@
 {
   "name": "@b402ai/solana",
   "version": "0.0.1",
-  "description": "Private DeFi on Solana — shielded pool + composable execution",
+  "description": "Private DeFi on Solana — shielded pool + composable adapters + agent-callable surface",
+  "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -10,6 +11,31 @@
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
     }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mmchougule/b402-solana.git",
+    "directory": "packages/sdk"
+  },
+  "homepage": "https://github.com/mmchougule/b402-solana#readme",
+  "bugs": "https://github.com/mmchougule/b402-solana/issues",
+  "keywords": [
+    "solana",
+    "privacy",
+    "zero-knowledge",
+    "defi",
+    "agent",
+    "mcp"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

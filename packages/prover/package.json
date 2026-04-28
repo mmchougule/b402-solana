@@ -1,7 +1,8 @@
 {
   "name": "@b402ai/solana-prover",
   "version": "0.0.1",
-  "description": "Groth16 proof generation for the b402 transact circuit",
+  "description": "Groth16 proof generation for the b402 Solana shielded pool (transact + adapt circuits)",
+  "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -10,6 +11,23 @@
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
     }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mmchougule/b402-solana.git",
+    "directory": "packages/prover"
+  },
+  "homepage": "https://github.com/mmchougule/b402-solana#readme",
+  "bugs": "https://github.com/mmchougule/b402-solana/issues",
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
