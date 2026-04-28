@@ -18,6 +18,13 @@ export { NoteStore } from './note-store.js';
 export { shield, type ShieldParams, type ShieldResult } from './actions/shield.js';
 export { unshield, type UnshieldParams, type UnshieldResult } from './actions/unshield.js';
 export { Scanner, parseProgramDataLog, expectedCommitmentForOwner, type ScannerOptions } from './notes/scanner.js';
+export {
+  encodeStealthAddress,
+  decodeStealthAddress,
+  STEALTH_ADDRESS_HRP,
+  STEALTH_ADDRESS_VERSION,
+  type StealthAddressParts,
+} from './stealth/address.js';
 
 /** Solana hard tx-size cap. */
 export const MAX_TX_SIZE = 1232;
