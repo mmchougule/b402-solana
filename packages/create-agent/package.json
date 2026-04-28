@@ -1,0 +1,27 @@
+{
+  "name": "@b402ai/create-agent",
+  "version": "0.0.1",
+  "description": "Scaffold a private-DeFi agent on Solana (b402) in one command.",
+  "type": "module",
+  "bin": {
+    "create-b402-agent": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "templates"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && chmod +x dist/index.js",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^2.1.9"
+  }
+}
