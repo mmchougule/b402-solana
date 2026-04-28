@@ -66,3 +66,7 @@ ENGINEER-REVIEW.md
 # Sub-agent scratch
 .copilot-out/
 docs/LAUNCH-DRAFTS.md
+
+# Engineering spikes — throwaway design docs, runbooks, exploratory PRDs.
+# Spikes that mature into committed work get promoted to docs/prds/PRD-NN-...md.
+docs/spikes/

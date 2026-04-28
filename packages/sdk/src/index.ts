@@ -1,5 +1,11 @@
 export { B402Solana } from './b402.js';
-export type { B402SolanaConfig } from './b402.js';
+export type {
+  B402SolanaConfig,
+  ShieldRequest,
+  UnshieldRequest,
+  PrivateSwapRequest,
+  PrivateSwapResult,
+} from './b402.js';
 export { B402Error, B402ErrorCode } from './errors.js';
 export { buildWallet, type Wallet } from './wallet.js';
 export { ClientMerkleTree, buildZeroCache, proveMostRecentLeaf, type MerkleProof } from './merkle.js';

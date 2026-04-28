@@ -10,6 +10,7 @@
     "build-deps": "pnpm --filter='@b402ai/solana-shared' --filter='@b402ai/solana-prover' --filter='@b402ai/solana' build",
     "e2e": "pnpm build-deps && tsx e2e.ts",
     "sdk-quick": "pnpm build-deps && tsx sdk-quick.ts",
+    "sdk-quick-swap": "pnpm build-deps && tsx sdk-quick-swap.ts",
     "swap-e2e": "pnpm build-deps && tsx swap-e2e.ts",
     "swap-e2e-jupiter": "pnpm build-deps && tsx swap-e2e-jupiter.ts",
     "scanner-e2e": "pnpm build-deps && tsx scanner-e2e.ts",
