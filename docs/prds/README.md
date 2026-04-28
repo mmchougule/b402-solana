@@ -28,6 +28,7 @@ Sequenced product requirements documents for `b402-solana`. Each PRD gates the n
 | 14 | Two-Phase Async with Claim Notes | Deferred — until first async adapter |
 | 15 | Delta-Zero Adapt + Deadline Slot | Draft |
 | 16 | Adrena Adapter (first v2-native) | Draft |
+| 24 | Phoenix Adapter (Spot CLOB → Maker → Rise) | Spike |
 
 The v2 ABI is **non-breaking with respect to deployments**: v1 devnet deployments stay live during the v2 rollout. A new Phase-2 ceremony + redeploy only happens once v2 is proven on a feature branch and audited.
 
