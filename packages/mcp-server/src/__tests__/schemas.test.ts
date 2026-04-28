@@ -48,14 +48,10 @@ describe('private_swap input', () => {
         inMint: VALID_PK,
         outMint: VALID_PK,
         amount: '1000000',
-        adapterProgramId: VALID_PK,
-        adapterInTa: VALID_PK,
-        adapterOutTa: VALID_PK,
-        alt: VALID_PK,
       }),
     ).not.toThrow();
   });
-  it('rejects missing alt', () => {
+  it('accepts full override (all four routing fields)', () => {
     expect(() =>
       privateSwapInput.parse({
         inMint: VALID_PK,
@@ -64,6 +60,35 @@ describe('private_swap input', () => {
         adapterProgramId: VALID_PK,
         adapterInTa: VALID_PK,
         adapterOutTa: VALID_PK,
+        alt: VALID_PK,
+      }),
+    ).not.toThrow();
+  });
+  it('accepts slippageBps override', () => {
+    expect(() =>
+      privateSwapInput.parse({
+        inMint: VALID_PK, outMint: VALID_PK, amount: '1000000', slippageBps: 100,
+      }),
+    ).not.toThrow();
+  });
+  it('accepts expectedOut override', () => {
+    expect(() =>
+      privateSwapInput.parse({
+        inMint: VALID_PK, outMint: VALID_PK, amount: '1000000', expectedOut: '8400000',
+      }),
+    ).not.toThrow();
+  });
+  it('rejects float amount', () => {
+    expect(() =>
+      privateSwapInput.parse({
+        inMint: VALID_PK, outMint: VALID_PK, amount: '1.5',
+      }),
+    ).toThrow();
+  });
+  it('rejects extra fields', () => {
+    expect(() =>
+      privateSwapInput.parse({
+        inMint: VALID_PK, outMint: VALID_PK, amount: '1', evil: true,
       } as unknown as never),
     ).toThrow();
   });

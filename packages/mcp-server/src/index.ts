@@ -95,7 +95,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'private_swap',
       description:
-        'Atomic private swap: spend a private deposit in the IN token, route through a registered adapter, deposit the OUT token back into a fresh private balance. Requires a pre-existing private deposit in the IN mint. Returns the swap signature and output amount.',
+        'Atomic private swap: spend a private deposit in the IN token, route through a registered adapter, deposit the OUT token back into a fresh private balance. Pass {inMint, outMint, amount} — the adapter program, ALT, scratch ATAs and expected-out are auto-resolved from the configured cluster (Jupiter + quote-derived expectedOut on mainnet; mock adapter on devnet). Requires a pre-existing private deposit in the IN mint. Returns the swap signature, output amount and a new opaque deposit id.',
       inputSchema: zodToJsonSchema(privateSwapInput),
     },
     {

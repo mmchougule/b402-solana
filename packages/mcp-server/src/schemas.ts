@@ -42,13 +42,15 @@ export const unshieldInput = z
 
 export const privateSwapInput = z
   .object({
-    inMint: Base58Pubkey.describe('Mint of the IN token (a shielded note in this mint must already exist for the caller)'),
+    inMint: Base58Pubkey.describe('Mint of the IN token (a private deposit in this mint must already exist for the caller)'),
     outMint: Base58Pubkey.describe('Mint of the OUT token'),
     amount: U64String.describe('Amount of inMint to swap, in smallest units'),
-    adapterProgramId: Base58Pubkey.describe('Program ID of the adapter handling the swap'),
-    adapterInTa: Base58Pubkey.describe('Adapter-side scratch ATA for IN mint'),
-    adapterOutTa: Base58Pubkey.describe('Adapter-side scratch ATA for OUT mint'),
-    alt: Base58Pubkey.describe('Address Lookup Table that compresses the v0 tx account list'),
+    slippageBps: z.number().int().nonnegative().max(10000).optional().describe('Acceptable slippage in basis points. Default 50 (0.5%). Used on mainnet to derive expectedOut from a Jupiter quote.'),
+    adapterProgramId: Base58Pubkey.optional().describe('Override adapter program. Defaults to Jupiter (mainnet) or mock (devnet).'),
+    adapterInTa: Base58Pubkey.optional().describe('Override adapter IN scratch ATA. Auto-derived from the adapter PDA + IN mint when omitted.'),
+    adapterOutTa: Base58Pubkey.optional().describe('Override adapter OUT scratch ATA. Auto-derived from the adapter PDA + OUT mint when omitted.'),
+    alt: Base58Pubkey.optional().describe('Override Address Lookup Table. Defaults to the canonical b402 ALT for the configured cluster.'),
+    expectedOut: U64String.optional().describe('Override expected OUT amount (smallest units). On mainnet auto-resolved from a Jupiter quote with slippageBps applied.'),
   })
   .strict();
 
