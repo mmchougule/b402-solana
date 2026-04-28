@@ -1,0 +1,24 @@
+[package]
+name = "b402-phoenix-adapter"
+version.workspace = true
+edition.workspace = true
+description = "b402 Phoenix v1 spot CLOB adapter (Phase A of PRD-24 — Swap only)"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "b402_phoenix_adapter"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+
+[dependencies]
+anchor-lang.workspace = true
+anchor-spl.workspace = true
+indexmap = { version = "=2.9.0" }
+
+[lints]
+workspace = true

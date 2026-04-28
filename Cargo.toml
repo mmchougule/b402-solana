@@ -10,6 +10,7 @@ members = [
     "programs/b402-kamino-adapter",
     "programs/b402-orca-adapter",
     "programs/b402-adrena-adapter",
+    "programs/b402-phoenix-adapter",
     "packages/crypto",
 ]
 # `tests/onchain` is intentionally NOT in this workspace. It uses litesvm which
