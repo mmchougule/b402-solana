@@ -1,16 +1,20 @@
 #!/bin/bash
-# Mainnet alpha deploy. Single-shot deploy of the 4 programs needed to demo
-# private swap end-to-end on mainnet.
+# Mainnet alpha deploy. Deploys the 5 programs needed for the full alpha
+# (shield/unshield via pool + verifiers; private_swap via Jupiter adapter;
+# private_lend via Kamino adapter).
 #
 # Pre-conditions:
 #   - solana CLI configured to mainnet ($ solana config set --url mainnet-beta)
-#   - admin wallet at ~/.config/solana/id.json with ≥ 6 SOL
+#   - admin wallet at ~/.config/solana/id.json with sufficient SOL (see dry run)
 #   - program keypairs at ops/keypairs/ (gitignored — never commit these)
-#   - all .so files built: ./scripts/build-all.sh OR build them inline below
+#   - all .so files built: ./scripts/build-all.sh
 #
 # Usage:
-#   ./ops/mainnet-deploy.sh                # dry run, prints plan + cost
-#   ./ops/mainnet-deploy.sh --execute      # actually deploys
+#   ./ops/mainnet-deploy.sh                                      # dry run, all 5
+#   ./ops/mainnet-deploy.sh --execute                            # deploy all 5
+#   ./ops/mainnet-deploy.sh --only b402_pool,b402_verifier_transact,b402_verifier_adapt
+#                                                                # dry run subset
+#   ./ops/mainnet-deploy.sh --only ... --execute                 # deploy subset
 #
 # Each `solana program deploy` is rent-paid upfront; close-program returns
 # ~95% of rent if you decommission. Tight --max-len keeps cost bounded.
@@ -19,17 +23,48 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 EXECUTE=""
-if [[ "${1:-}" == "--execute" ]]; then EXECUTE="--execute"; fi
+ONLY=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --execute) EXECUTE="--execute" ;;
+    --only)    ONLY="$2"; shift ;;
+    *)         echo "unknown flag: $1"; exit 1 ;;
+  esac
+  shift
+done
 
 # Programs we deploy in alpha. Order matters — pool depends on the verifier
 # IDs being knowable at init time, so we deploy verifiers first.
-PROGRAMS=(
+ALL_PROGRAMS=(
   "b402_verifier_transact:Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK"
   "b402_verifier_adapt:3Y2tyhNSaUiW5AcZcmFGRyTMdnroxHxc5GqFQPcMTZae"
   "b402_jupiter_adapter:3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7"
   "b402_kamino_adapter:2enwFgcGKJDqruHpCtvmhtxe3DYcV3k72VTvoGcdt2rX"
   "b402_pool:42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y"
 )
+
+# Apply --only filter while preserving order from ALL_PROGRAMS.
+if [[ -n "$ONLY" ]]; then
+  PROGRAMS=()
+  IFS=',' read -ra WANT <<< "$ONLY"
+  for entry in "${ALL_PROGRAMS[@]}"; do
+    name="${entry%:*}"
+    for w in "${WANT[@]}"; do
+      if [[ "$name" == "$w" ]]; then
+        PROGRAMS+=("$entry")
+        break
+      fi
+    done
+  done
+  if [[ ${#PROGRAMS[@]} -ne ${#WANT[@]} ]]; then
+    echo "✗ --only contains unknown program names. Known:"
+    for entry in "${ALL_PROGRAMS[@]}"; do echo "    ${entry%:*}"; done
+    exit 1
+  fi
+  echo "== deploying subset (${#PROGRAMS[@]} of ${#ALL_PROGRAMS[@]} programs) =="
+else
+  PROGRAMS=("${ALL_PROGRAMS[@]}")
+fi
 
 # Tight max-len overhead: 5 KB headroom on top of binary size lets us upgrade
 # without needing to extend-program in the common case.
