@@ -77,4 +77,36 @@ describe('NoteStore read-side', () => {
     expect(store.getSpendable(200n)).toHaveLength(1);
     expect(store.getSpendable(999n)).toHaveLength(0);
   });
+
+  it('getSpendableSince returns only notes past the cursor, sorted', () => {
+    const store = buildStore();
+    const mkNote = (leaf: bigint, mint: bigint): SpendableNote => ({
+      ...note(leaf, mint, 1n),
+      leafIndex: leaf,
+    });
+    // @ts-expect-error
+    store.notesByCommitment.set('a', mkNote(5n, 100n));
+    // @ts-expect-error
+    store.notesByCommitment.set('b', mkNote(2n, 100n));
+    // @ts-expect-error
+    store.notesByCommitment.set('c', mkNote(8n, 200n));
+    // @ts-expect-error
+    store.notesByCommitment.set('d', mkNote(3n, 100n));
+
+    expect(store.getSpendableSince(3n).map((n) => n.leafIndex)).toEqual([5n, 8n]);
+    expect(store.getSpendableSince(-1n).map((n) => n.leafIndex)).toEqual([2n, 3n, 5n, 8n]);
+    expect(store.getSpendableSince(3n, 100n).map((n) => n.leafIndex)).toEqual([5n]);
+  });
+
+  it('getSpendableSince excludes spent notes', () => {
+    const store = buildStore();
+    // @ts-expect-error
+    store.notesByCommitment.set('a', { ...note(5n, 100n, 1n), leafIndex: 5n });
+    // @ts-expect-error
+    store.notesByCommitment.set('b', { ...note(7n, 100n, 1n), leafIndex: 7n });
+    // @ts-expect-error
+    store.spentNullifiers.add('5');
+
+    expect(store.getSpendableSince(-1n).map((n) => n.leafIndex)).toEqual([7n]);
+  });
 });

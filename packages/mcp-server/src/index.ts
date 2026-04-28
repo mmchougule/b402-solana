@@ -20,6 +20,7 @@
  *   - holdings      — per-deposit private holdings (id, mint, amount)
  *   - balance       — aggregate private balance per mint
  *   - quote_swap    — Jupiter quote: expected OUT, slippage, price impact
+ *   - watch_incoming — cursor-based poll for newly-arrived private deposits
  *
  * Security:
  *   - Keypair loaded once from disk (B402_KEYPAIR_PATH) and held in memory.
@@ -45,6 +46,7 @@ import {
   holdingsInput,
   balanceInput,
   quoteSwapInput,
+  watchIncomingInput,
 } from './schemas.js';
 import { handleShield } from './tools/shield.js';
 import { handleUnshield } from './tools/unshield.js';
@@ -53,6 +55,7 @@ import { handleStatus } from './tools/status.js';
 import { handleHoldings } from './tools/holdings.js';
 import { handleBalance } from './tools/balance.js';
 import { handleQuoteSwap } from './tools/quote_swap.js';
+import { handleWatchIncoming } from './tools/watch_incoming.js';
 
 import { zodToJsonSchema } from 'zod-to-json-schema';
 
@@ -119,6 +122,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         'Quote a swap via Jupiter (mainnet routes only). Returns expected out amount, slippage, price impact and route hop count. Use this before private_swap to predict the outcome — off-chain estimate, actual execution may differ by up to slippageBps.',
       inputSchema: zodToJsonSchema(quoteSwapInput),
     },
+    {
+      name: 'watch_incoming',
+      description:
+        'Poll for newly-arrived private deposits since an opaque cursor. Pass the cursor returned by the previous call back unchanged on each iteration. Omit cursor on first call to start from the beginning. Returns the new arrivals plus an updated cursor — agents loop with a 2-3s sleep between calls.',
+      inputSchema: zodToJsonSchema(watchIncomingInput),
+    },
   ],
 }));
 
@@ -150,6 +159,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         break;
       case 'quote_swap':
         result = await handleQuoteSwap(ctx(), quoteSwapInput.parse(args));
+        break;
+      case 'watch_incoming':
+        result = await handleWatchIncoming(ctx(), watchIncomingInput.parse(args));
         break;
       default:
         throw new Error(`unknown tool: ${name}`);

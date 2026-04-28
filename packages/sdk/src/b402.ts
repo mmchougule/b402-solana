@@ -691,6 +691,46 @@ export class B402Solana {
   }
 
   /**
+   * Poll for newly-arrived private deposits since a cursor. The cursor is
+   * an opaque token returned by previous calls — pass it back unchanged on
+   * each iteration. Omit it (or pass `undefined`) on the first call to read
+   * everything from the start.
+   *
+   * The SDK's live note subscription pushes new arrivals into the in-memory
+   * store as they land on-chain, so polling every few seconds gives an
+   * agent a near-real-time stream of incoming deposits without running a
+   * subscription protocol.
+   *
+   * Output is JSON-friendly with no ZK plumbing exposed.
+   */
+  async watchIncoming(opts: {
+    cursor?: string;
+    mint?: PublicKey;
+    refresh?: boolean;
+  } = {}): Promise<{
+    incoming: Array<{ id: string; mint: string; amount: string; receivedAt: number }>;
+    cursor: string;
+  }> {
+    await this.ready();
+    if (opts.refresh !== false) await this._notes!.backfill({ limit: 100 });
+    const since = decodeCursor(opts.cursor);
+    const filterFr = opts.mint ? leToFrReduced(opts.mint.toBytes()) : undefined;
+    const fresh = this._notes!.getSpendableSince(since, filterFr);
+    let max = since;
+    for (const n of fresh) if (n.leafIndex > max) max = n.leafIndex;
+    const now = Date.now();
+    return {
+      incoming: fresh.map((n) => ({
+        id: noteId(n.commitment),
+        mint: mintLabel(n.tokenMint, opts.mint),
+        amount: n.value.toString(),
+        receivedAt: now,
+      })),
+      cursor: encodeCursor(max),
+    };
+  }
+
+  /**
    * Quote a swap via Jupiter Lite API (`https://lite-api.jup.ag/swap/v1`).
    * Public, no auth. Useful for an agent to predict the OUT amount + slippage
    * before committing to a `privateSwap` call.
@@ -777,6 +817,26 @@ export class B402Solana {
  *  commitment — stable across calls, doesn't reveal anything spendable. */
 function noteId(commitment: bigint): string {
   return commitment.toString(16).padStart(64, '0').slice(0, 16);
+}
+
+/** Encode an internal cursor (currently a leaf index) into an opaque base64url
+ *  token. Versioned so the encoding can change without breaking clients. */
+function encodeCursor(leafIndex: bigint): string {
+  const payload = JSON.stringify({ v: 1, l: leafIndex.toString() });
+  return Buffer.from(payload, 'utf8').toString('base64url');
+}
+
+/** Decode an opaque cursor token back into an internal leaf index. Treats
+ *  missing/malformed cursors as "from the beginning". */
+function decodeCursor(cursor: string | undefined): bigint {
+  if (!cursor) return -1n;
+  try {
+    const obj = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as { v?: number; l?: string };
+    if (obj.v !== 1 || typeof obj.l !== 'string') return -1n;
+    return BigInt(obj.l);
+  } catch {
+    return -1n;
+  }
 }
 
 /** Resolve a Fr-reduced mint value to a human-readable label. If the caller

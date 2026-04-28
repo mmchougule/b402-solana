@@ -77,6 +77,14 @@ export const quoteSwapInput = z
   })
   .strict();
 
+export const watchIncomingInput = z
+  .object({
+    cursor: z.string().optional().describe('Opaque cursor returned by a previous call. Omit on first call to read from the start.'),
+    mint: Base58Pubkey.optional().describe('Optional mint filter; with a filter, the response resolves the mint to its base58 address.'),
+    refresh: z.boolean().optional().describe('Re-sync from on-chain history before reading. Default true.'),
+  })
+  .strict();
+
 export type ShieldInput = z.infer<typeof shieldInput>;
 export type UnshieldInput = z.infer<typeof unshieldInput>;
 export type PrivateSwapInput = z.infer<typeof privateSwapInput>;
@@ -84,3 +92,4 @@ export type StatusInput = z.infer<typeof statusInput>;
 export type HoldingsInput = z.infer<typeof holdingsInput>;
 export type BalanceInput = z.infer<typeof balanceInput>;
 export type QuoteSwapInput = z.infer<typeof quoteSwapInput>;
+export type WatchIncomingInput = z.infer<typeof watchIncomingInput>;

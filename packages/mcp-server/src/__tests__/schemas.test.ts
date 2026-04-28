@@ -7,6 +7,7 @@ import {
   holdingsInput,
   balanceInput,
   quoteSwapInput,
+  watchIncomingInput,
 } from '../schemas.js';
 
 const VALID_PK = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'; // mainnet USDC
@@ -145,6 +146,31 @@ describe('quote_swap input', () => {
   });
 });
 
+describe('watch_incoming input', () => {
+  it('accepts empty (first call)', () => {
+    expect(() => watchIncomingInput.parse({})).not.toThrow();
+  });
+  it('accepts opaque cursor string', () => {
+    expect(() => watchIncomingInput.parse({ cursor: 'eyJ2IjoxLCJsIjoiNDIifQ' })).not.toThrow();
+  });
+  it('accepts mint filter', () => {
+    expect(() => watchIncomingInput.parse({ mint: VALID_PK })).not.toThrow();
+  });
+  it('accepts refresh flag', () => {
+    expect(() => watchIncomingInput.parse({ refresh: false })).not.toThrow();
+  });
+  it('rejects extra fields', () => {
+    expect(() =>
+      watchIncomingInput.parse({ extra: 'evil' } as unknown as never),
+    ).toThrow();
+  });
+  it('rejects non-string cursor', () => {
+    expect(() =>
+      watchIncomingInput.parse({ cursor: 42 } as unknown as never),
+    ).toThrow();
+  });
+});
+
 describe('responses contain no secret fields (static guarantee)', () => {
   // Compile-time guard: every tool handler's return type is asserted to be
   // a flat JSON-friendly object with only public fields. The schemas-as-types
@@ -158,5 +184,6 @@ describe('responses contain no secret fields (static guarantee)', () => {
     expect(holdingsInput._def.typeName).toBe('ZodObject');
     expect(balanceInput._def.typeName).toBe('ZodObject');
     expect(quoteSwapInput._def.typeName).toBe('ZodObject');
+    expect(watchIncomingInput._def.typeName).toBe('ZodObject');
   });
 });

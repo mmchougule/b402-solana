@@ -68,6 +68,23 @@ export class NoteStore {
     return out;
   }
 
+  /**
+   * Notes whose `leafIndex` is strictly greater than `sinceLeafIndex`,
+   * sorted ascending. Powers the cursor-based `watchIncoming` flow — the
+   * leaf index is an internal detail, never surfaced past the SDK boundary.
+   */
+  getSpendableSince(sinceLeafIndex: bigint, tokenMint?: bigint): SpendableNote[] {
+    const out: SpendableNote[] = [];
+    for (const n of this.notesByCommitment.values()) {
+      if (this.spentNullifiers.has(String(n.commitment))) continue;
+      if (n.leafIndex <= sinceLeafIndex) continue;
+      if (tokenMint != null && n.tokenMint !== tokenMint) continue;
+      out.push(n);
+    }
+    out.sort((a, b) => (a.leafIndex < b.leafIndex ? -1 : a.leafIndex > b.leafIndex ? 1 : 0));
+    return out;
+  }
+
   markSpent(nullifier: bigint): void {
     this.spentNullifiers.add(String(nullifier));
   }
