@@ -17,7 +17,6 @@ WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY packages/shared/package.json packages/shared/
 COPY packages/prover/package.json packages/prover/
-COPY packages/crypto/package.json packages/crypto/
 COPY packages/sdk/package.json packages/sdk/
 COPY packages/relayer/package.json packages/relayer/
 
@@ -27,11 +26,11 @@ RUN pnpm install --frozen-lockfile --prod=false
 # Copy sources and build everything the relayer transitively needs.
 COPY packages/shared packages/shared
 COPY packages/prover packages/prover
-COPY packages/crypto packages/crypto
 COPY packages/sdk packages/sdk
 COPY packages/relayer packages/relayer
 
 RUN pnpm --filter=@b402ai/solana-shared build \
+ && pnpm --filter=@b402ai/solana-prover build \
  && pnpm --filter=@b402ai/solana build \
  && pnpm --filter=@b402ai/solana-relayer build
 

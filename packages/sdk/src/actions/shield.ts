@@ -17,8 +17,10 @@
  */
 
 import {
+  AddressLookupTableAccount,
   ComputeBudgetProgram, Connection, Keypair, PublicKey, SystemProgram,
   Transaction, TransactionInstruction,
+  TransactionMessage, VersionedTransaction,
 } from '@solana/web3.js';
 import { TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import { randomBytes } from '@noble/hashes/utils';
@@ -59,11 +61,24 @@ export interface ShieldParams {
   amount: bigint;
   /**
    * Skip on-chain encrypted-note publication to save ~120 B/note in the tx.
-   * SAFE only for self-shields (depositor == future spender) — third-party
-   * recipients can't discover their notes without the on-chain ciphertext.
-   * Default true; set false when sending to a different recipient.
+   *
+   * Default **false** — the ciphertext is published in the on-chain
+   * `CommitmentAppended` event, so anyone with the viewing key can recover
+   * the note via backfill. This is the safe default: lose the local
+   * NoteStore cache, recover from chain.
+   *
+   * Set `true` only when you're sure you'll never need recovery (single
+   * machine, ephemeral session, or you've persisted notes elsewhere).
+   * Saves ~120 B per note on the wire.
    */
   omitEncryptedNotes?: boolean;
+  /**
+   * Address Lookup Table to compress the account-meta list. Required when
+   * `omitEncryptedNotes` is false (the default), because publishing the
+   * ciphertext + 9-account standard list overflows the 1232-byte tx cap
+   * without ALT compression. Pass the cluster's canonical b402 ALT.
+   */
+  alt?: PublicKey;
 }
 
 export interface ShieldResult {
@@ -204,8 +219,10 @@ export async function shield(params: ShieldParams): Promise<ShieldResult> {
     // encrypted_notes: Vec<EncryptedNote(89 + 32 + 2)>. Pool accepts 0..=2.
     // Omit fully on self-shields to fit under the 1232-byte tx limit; the
     // depositor knows the note locally without needing on-chain ciphertext.
+    // Default false: publish ciphertext on-chain so notes can be recovered
+    // from the chain alone, without relying on the local cache.
     encodeEncryptedNotes(
-      params.omitEncryptedNotes ?? true ? [] : [encrypted],
+      params.omitEncryptedNotes === true ? [] : [encrypted],
     ),
     // note_dummy_mask: u8 — bit 1 = output 1 dummy
     new Uint8Array([0b10]),
@@ -230,19 +247,41 @@ export async function shield(params: ShieldParams): Promise<ShieldResult> {
 
   const cuIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 });
 
-  // 7. Sign and submit.
-  const tx = new Transaction().add(cuIx, shieldIx);
-  tx.feePayer = relayer.publicKey;
-  tx.recentBlockhash = (await connection.getLatestBlockhash('confirmed')).blockhash;
-
-  // Order matters: relayer first (fee payer), then depositor. Same keypair OK
-  // (web3.js de-duplicates signers).
+  // 7. Sign and submit. When publishing ciphertext on-chain
+  // (`omitEncryptedNotes: false`, the default for recoverability), the tx
+  // overflows the 1232-byte cap as a legacy Transaction — we must use a v0
+  // tx with an Address Lookup Table to compress account references.
+  const omit = params.omitEncryptedNotes === true;
+  const blockhash = (await connection.getLatestBlockhash('confirmed')).blockhash;
   const signers = relayer.publicKey.equals(depositor.publicKey)
     ? [relayer]
     : [relayer, depositor];
-  tx.sign(...signers);
 
-  const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
+  let sig: string;
+  if (params.alt) {
+    const altInfo = await connection.getAddressLookupTable(params.alt);
+    if (!altInfo.value) throw new Error(`shield: ALT ${params.alt.toBase58()} not found`);
+    const lookupTable: AddressLookupTableAccount = altInfo.value;
+    const msg = new TransactionMessage({
+      payerKey: relayer.publicKey,
+      recentBlockhash: blockhash,
+      instructions: [cuIx, shieldIx],
+    }).compileToV0Message([lookupTable]);
+    const vtx = new VersionedTransaction(msg);
+    vtx.sign(signers);
+    sig = await connection.sendRawTransaction(vtx.serialize(), { skipPreflight: false });
+  } else {
+    if (!omit) {
+      throw new Error(
+        'shield: ciphertext publication requires an Address Lookup Table — pass `alt` or set omitEncryptedNotes: true',
+      );
+    }
+    const tx = new Transaction().add(cuIx, shieldIx);
+    tx.feePayer = relayer.publicKey;
+    tx.recentBlockhash = blockhash;
+    tx.sign(...signers);
+    sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
+  }
   await connection.confirmTransaction(sig, 'confirmed');
 
   // 8. Construct the SpendableNote record so the caller can hand straight to NoteStore.

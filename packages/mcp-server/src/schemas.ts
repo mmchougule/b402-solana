@@ -56,6 +56,8 @@ export const privateSwapInput = z
 
 export const statusInput = z.object({}).strict();
 
+export const walletBalanceInput = z.object({}).strict();
+
 export const holdingsInput = z
   .object({
     mint: Base58Pubkey.optional().describe('Optional mint to filter by. Without a filter, mints are returned as opaque short labels so agents have a stable key to compare across calls.'),
@@ -91,6 +93,7 @@ export type ShieldInput = z.infer<typeof shieldInput>;
 export type UnshieldInput = z.infer<typeof unshieldInput>;
 export type PrivateSwapInput = z.infer<typeof privateSwapInput>;
 export type StatusInput = z.infer<typeof statusInput>;
+export type WalletBalanceInput = z.infer<typeof walletBalanceInput>;
 export type HoldingsInput = z.infer<typeof holdingsInput>;
 export type BalanceInput = z.infer<typeof balanceInput>;
 export type QuoteSwapInput = z.infer<typeof quoteSwapInput>;

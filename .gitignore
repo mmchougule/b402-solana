@@ -10,6 +10,11 @@ target/
 next-env.d.ts
 *.tsbuildinfo
 
+# Circuits copied into mcp-server at pack time. Source-of-truth lives at
+# circuits/build/ — packages/mcp-server/circuits/ is reproduced by
+# prepublishOnly. Never commit duplicates.
+packages/mcp-server/circuits/
+
 # Local skill installs / parallel agent staging — user-machine-specific.
 .agents/
 .codex-staging/
