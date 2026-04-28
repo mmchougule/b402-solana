@@ -22,10 +22,11 @@ jobs:
           node-version: 20
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # SDK depends on prover types and prover/sdk both depend on shared types.
-      # Build the producers' .d.ts before recursive typecheck.
+      # Downstream packages (sdk, mcp-server, relayer) consume each other via
+      # workspace:* + dist/. Build producers' .d.ts before recursive typecheck.
       - run: pnpm --filter='@b402ai/solana-shared' build
       - run: pnpm --filter='@b402ai/solana-prover' build
+      - run: pnpm --filter='@b402ai/solana' build
       - run: pnpm -r --if-present typecheck
 
   sdk-tests:
