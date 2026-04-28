@@ -16,19 +16,12 @@ JUP_V6=JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4
 
 echo "== mainnet init =="
 
-# We use the existing examples/devnet-init.ts logic — just re-target it via env.
-RPC_URL=https://api.mainnet-beta.solana.com \
-ADMIN_KEYPAIR=$HOME/.config/solana/id.json \
-POOL_ID=$POOL_ID \
-VERIFIER_T_ID=$VERIFIER_T_ID \
-VERIFIER_A_ID=$VERIFIER_A_ID \
-JUP_ADAPTER_ID=$JUP_ADAPTER_ID \
-USDC=$USDC \
-WSOL=$WSOL \
-JUP_V6=$JUP_V6 \
-node --experimental-vm-modules \
-  --import tsx \
-  examples/mainnet-init.ts
+# Allow caller to override RPC_URL (e.g. Helius); otherwise default to public mainnet.
+: "${RPC_URL:=https://api.mainnet-beta.solana.com}"
+: "${ADMIN_KEYPAIR:=$HOME/.config/solana/id.json}"
+
+export RPC_URL ADMIN_KEYPAIR POOL_ID VERIFIER_T_ID VERIFIER_A_ID JUP_ADAPTER_ID USDC WSOL JUP_V6
+(cd examples && pnpm exec tsx mainnet-init.ts)
 
 echo ""
 echo "== mainnet init complete =="
