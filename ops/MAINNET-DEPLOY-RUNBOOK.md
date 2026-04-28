@@ -20,9 +20,11 @@ ls ops/keypairs/
 # (b402_mock_adapter / b402_orca_adapter / b402_adrena_adapter / b402_jupiter_perps_adapter
 #  are NOT deployed in alpha — only the five above.)
 
-# 3. Build all programs (idempotent, ~3 min)
+# 3. Build all programs from current HEAD (idempotent, ~3 min)
 ./scripts/build-all.sh
 # Produces target/deploy/*.so for the five alpha programs.
+# Equivalent to running, in sequence, for each program name:
+#   cargo build-sbf --tools-version v1.54 --manifest-path programs/<name>/Cargo.toml
 
 # 4. Fund the deploy authority on mainnet
 solana config set --url mainnet-beta
@@ -139,7 +141,7 @@ export const B402_ALT_MAINNET = '<ALT_PUBKEY>';
 ```
 Bump SDK version, republish (Step 5).
 
-## Step 4 — Fund mainnet relayer wallet (≈0.5 SOL)
+## Step 4 — Generate + fund mainnet relayer wallet (≈0.5 SOL)
 
 ```bash
 # Generate dedicated mainnet relayer keypair
@@ -156,22 +158,57 @@ solana transfer --from $HOME/.config/solana/id.json \
   --url mainnet-beta
 ```
 
-## Step 5 — Bump SDK + MCP, republish to npm (≈0 SOL, ~5 min)
+## Step 5 — Deploy mainnet relayer to Cloud Run (≈0 SOL, ~5 min)
 
-After ALT creation in step 3 you set `B402_ALT_MAINNET`. Push that as a new patch version so the published MCP server uses the live mainnet ALT by default.
+Cloud Run gives us the public URL we'll bake into the published SDK + MCP package as the mainnet default. So this MUST happen before step 6 (publish).
 
 ```bash
-# Bump versions
+cd packages/relayer
+
+# Push the relayer keypair as a Cloud Run secret (NEVER commit it)
+gcloud secrets create b402-relayer-mainnet-keypair \
+  --data-file=$HOME/.config/solana/b402-relayer-mainnet.json
+
+# Use the Helius Gatekeeper URL for low-latency runtime quote+submit
+gcloud secrets create b402-relayer-mainnet-rpc \
+  --data-file=<(echo -n "https://beta.helius-rpc.com/?api-key=YOUR_KEY")
+
+# Build + deploy mainnet variant
+gcloud builds submit --config cloudbuild.yaml \
+  --substitutions _CLUSTER=mainnet,_SERVICE=b402-solana-relayer-mainnet
+
+# Capture the URL — you'll bake it into context.ts in step 6
+gcloud run services describe b402-solana-relayer-mainnet \
+  --region us-central1 --format='value(status.url)'
+
+# Sanity probe
+curl -sf $(gcloud run services describe b402-solana-relayer-mainnet \
+  --region us-central1 --format='value(status.url)')/health
+```
+
+Mint a public-tier API key for the mainnet relayer (matches the devnet `kp_8a28d0e86074cde3` model — embedded in the published MCP so end users get zero-config). Track it; you'll wire it into `defaultApiKey.mainnet` in step 6.
+
+## Step 6 — Bump SDK + MCP, wire mainnet defaults, republish (≈0 SOL, ~5 min)
+
+Wire three mainnet constants into the package source, then publish.
+
+```bash
+# (a) ALT pubkey — from step 3 output
+# Edit packages/shared/src/constants.ts:
+#   export const B402_ALT_MAINNET = '<ALT_PUBKEY>' as const;
+
+# (b) Hosted-relayer URL + API key — from step 5 output
+# Edit packages/mcp-server/src/context.ts:
+#   defaultRelayerUrl.mainnet = 'https://b402-solana-relayer-mainnet-...run.app',
+#   defaultApiKey.mainnet     = 'kp_<mainnet_public_tier_key>',
+
+# (c) Bump versions
 sed -i '' 's/"version": "0.0.4"/"version": "0.0.5"/' packages/sdk/package.json
 sed -i '' 's/"version": "0.0.5"/"version": "0.0.6"/' packages/mcp-server/package.json
 
-# Wire mainnet defaults: relayer URL, API key, ALT pubkey
-# Edit packages/mcp-server/src/context.ts:
-#   - defaultRelayerUrl.mainnet = 'https://b402-solana-relayer-mainnet-...run.app'
-#   - defaultApiKey.mainnet = 'kp_<mainnet_public_tier_key>'
-
 # Build clean
-rm -rf packages/sdk/dist packages/mcp-server/dist
+rm -rf packages/sdk/dist packages/mcp-server/dist packages/shared/dist
+pnpm --filter='@b402ai/solana-shared' build
 pnpm --filter='@b402ai/solana' build
 pnpm --filter='@b402ai/solana-mcp' build
 
@@ -180,31 +217,16 @@ mkdir -p /tmp/b402-tarballs
 cd packages/sdk && pnpm pack --pack-destination /tmp/b402-tarballs
 cd ../mcp-server && pnpm pack --pack-destination /tmp/b402-tarballs
 
-tar -tzf /tmp/b402-tarballs/b402ai-solana-0.0.5.tgz | head
-tar -tzf /tmp/b402-tarballs/b402ai-solana-mcp-0.0.6.tgz | head
-# Manually scan for: id.json, *.pem, .env, mainnet-keypair*
+tar -tzf /tmp/b402-tarballs/b402ai-solana-0.0.5.tgz \
+  | grep -iE 'keypair|\.env|\.pem|secret|id\.json' || echo "clean"
+tar -tzf /tmp/b402-tarballs/b402ai-solana-mcp-0.0.6.tgz \
+  | grep -iE 'keypair|\.env|\.pem|secret|id\.json' || echo "clean"
 
-# Publish
+# Publish — sdk first, then mcp (mcp depends on sdk)
 cd /tmp/b402-tarballs
 npm publish b402ai-solana-0.0.5.tgz
-sleep 30
+sleep 30   # wait for npm registry to index sdk before mcp resolves it
 npm publish b402ai-solana-mcp-0.0.6.tgz
-```
-
-## Step 6 — Deploy mainnet relayer to Cloud Run (≈0 SOL)
-
-```bash
-cd packages/relayer
-
-# Push the relayer keypair as a Cloud Run secret (NEVER commit it)
-gcloud secrets create b402-relayer-mainnet-keypair \
-  --data-file=$HOME/.config/solana/b402-relayer-mainnet.json
-gcloud secrets create b402-relayer-mainnet-rpc \
-  --data-file=<(echo -n "https://mainnet.helius-rpc.com/?api-key=YOUR_KEY")
-
-# Deploy
-gcloud builds submit --config cloudbuild.yaml \
-  --substitutions _CLUSTER=mainnet,_SERVICE=b402-solana-relayer-mainnet
 ```
 
 ## Step 7 — Smoke test (≈0.01 SOL)
