@@ -1,7 +1,8 @@
 {
   "name": "@b402ai/solana-mcp",
   "version": "0.0.1",
-  "description": "Model Context Protocol server exposing the b402-solana SDK as agent-callable tools",
+  "description": "Model Context Protocol server exposing the b402 Solana SDK as agent-callable tools (Claude Code, Cursor, any MCP runtime)",
+  "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -13,6 +14,32 @@
   },
   "bin": {
     "b402-solana-mcp": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mmchougule/b402-solana.git",
+    "directory": "packages/mcp-server"
+  },
+  "homepage": "https://github.com/mmchougule/b402-solana#readme",
+  "bugs": "https://github.com/mmchougule/b402-solana/issues",
+  "keywords": [
+    "solana",
+    "privacy",
+    "mcp",
+    "model-context-protocol",
+    "agent",
+    "claude-code",
+    "cursor"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
