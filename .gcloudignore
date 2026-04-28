@@ -1,0 +1,39 @@
+# Cloud Build context — keep small + reproducible. Excludes things the
+# Dockerfile doesn't need so submit upload is fast.
+.git
+.github
+node_modules
+**/node_modules
+**/dist
+**/.next
+**/target
+**/.anchor
+**/test-ledger
+*.log
+.DS_Store
+
+# Big test artifacts not needed for relayer build
+circuits/build/test_artifacts
+circuits/build/ceremony/*.ptau
+circuits/build/ceremony/*_0000.zkey
+circuits/build/ceremony/*_0001.zkey
+
+# Local-only stuff
+.codex-staging
+.agents
+docs/spikes
+ops/keypairs
+
+# Rust crates not needed for the JS-only relayer build (top-level only;
+# packages/sdk/src/programs/ is TS source we DO need)
+/packages/crypto/
+/programs/
+
+# Other monorepo bits the relayer doesn't need (saves upload time)
+/apps/
+/docs/
+/ops/
+/tests/
+
+# We have one local-only relayer config helper script not in git
+.gcloudignore
