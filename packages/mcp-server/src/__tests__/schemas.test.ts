@@ -6,6 +6,7 @@ import {
   statusInput,
   holdingsInput,
   balanceInput,
+  quoteSwapInput,
 } from '../schemas.js';
 
 const VALID_PK = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'; // mainnet USDC
@@ -110,6 +111,40 @@ describe('balance input', () => {
   });
 });
 
+describe('quote_swap input', () => {
+  it('accepts valid', () => {
+    expect(() =>
+      quoteSwapInput.parse({ inMint: VALID_PK, outMint: VALID_PK, amount: '1000000' }),
+    ).not.toThrow();
+  });
+  it('accepts slippageBps override', () => {
+    expect(() =>
+      quoteSwapInput.parse({
+        inMint: VALID_PK, outMint: VALID_PK, amount: '1000000', slippageBps: 100,
+      }),
+    ).not.toThrow();
+  });
+  it('rejects slippageBps > 10000', () => {
+    expect(() =>
+      quoteSwapInput.parse({
+        inMint: VALID_PK, outMint: VALID_PK, amount: '1', slippageBps: 99999,
+      }),
+    ).toThrow();
+  });
+  it('rejects negative slippageBps', () => {
+    expect(() =>
+      quoteSwapInput.parse({
+        inMint: VALID_PK, outMint: VALID_PK, amount: '1', slippageBps: -1,
+      }),
+    ).toThrow();
+  });
+  it('rejects float amount', () => {
+    expect(() =>
+      quoteSwapInput.parse({ inMint: VALID_PK, outMint: VALID_PK, amount: '1.5' }),
+    ).toThrow();
+  });
+});
+
 describe('responses contain no secret fields (static guarantee)', () => {
   // Compile-time guard: every tool handler's return type is asserted to be
   // a flat JSON-friendly object with only public fields. The schemas-as-types
@@ -122,5 +157,6 @@ describe('responses contain no secret fields (static guarantee)', () => {
     expect(statusInput._def.typeName).toBe('ZodObject');
     expect(holdingsInput._def.typeName).toBe('ZodObject');
     expect(balanceInput._def.typeName).toBe('ZodObject');
+    expect(quoteSwapInput._def.typeName).toBe('ZodObject');
   });
 });

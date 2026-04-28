@@ -19,6 +19,7 @@
  *   - status        — wallet pubkey + private balances by mint
  *   - holdings      — per-deposit private holdings (id, mint, amount)
  *   - balance       — aggregate private balance per mint
+ *   - quote_swap    — Jupiter quote: expected OUT, slippage, price impact
  *
  * Security:
  *   - Keypair loaded once from disk (B402_KEYPAIR_PATH) and held in memory.
@@ -43,6 +44,7 @@ import {
   statusInput,
   holdingsInput,
   balanceInput,
+  quoteSwapInput,
 } from './schemas.js';
 import { handleShield } from './tools/shield.js';
 import { handleUnshield } from './tools/unshield.js';
@@ -50,6 +52,7 @@ import { handlePrivateSwap } from './tools/private_swap.js';
 import { handleStatus } from './tools/status.js';
 import { handleHoldings } from './tools/holdings.js';
 import { handleBalance } from './tools/balance.js';
+import { handleQuoteSwap } from './tools/quote_swap.js';
 
 import { zodToJsonSchema } from 'zod-to-json-schema';
 
@@ -110,6 +113,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         'Aggregate private balance grouped by mint. The default read tool — pass {mint} to filter and resolve its base58 address. By default refreshes from on-chain history before returning.',
       inputSchema: zodToJsonSchema(balanceInput),
     },
+    {
+      name: 'quote_swap',
+      description:
+        'Quote a swap via Jupiter (mainnet routes only). Returns expected out amount, slippage, price impact and route hop count. Use this before private_swap to predict the outcome — off-chain estimate, actual execution may differ by up to slippageBps.',
+      inputSchema: zodToJsonSchema(quoteSwapInput),
+    },
   ],
 }));
 
@@ -138,6 +147,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         break;
       case 'balance':
         result = await handleBalance(ctx(), balanceInput.parse(args));
+        break;
+      case 'quote_swap':
+        result = await handleQuoteSwap(ctx(), quoteSwapInput.parse(args));
         break;
       default:
         throw new Error(`unknown tool: ${name}`);

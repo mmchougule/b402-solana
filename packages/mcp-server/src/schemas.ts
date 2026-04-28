@@ -68,9 +68,19 @@ export const balanceInput = z
   })
   .strict();
 
+export const quoteSwapInput = z
+  .object({
+    inMint: Base58Pubkey.describe('SPL mint of the IN token'),
+    outMint: Base58Pubkey.describe('SPL mint of the OUT token'),
+    amount: U64String.describe('Amount of inMint to swap, in smallest units'),
+    slippageBps: z.number().int().nonnegative().max(10000).optional().describe('Acceptable slippage in basis points. Default 50 (0.5%).'),
+  })
+  .strict();
+
 export type ShieldInput = z.infer<typeof shieldInput>;
 export type UnshieldInput = z.infer<typeof unshieldInput>;
 export type PrivateSwapInput = z.infer<typeof privateSwapInput>;
 export type StatusInput = z.infer<typeof statusInput>;
 export type HoldingsInput = z.infer<typeof holdingsInput>;
 export type BalanceInput = z.infer<typeof balanceInput>;
+export type QuoteSwapInput = z.infer<typeof quoteSwapInput>;

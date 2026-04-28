@@ -691,6 +691,69 @@ export class B402Solana {
   }
 
   /**
+   * Quote a swap via Jupiter Lite API (`https://lite-api.jup.ag/swap/v1`).
+   * Public, no auth. Useful for an agent to predict the OUT amount + slippage
+   * before committing to a `privateSwap` call.
+   *
+   * The quote is an off-chain estimate; actual on-chain execution may differ
+   * by up to `slippageBps`. Mainnet routes only — Jupiter does not index
+   * devnet liquidity.
+   */
+  async quoteSwap(opts: {
+    inMint: PublicKey;
+    outMint: PublicKey;
+    amount: bigint;
+    slippageBps?: number;
+  }): Promise<{
+    inMint: string;
+    outMint: string;
+    inAmount: string;
+    outAmount: string;
+    otherAmountThreshold: string;
+    slippageBps: number;
+    priceImpactPct: string;
+    routeHops: number;
+    contextSlot?: number;
+  }> {
+    const slippageBps = opts.slippageBps ?? 50;
+    const url = new URL('https://lite-api.jup.ag/swap/v1/quote');
+    url.searchParams.set('inputMint', opts.inMint.toBase58());
+    url.searchParams.set('outputMint', opts.outMint.toBase58());
+    url.searchParams.set('amount', opts.amount.toString());
+    url.searchParams.set('slippageBps', String(slippageBps));
+
+    const resp = await fetch(url, { headers: { accept: 'application/json' } });
+    if (!resp.ok) {
+      throw new B402Error(
+        B402ErrorCode.InvalidConfig,
+        `Jupiter quote failed: ${resp.status} ${resp.statusText}`,
+      );
+    }
+    const q = (await resp.json()) as {
+      inputMint: string;
+      outputMint: string;
+      inAmount: string;
+      outAmount: string;
+      otherAmountThreshold: string;
+      slippageBps: number;
+      priceImpactPct: string;
+      routePlan: unknown[];
+      contextSlot?: number;
+    };
+    return {
+      inMint: q.inputMint,
+      outMint: q.outputMint,
+      inAmount: q.inAmount,
+      outAmount: q.outAmount,
+      otherAmountThreshold: q.otherAmountThreshold,
+      slippageBps: q.slippageBps,
+      priceImpactPct: q.priceImpactPct,
+      routeHops: Array.isArray(q.routePlan) ? q.routePlan.length : 0,
+      contextSlot: q.contextSlot,
+    };
+  }
+
+  /**
    * @internal Re-sync from on-chain history. Most agents should use
    * `balance({ refresh: true })` or `holdings({ refresh: true })` instead;
    * this is exposed for advanced cases that want explicit cursor control.
