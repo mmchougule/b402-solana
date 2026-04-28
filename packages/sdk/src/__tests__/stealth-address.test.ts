@@ -1,9 +1,11 @@
 import { describe, it, expect } from 'vitest';
+import { bech32 } from '@scure/base';
 import { FR_MODULUS } from '@b402ai/solana-shared';
 import {
   encodeStealthAddress,
   decodeStealthAddress,
   STEALTH_ADDRESS_HRP,
+  STEALTH_ADDRESS_VERSION,
 } from '../stealth/address.js';
 import { B402Error, B402ErrorCode } from '../errors.js';
 
@@ -45,13 +47,57 @@ describe('stealth-address bech32', () => {
     expect(() => decodeStealthAddress(tampered)).toThrow(B402Error);
   });
 
-  it('rejects wrong HRP', () => {
+  it('rejects wrong HRP (checksum-aware: existing string under a wrong prefix)', () => {
+    // This case exercises the checksum branch — bech32's checksum is a function
+    // of HRP, so swapping the prefix while keeping the same data part fails
+    // checksum first.
     const s = encodeStealthAddress(7n, bytes(1));
     const dataPart = s.slice(STEALTH_ADDRESS_HRP.length);
-    const wrongHrp = 'b402evm' + dataPart;
-    // wrong-HRP almost always also fails the checksum (HRP is mixed in), so
-    // any B402Error is acceptable here — it must NOT decode as valid.
-    expect(() => decodeStealthAddress(wrongHrp)).toThrow(B402Error);
+    const wrongHrpStr = 'b402evm' + dataPart;
+    expect(() => decodeStealthAddress(wrongHrpStr)).toThrow(B402Error);
+  });
+
+  it('rejects wrong HRP (valid checksum: re-encoded under a different HRP)', () => {
+    // This case exercises the explicit `prefix !== STEALTH_ADDRESS_HRP` branch
+    // — same payload re-encoded under another HRP has a *valid* checksum but
+    // wrong prefix.
+    const payload = new Uint8Array(1 + 32 + 32);
+    payload[0] = STEALTH_ADDRESS_VERSION;
+    payload.set(bytes(0x07), 1);
+    payload.set(bytes(0x01), 33);
+    const wrongHrp = bech32.encode('b402evm', bech32.toWords(payload), 256);
+
+    try {
+      decodeStealthAddress(wrongHrp);
+      throw new Error('should have thrown');
+    } catch (e) {
+      expect(e).toBeInstanceOf(B402Error);
+      const err = e as B402Error;
+      expect(err.code).toBe(B402ErrorCode.InvalidRecipient);
+      expect(err.message).toContain('wrong HRP');
+    }
+  });
+
+  it('rejects non-canonical Fr in decode (spending bytes >= FR_MODULUS)', () => {
+    // Construct a payload whose spending-key bytes encode 2^254 (well above
+    // FR_MODULUS). leToFr rejects this; the wrapper must surface it as
+    // InvalidRecipient, not as a raw Error.
+    const payload = new Uint8Array(1 + 32 + 32);
+    payload[0] = STEALTH_ADDRESS_VERSION;
+    // 32-byte LE: bit 254 set ⇒ value 2^254, > FR_MODULUS
+    payload[1 + 31] = 0x40;
+    // viewing key bytes irrelevant; default zeros are fine
+    const bad = bech32.encode(STEALTH_ADDRESS_HRP, bech32.toWords(payload), 256);
+
+    try {
+      decodeStealthAddress(bad);
+      throw new Error('should have thrown');
+    } catch (e) {
+      expect(e).toBeInstanceOf(B402Error);
+      const err = e as B402Error;
+      expect(err.code).toBe(B402ErrorCode.InvalidRecipient);
+      expect(err.message).toContain('non-canonical');
+    }
   });
 
   it('rejects out-of-range spending key on encode', () => {

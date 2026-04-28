@@ -45,8 +45,16 @@ export function encodeStealthAddress(spendingPub: bigint, viewingPub: Uint8Array
       `viewingPub must be 32 bytes, got ${viewingPub.length}`,
     );
   }
-  // frToLe rejects out-of-range / negative.
-  const spendBytes = frToLe(spendingPub);
+  let spendBytes: Uint8Array;
+  try {
+    // frToLe rejects out-of-range / negative.
+    spendBytes = frToLe(spendingPub);
+  } catch (e) {
+    throw new B402Error(
+      B402ErrorCode.InvalidRecipient,
+      `invalid spendingPub: ${(e as Error).message}`,
+    );
+  }
 
   const payload = new Uint8Array(PAYLOAD_LEN);
   payload[0] = STEALTH_ADDRESS_VERSION;
@@ -92,7 +100,15 @@ export function decodeStealthAddress(s: string): StealthAddressParts {
       `unknown stealth-address version: 0x${version.toString(16)}`,
     );
   }
-  const spendingPub = leToFr(Uint8Array.from(payload.subarray(1, 33)));
+  let spendingPub: bigint;
+  try {
+    spendingPub = leToFr(Uint8Array.from(payload.subarray(1, 33)));
+  } catch (e) {
+    throw new B402Error(
+      B402ErrorCode.InvalidRecipient,
+      `non-canonical spending key: ${(e as Error).message}`,
+    );
+  }
   const viewingPub = Uint8Array.from(payload.subarray(33, 65));
   return { spendingPub, viewingPub };
 }
