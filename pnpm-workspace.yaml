@@ -3,5 +3,6 @@ packages:
   - 'packages/shared'
   - 'packages/prover'
   - 'packages/relayer'
+  - 'packages/mcp-server'
   - 'circuits'
   - 'examples'

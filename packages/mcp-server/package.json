@@ -1,0 +1,40 @@
+{
+  "name": "@b402ai/solana-mcp",
+  "version": "0.0.1",
+  "description": "Model Context Protocol server exposing the b402-solana SDK as agent-callable tools",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "bin": {
+    "b402-solana-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "node --import tsx --enable-source-maps src/index.ts",
+    "start": "node ./dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@b402ai/solana": "workspace:*",
+    "@b402ai/solana-prover": "workspace:*",
+    "@b402ai/solana-shared": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "@solana/web3.js": "^1.95.8",
+    "@solana/spl-token": "^0.4.9",
+    "zod": "^3.23.8",
+    "zod-to-json-schema": "^3.23.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4"
+  }
+}
