@@ -10,6 +10,7 @@ import type { Connection, Logs, PublicKey } from '@solana/web3.js';
 import type { Wallet } from './wallet.js';
 import { tryDecryptNote, type EncryptedNote } from './note-encryption.js';
 import { commitmentHash, nullifierHash } from './poseidon.js';
+import { parseProgramDataLog } from './notes/scanner.js';
 import type { SpendableNote } from '@b402ai/solana-shared';
 
 export interface NoteStoreOptions {
@@ -58,8 +59,71 @@ export class NoteStore {
     return out;
   }
 
+  /** All spendable notes across mints, in insertion order. */
+  getAllSpendable(): SpendableNote[] {
+    const out: SpendableNote[] = [];
+    for (const n of this.notesByCommitment.values()) {
+      if (!this.spentNullifiers.has(String(n.commitment))) out.push(n);
+    }
+    return out;
+  }
+
   markSpent(nullifier: bigint): void {
     this.spentNullifiers.add(String(nullifier));
+  }
+
+  /**
+   * Backfill spendable notes from on-chain history. Fetches recent signatures
+   * for the pool program, parses CommitmentAppended events from each tx's
+   * logs, and attempts to claim each commitment via ingestCommitment.
+   *
+   * Idempotent — commitments already in the in-memory store are skipped
+   * cheaply, and the on-chain leaf index in the event is authoritative.
+   *
+   * Does NOT maintain the client-side merkle tree. The Scanner does that
+   * for live events; for arbitrary historical unshields, callers need a
+   * full-tree backfill which is out of scope for v0.
+   */
+  async backfill(opts: { limit?: number; before?: string } = {}): Promise<{
+    txsScanned: number;
+    eventsSeen: number;
+    notesIngested: number;
+  }> {
+    const limit = opts.limit ?? 100;
+    const sigs = await this.opts.connection.getSignaturesForAddress(
+      this.opts.poolProgramId,
+      { limit, before: opts.before },
+      'confirmed',
+    );
+    let eventsSeen = 0;
+    let notesIngested = 0;
+    for (const sig of sigs) {
+      if (sig.err) continue;
+      const tx = await this.opts.connection.getTransaction(sig.signature, {
+        maxSupportedTransactionVersion: 0,
+        commitment: 'confirmed',
+      });
+      const logs = tx?.meta?.logMessages;
+      if (!logs) continue;
+      for (const line of logs) {
+        const ev = parseProgramDataLog(line);
+        if (!ev) continue;
+        eventsSeen += 1;
+        const commitmentBigint = leToBigint(ev.commitment);
+        if (this.notesByCommitment.has(String(commitmentBigint))) continue;
+        const ok = await this.ingestCommitment({
+          commitment: commitmentBigint,
+          leafIndex: ev.leafIndex,
+          encrypted: {
+            ciphertext: ev.ciphertext,
+            ephemeralPub: ev.ephemeralPub,
+            viewingTag: ev.viewingTag,
+          },
+        });
+        if (ok) notesIngested += 1;
+      }
+    }
+    return { txsScanned: sigs.length, eventsSeen, notesIngested };
   }
 
   private async handleLogs(_logs: Logs): Promise<void> {
@@ -114,4 +178,10 @@ export class NoteStore {
   async expectedNullifier(n: SpendableNote): Promise<bigint> {
     return nullifierHash(n.spendingPriv, n.leafIndex);
   }
+}
+
+function leToBigint(b: Uint8Array): bigint {
+  let v = 0n;
+  for (let i = b.length - 1; i >= 0; i--) v = (v << 8n) | BigInt(b[i]);
+  return v;
 }

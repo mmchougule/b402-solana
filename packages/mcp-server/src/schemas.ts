@@ -54,7 +54,23 @@ export const privateSwapInput = z
 
 export const statusInput = z.object({}).strict();
 
+export const holdingsInput = z
+  .object({
+    mint: Base58Pubkey.optional().describe('Optional mint to filter by. Without a filter, mints are returned as opaque short labels so agents have a stable key to compare across calls.'),
+    refresh: z.boolean().optional().describe('Re-sync from on-chain history before reading. Default true. Set false for a fast in-memory snapshot.'),
+  })
+  .strict();
+
+export const balanceInput = z
+  .object({
+    mint: Base58Pubkey.optional().describe('Optional mint to filter by. With a filter, the response resolves the mint base58.'),
+    refresh: z.boolean().optional().describe('Re-sync from on-chain history before reading. Default true.'),
+  })
+  .strict();
+
 export type ShieldInput = z.infer<typeof shieldInput>;
 export type UnshieldInput = z.infer<typeof unshieldInput>;
 export type PrivateSwapInput = z.infer<typeof privateSwapInput>;
 export type StatusInput = z.infer<typeof statusInput>;
+export type HoldingsInput = z.infer<typeof holdingsInput>;
+export type BalanceInput = z.infer<typeof balanceInput>;

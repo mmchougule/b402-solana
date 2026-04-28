@@ -609,30 +609,121 @@ export class B402Solana {
 
   async status(): Promise<{
     cluster: string;
-    spendingPub: string;
-    viewingPub: string;
-    balances: Array<{ mint: string; amount: string; noteCount: number }>;
+    walletPubkey: string;
+    balances: Array<{ mint: string; amount: string; depositCount: number }>;
   }> {
     await this.ready();
-    const balances = new Map<bigint, { amount: bigint; count: number }>();
-    for (const note of (this._notes as NoteStore).getSpendable(0n)) {
-      const cur = balances.get(note.tokenMint) ?? { amount: 0n, count: 0 };
+    const agg = new Map<bigint, { amount: bigint; count: number }>();
+    for (const note of (this._notes as NoteStore).getAllSpendable()) {
+      const cur = agg.get(note.tokenMint) ?? { amount: 0n, count: 0 };
       cur.amount += note.value;
       cur.count += 1;
-      balances.set(note.tokenMint, cur);
+      agg.set(note.tokenMint, cur);
     }
-
     return {
       cluster: this.cluster,
-      spendingPub: this.wallet.spendingPub.toString(),
-      viewingPub: uint8ToHex(this.wallet.viewingPub),
-      balances: Array.from(balances.entries()).map(([mint, v]) => ({
-        mint: mint.toString(),
+      walletPubkey: this.keypair.publicKey.toBase58(),
+      balances: Array.from(agg.entries()).map(([fr, v]) => ({
+        mint: mintLabel(fr, undefined),
         amount: v.amount.toString(),
-        noteCount: v.count,
+        depositCount: v.count,
       })),
     };
   }
+
+  /**
+   * Per-deposit holdings owned by this client. Each entry is one private
+   * deposit that can be spent independently — agents that need a per-deposit
+   * view (rebalancing, partial unshields) use this; agents that only care
+   * about totals should use `balance()`.
+   *
+   * `refresh: true` (default) re-syncs from on-chain history before reading.
+   * Set `refresh: false` for fast in-memory snapshots.
+   */
+  async holdings(opts: { mint?: PublicKey; refresh?: boolean } = {}): Promise<{
+    holdings: Array<{ id: string; mint: string; amount: string }>;
+  }> {
+    await this.ready();
+    if (opts.refresh !== false) await this._notes!.backfill({ limit: 100 });
+    const filterFr = opts.mint ? leToFrReduced(opts.mint.toBytes()) : null;
+    const notes = filterFr != null
+      ? this._notes!.getSpendable(filterFr)
+      : this._notes!.getAllSpendable();
+    return {
+      holdings: notes.map((n) => ({
+        id: noteId(n.commitment),
+        mint: mintLabel(n.tokenMint, opts.mint),
+        amount: n.value.toString(),
+      })),
+    };
+  }
+
+  /**
+   * Aggregate private balance grouped by mint. The default agent-facing
+   * read tool. Pass `mint` to filter to a single mint and resolve the
+   * mint's base58 address in the response; without a filter, mints are
+   * returned as opaque short labels (`unknown:<12hex>`) so agents have a
+   * stable key to compare across calls.
+   */
+  async balance(opts: { mint?: PublicKey; refresh?: boolean } = {}): Promise<{
+    balances: Array<{ mint: string; amount: string; depositCount: number }>;
+  }> {
+    await this.ready();
+    if (opts.refresh !== false) await this._notes!.backfill({ limit: 100 });
+    const filterFr = opts.mint ? leToFrReduced(opts.mint.toBytes()) : null;
+    const agg = new Map<bigint, { amount: bigint; count: number }>();
+    const notes = filterFr != null
+      ? this._notes!.getSpendable(filterFr)
+      : this._notes!.getAllSpendable();
+    for (const n of notes) {
+      const cur = agg.get(n.tokenMint) ?? { amount: 0n, count: 0 };
+      cur.amount += n.value;
+      cur.count += 1;
+      agg.set(n.tokenMint, cur);
+    }
+    return {
+      balances: Array.from(agg.entries()).map(([fr, v]) => ({
+        mint: mintLabel(fr, opts.mint),
+        amount: v.amount.toString(),
+        depositCount: v.count,
+      })),
+    };
+  }
+
+  /**
+   * @internal Re-sync from on-chain history. Most agents should use
+   * `balance({ refresh: true })` or `holdings({ refresh: true })` instead;
+   * this is exposed for advanced cases that want explicit cursor control.
+   */
+  async refresh(opts: { limit?: number; before?: string } = {}): Promise<{
+    txsScanned: number;
+    eventsSeen: number;
+    depositsIngested: number;
+  }> {
+    await this.ready();
+    const r = await this._notes!.backfill({ limit: opts.limit ?? 100, before: opts.before });
+    return {
+      txsScanned: r.txsScanned,
+      eventsSeen: r.eventsSeen,
+      depositsIngested: r.notesIngested,
+    };
+  }
+}
+
+/** Opaque public ID for a private deposit. First 16 hex chars of the
+ *  commitment — stable across calls, doesn't reveal anything spendable. */
+function noteId(commitment: bigint): string {
+  return commitment.toString(16).padStart(64, '0').slice(0, 16);
+}
+
+/** Resolve a Fr-reduced mint value to a human-readable label. If the caller
+ *  knows the mint pubkey (passed via opts.mint), return its base58. Otherwise
+ *  emit a stable opaque short label so the agent has SOMETHING to use as a key
+ *  across calls. */
+function mintLabel(tokenMintFr: bigint, knownMint: PublicKey | undefined): string {
+  if (knownMint) return knownMint.toBase58();
+  const hex = tokenMintFr.toString(16).padStart(64, '0').slice(0, 12);
+  return `unknown:${hex}`;
 }
 
 function defaultRpc(cluster: B402SolanaConfig['cluster']): string {
@@ -641,10 +732,6 @@ function defaultRpc(cluster: B402SolanaConfig['cluster']): string {
     case 'devnet':  return clusterApiUrl('devnet');
     case 'localnet': return 'http://127.0.0.1:8899';
   }
-}
-
-function uint8ToHex(u: Uint8Array): string {
-  return Array.from(u).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 function bigintToLe32(v: bigint): Uint8Array {

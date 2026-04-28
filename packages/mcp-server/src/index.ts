@@ -13,16 +13,17 @@
  *     --env B402_CIRCUITS_ROOT=/abs/path/to/circuits/build
  *
  * Tools:
- *   - shield        — shield SPL tokens into the b402 pool
- *   - unshield      — unshield a note to a destination address
- *   - private_swap  — adapt_execute swap (shield → swap → reshield)
- *   - status        — anonymized wallet + spendable-note state
+ *   - shield        — move SPL tokens into a private balance
+ *   - unshield      — withdraw a private deposit to a public address
+ *   - private_swap  — atomic private swap through a registered adapter
+ *   - status        — wallet pubkey + private balances by mint
+ *   - holdings      — per-deposit private holdings (id, mint, amount)
+ *   - balance       — aggregate private balance per mint
  *
  * Security:
  *   - Keypair loaded once from disk (B402_KEYPAIR_PATH) and held in memory.
- *   - Tool responses contain only public values (signatures, mint pubkeys,
- *     commitments, public keys). Never returns secret keys, viewing keys
- *     or note randomness.
+ *   - Tool responses include only public values (signatures, mint pubkeys,
+ *     opaque deposit IDs). Never returns secret keys or anything spendable.
  *   - All input pubkeys validated as base58; amounts validated as u64-string
  *     to prevent floating-point precision loss.
  */
@@ -40,11 +41,15 @@ import {
   unshieldInput,
   privateSwapInput,
   statusInput,
+  holdingsInput,
+  balanceInput,
 } from './schemas.js';
 import { handleShield } from './tools/shield.js';
 import { handleUnshield } from './tools/unshield.js';
 import { handlePrivateSwap } from './tools/private_swap.js';
 import { handleStatus } from './tools/status.js';
+import { handleHoldings } from './tools/holdings.js';
+import { handleBalance } from './tools/balance.js';
 
 import { zodToJsonSchema } from 'zod-to-json-schema';
 
@@ -72,26 +77,38 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'shield',
       description:
-        'Shield SPL tokens into the b402 pool. The caller signs the deposit; the resulting commitment hides the amount and ownership. Returns a transaction signature, commitment hash, and tree leaf index.',
+        'Move SPL tokens from the caller\'s wallet into a private balance. Returns the transaction signature and an opaque deposit id.',
       inputSchema: zodToJsonSchema(shieldInput),
     },
     {
       name: 'unshield',
       description:
-        'Unshield the most-recently-shielded note for the given mint to a recipient address. Auto-creates the recipient ATA if missing. Returns the unshield transaction signature.',
+        'Withdraw a private deposit (most-recent for the given mint) to a public address. Auto-creates the recipient token account if missing. Returns the transaction signature.',
       inputSchema: zodToJsonSchema(unshieldInput),
     },
     {
       name: 'private_swap',
       description:
-        'Atomic shielded swap: burn an input shielded note, CPI a registered adapter, reshield the output. Requires a pre-existing shielded note in the IN mint. Returns the swap signature and the output amount.',
+        'Atomic private swap: spend a private deposit in the IN token, route through a registered adapter, deposit the OUT token back into a fresh private balance. Requires a pre-existing private deposit in the IN mint. Returns the swap signature and output amount.',
       inputSchema: zodToJsonSchema(privateSwapInput),
     },
     {
       name: 'status',
       description:
-        'Report this client\'s public wallet pubkey, b402 spending/viewing pubkeys, and current spendable-note balances grouped by mint.',
+        'Report the caller\'s public wallet pubkey and current private balances grouped by mint.',
       inputSchema: zodToJsonSchema(statusInput),
+    },
+    {
+      name: 'holdings',
+      description:
+        'Per-deposit view of private holdings (id, mint, amount). Use this when you need to reason about individual deposits — partial unshields, rebalancing, etc. For totals, use balance instead.',
+      inputSchema: zodToJsonSchema(holdingsInput),
+    },
+    {
+      name: 'balance',
+      description:
+        'Aggregate private balance grouped by mint. The default read tool — pass {mint} to filter and resolve its base58 address. By default refreshes from on-chain history before returning.',
+      inputSchema: zodToJsonSchema(balanceInput),
     },
   ],
 }));
@@ -115,6 +132,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         break;
       case 'status':
         result = await handleStatus(ctx());
+        break;
+      case 'holdings':
+        result = await handleHoldings(ctx(), holdingsInput.parse(args));
+        break;
+      case 'balance':
+        result = await handleBalance(ctx(), balanceInput.parse(args));
         break;
       default:
         throw new Error(`unknown tool: ${name}`);

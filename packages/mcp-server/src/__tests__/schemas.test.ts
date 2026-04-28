@@ -4,6 +4,8 @@ import {
   unshieldInput,
   privateSwapInput,
   statusInput,
+  holdingsInput,
+  balanceInput,
 } from '../schemas.js';
 
 const VALID_PK = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'; // mainnet USDC
@@ -74,6 +76,40 @@ describe('status input', () => {
   });
 });
 
+describe('holdings input', () => {
+  it('accepts empty', () => {
+    expect(() => holdingsInput.parse({})).not.toThrow();
+  });
+  it('accepts mint filter', () => {
+    expect(() => holdingsInput.parse({ mint: VALID_PK })).not.toThrow();
+  });
+  it('accepts refresh flag', () => {
+    expect(() => holdingsInput.parse({ refresh: false })).not.toThrow();
+  });
+  it('rejects extra fields', () => {
+    expect(() =>
+      holdingsInput.parse({ extra: 'evil' } as unknown as never),
+    ).toThrow();
+  });
+});
+
+describe('balance input', () => {
+  it('accepts empty', () => {
+    expect(() => balanceInput.parse({})).not.toThrow();
+  });
+  it('accepts mint filter', () => {
+    expect(() => balanceInput.parse({ mint: VALID_PK })).not.toThrow();
+  });
+  it('accepts refresh flag', () => {
+    expect(() => balanceInput.parse({ refresh: false })).not.toThrow();
+  });
+  it('rejects extra fields', () => {
+    expect(() =>
+      balanceInput.parse({ extra: 'evil' } as unknown as never),
+    ).toThrow();
+  });
+});
+
 describe('responses contain no secret fields (static guarantee)', () => {
   // Compile-time guard: every tool handler's return type is asserted to be
   // a flat JSON-friendly object with only public fields. The schemas-as-types
@@ -84,5 +120,7 @@ describe('responses contain no secret fields (static guarantee)', () => {
     expect(unshieldInput._def.typeName).toBe('ZodObject');
     expect(privateSwapInput._def.typeName).toBe('ZodObject');
     expect(statusInput._def.typeName).toBe('ZodObject');
+    expect(holdingsInput._def.typeName).toBe('ZodObject');
+    expect(balanceInput._def.typeName).toBe('ZodObject');
   });
 });
