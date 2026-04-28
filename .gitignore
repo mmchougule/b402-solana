@@ -5,6 +5,11 @@ target/
 .DS_Store
 *.log
 
+# Next.js build artifacts (apps/playground)
+.next/
+next-env.d.ts
+*.tsbuildinfo
+
 # Local skill installs / parallel agent staging — user-machine-specific.
 .agents/
 .codex-staging/
