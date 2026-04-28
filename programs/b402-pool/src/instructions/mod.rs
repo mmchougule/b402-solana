@@ -19,9 +19,14 @@ pub mod adapt_mock;
 // Slotted for removal once the real adapt circuit + verifier land.
 pub mod adapt_execute;
 
-pub use adapt_execute::*;
-pub use adapt_mock::*;
+// v2 ABI handler — additive (coexists with v1 adapt_execute).
+// Implements PRD-11 / PRD-12 / PRD-13 / PRD-15.
+pub mod adapt_execute_v2;
+
 pub use add_token_config::*;
+pub use adapt_execute::*;
+pub use adapt_execute_v2::*;
+pub use adapt_mock::*;
 pub use admin::*;
 pub use init_pool::*;
 pub use shield::*;

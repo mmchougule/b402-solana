@@ -41,6 +41,12 @@ pub const TAG_ROOT_BIND: [u8; 32] = tag_fr_le(b"b402/v1/root-bind");
 pub const TAG_ADAPT_BIND: [u8; 32] = tag_fr_le(b"b402/v1/adapt-bind");
 pub const TAG_RECIPIENT_BIND: [u8; 32] = tag_fr_le(b"b402/v1/recipient-bind");
 
+/// v2-only domain tag for the shadow PDA binding (PRD-13). Distinct from
+/// the v1 tags so a v1 proof can never satisfy a v2 shadow check by accident.
+/// The Fr-reduced LE bytes are baked at compile time via `tag_fr_le`.
+pub const TAG_ADAPT_BIND_V2: [u8; 32]   = tag_fr_le(b"b402/v2/adapt-bind");
+pub const TAG_SHADOW_BIND: [u8; 32]     = tag_fr_le(b"b402/v2/shadow-bind");
+
 /// Encode a tag string to its canonical 32-byte LE Fr representation.
 ///
 /// The tag is interpreted as a big-endian integer. Since tags are ≤ 31 bytes,
@@ -82,6 +88,8 @@ mod tests {
             TAG_ROOT_BIND,
             TAG_ADAPT_BIND,
             TAG_RECIPIENT_BIND,
+            TAG_ADAPT_BIND_V2,
+            TAG_SHADOW_BIND,
         ];
         for i in 0..all.len() {
             for j in (i + 1)..all.len() {

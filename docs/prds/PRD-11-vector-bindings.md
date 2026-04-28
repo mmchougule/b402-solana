@@ -113,6 +113,7 @@ Account layout: pool now passes `2 × (M + N)` token-account references (vault +
 | Version | Date | Author | Changes |
 |---|---|---|---|
 | 0.1 | 2026-04-26 | b402 core | Initial draft. Generalizes PRD-04 §2 single-mint binding to M-in / N-out vectors with `M=N=4` cap. |
+| 0.2 | 2026-04-24 | b402 core | Implementation notes for `phase-3-abi-v2`: vector mints land at public-input offsets 11–14 (`publicTokenMintIn[4]`) and 28–31 (`expectedOutMint[4]`) of `circuits/adapt_v2.circom`. Note count also expands 2→4 (nullifier offsets 1–4, commitment offsets 5–8). Zero-binding canonicalization is a single Fr equality per slot (`mintZeroIn[i] = inIsDummy[i] * publicTokenMintIn[i] === 0`). The handler in `programs/b402-pool/src/instructions/adapt_execute_v2.rs` ships single-mint M=1, N≥1 fan-in for v2.0; multi-vault fan-in is gated behind a phase-3.1 follow-up while the circuit/ABI already commit the full vector. |
 
 ---
 

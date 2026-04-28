@@ -80,7 +80,8 @@ pub fn handler(ctx: Context<InitPool>, args: InitPoolArgs) -> Result<()> {
     cfg.verifier_transact = args.verifier_transact;
     cfg.verifier_adapt = args.verifier_adapt;
     cfg.verifier_disclose = args.verifier_disclose;
-    cfg._reserved = [0u8; 96];
+    cfg.protocol_fee_share_bps = 0;
+    cfg._reserved = [0u8; 94];
 
     // Treasury.
     let treas = &mut ctx.accounts.treasury_config;

@@ -2,8 +2,8 @@ use anchor_lang::prelude::*;
 
 use crate::constants::{SEED_ADAPTERS, SEED_CONFIG, SEED_TOKEN, VERSION_PREFIX};
 use crate::error::PoolError;
-use crate::events::{AdapterRegistered, MaxTvlUpdated, PoolPauseChanged};
-use crate::state::{AdapterInfo, AdapterRegistry, PoolConfig, TokenConfig};
+use crate::events::{AdapterRegistered, MaxTvlUpdated, PoolPauseChanged, ProtocolFeeShareUpdated};
+use crate::state::{AdapterInfo, AdapterRegistry, PoolConfig, TokenConfig, PROTOCOL_FEE_SHARE_BPS_MAX};
 use crate::{AdapterRegistration, PauseFlag};
 
 /// v1 admin auth: the `admin_multisig` field on `PoolConfig` is a single pubkey
@@ -183,6 +183,27 @@ pub fn set_max_tvl(ctx: Context<AdminTokenConfigAction>, new_max_tvl: u64) -> Re
         mint: tc.mint,
         old_max_tvl,
         new_max_tvl,
+        slot: Clock::get()?.slot,
+    });
+    Ok(())
+}
+
+/// Set the protocol-fee share of the relayer-fee paid by `adapt_execute_v2`.
+/// Capped at `PROTOCOL_FEE_SHARE_BPS_MAX` (2,500 = 25%) so admin cannot
+/// rug. v1 alpha ships with `0` (protocol-fee-free); turn this up once
+/// volume justifies it.
+pub fn set_protocol_fee_share(ctx: Context<AdminAction>, new_share_bps: u16) -> Result<()> {
+    ensure_admin(&ctx.accounts.pool_config, &ctx.accounts.admin.key())?;
+    require!(
+        new_share_bps <= PROTOCOL_FEE_SHARE_BPS_MAX,
+        PoolError::ProtocolFeeShareCapExceeded
+    );
+    let cfg = &mut ctx.accounts.pool_config;
+    let old = cfg.protocol_fee_share_bps;
+    cfg.protocol_fee_share_bps = new_share_bps;
+    emit!(ProtocolFeeShareUpdated {
+        old_bps: old,
+        new_bps: new_share_bps,
         slot: Clock::get()?.slot,
     });
     Ok(())

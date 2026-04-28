@@ -27,6 +27,22 @@ pub struct MaxTvlUpdated {
 }
 
 #[event]
+pub struct ProtocolFeeShareUpdated {
+    pub old_bps: u16,
+    pub new_bps: u16,
+    pub slot: u64,
+}
+
+#[event]
+pub struct ProtocolFeeAccrued {
+    pub mint: Pubkey,
+    pub amount: u64,
+    pub of_relayer_fee: u64,
+    pub share_bps: u16,
+    pub slot: u64,
+}
+
+#[event]
 pub struct CommitmentAppended {
     pub leaf_index: u64,
     pub commitment: [u8; 32],
@@ -83,5 +99,20 @@ pub struct AdaptExecuted {
     pub out_delta: u64,
     pub expected_out_value: u64,
     pub relayer_fee: u64,
+    pub slot: u64,
+}
+
+/// v2 sibling of `AdaptExecuted`. Emitted by `adapt_execute_v2`.
+/// Mints are vector slots (M=4 / N=4); zero-address slot signals unused.
+#[event]
+pub struct AdaptExecutedV2 {
+    pub adapter_program: Pubkey,
+    pub in_mints: [Pubkey; 4],
+    pub out_mints: [Pubkey; 4],
+    pub public_amount_in: u64,
+    pub out_delta_total: u64,
+    pub expected_out_value: u64,
+    pub relayer_fee: u64,
+    pub deadline_slot: u64,
     pub slot: u64,
 }

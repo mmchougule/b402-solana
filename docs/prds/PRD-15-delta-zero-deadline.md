@@ -101,6 +101,7 @@ The pattern is regular. No special-case logic anywhere.
 | Version | Date | Author | Changes |
 |---|---|---|---|
 | 0.1 | 2026-04-26 | b402 core | Initial draft. Generalizes PRD-04 §7.1 delta-zero exemption into a first-class circuit case; adds mandatory `deadline_slot` public input. |
+| 0.2 | 2026-04-24 | b402 core | Implementation notes for `phase-3-abi-v2`. Public-input offset 36 = `deadlineSlot`. 64-bit range-checked in-circuit (matches `Clock.slot` u64). Pool check `Clock::get().slot <= pi.deadline_slot` runs *before* any token movement in `adapt_execute_v2`. Error code `PoolError::DeadlineExceeded = 2000`. Delta-zero (M=0, N=0) is supported by the v2.0 handler — `public_amount_in` and `relayer_fee` transfers are conditional on positive amounts, and slot 0 dummy nullifiers/commitments are accepted; the only required movement remains the optional shadow-state mutation in the adapter CPI. |
 
 ---
 

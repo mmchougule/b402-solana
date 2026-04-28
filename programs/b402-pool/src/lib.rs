@@ -46,6 +46,15 @@ pub mod b402_pool {
         instructions::admin::set_max_tvl(ctx, new_max_tvl)
     }
 
+    /// Set the protocol-fee share of the relayer-fee paid by `adapt_execute_v2`.
+    /// Capped at 2,500 bps (25%) by the handler. Default at deploy: 0.
+    pub fn set_protocol_fee_share(
+        ctx: Context<AdminAction>,
+        new_share_bps: u16,
+    ) -> Result<()> {
+        instructions::admin::set_protocol_fee_share(ctx, new_share_bps)
+    }
+
     // Heavy fields inside ShieldArgs/TransactArgs/UnshieldArgs are `Vec<u8>`
     // (heap-allocated by Borsh) to keep the BPF stack frame below 4 KiB.
     // Handlers assert the expected lengths on entry.
@@ -114,6 +123,17 @@ pub mod b402_pool {
         args: Box<AdaptExecuteArgs>,
     ) -> Result<()> {
         instructions::adapt_execute::handler(ctx, args)
+    }
+
+    /// v2 ABI variant of `adapt_execute`. Adds vector token bindings (PRD-11),
+    /// content-addressed action_hash (PRD-12), shadow PDA binding (PRD-13),
+    /// and `deadline_slot` (PRD-15). Coexists with v1; v1 is unchanged.
+    /// See `instructions/adapt_execute_v2.rs`.
+    pub fn adapt_execute_v2<'info>(
+        ctx: Context<'_, '_, '_, 'info, AdaptExecuteV2<'info>>,
+        args: Box<AdaptExecuteV2Args>,
+    ) -> Result<()> {
+        instructions::adapt_execute_v2::handler(ctx, args)
     }
 }
 

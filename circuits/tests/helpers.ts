@@ -34,6 +34,9 @@ export const DomainTags = {
   rootBind:       'b402/v1/root-bind',
   adaptBind:      'b402/v1/adapt-bind',
   recipientBind:  'b402/v1/recipient-bind',
+  // v2 — additive (PRD-11/12/13/15).
+  adaptBindV2:    'b402/v2/adapt-bind',
+  shadowBind:     'b402/v2/shadow-bind',
 } as const;
 
 /** Encode an ASCII string ≤ 31 bytes as an Fr via BE interpretation, reduced mod p. */

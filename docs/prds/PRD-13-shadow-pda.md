@@ -118,6 +118,7 @@ This means: a user with a position on Drift and a deposit on Kamino has **no on-
 | Version | Date | Author | Changes |
 |---|---|---|---|
 | 0.1 | 2026-04-26 | b402 core | Initial draft. Generalizes PRD-09 §7 Kamino-specific shadow obligation pattern to arbitrary per-user protocol state. |
+| 0.2 | 2026-04-24 | b402 core | Implementation notes for `phase-3-abi-v2`. Public-input offset 37 = `shadowPdaBinding`. Circuit binding is `Poseidon_3(shadowDomainTag, viewingPubHash, scopeTag)` where `shadowDomainTag` is a private witness equal to LE Fr of `b402/v2/shadow-bind` (distinct from `b402/v2/adapt-bind` — closes a cross-context replay vector). Pool gate is per-call: `AdaptExecuteV2Args.require_shadow_binding`. The strong PDA-derivation check (PDA seeds = `("b402-shadow", adapter_id, scope_tag, viewing_key_commitment)`) lives in the adapter program, not in the pool — adapters own their shadow PDAs and re-derive on each call. |
 
 ---
 

@@ -158,6 +158,7 @@ Cost: one keccak256 over ~200 bytes of ix data + one keccak256 over ~512 bytes o
 | Version | Date | Author | Changes |
 |---|---|---|---|
 | 0.1 | 2026-04-26 | b402 core | Initial draft. Replaces PRD-04 §2.1 ad-hoc `action_payload` keccak with a content-addressed Poseidon hash binding adapter_id + scope + ix-data + accounts. |
+| 0.2 | 2026-04-24 | b402 core | Implementation notes for `phase-3-abi-v2`. Poseidon arity = 6 (`Poseidon(6)`, light-poseidon Bn254X5). Public-input offsets: domain tag = 32, adapter_id = 25, scope_tag = 33, ixDataHash (private witness `actionPayloadKeccakFr`), accountsHash = 34, extra_context_root = 35. Domain tag value `b402/v2/adapt-bind` (LE Fr-reduced, distinct from v1 `b402/v1/adapt-bind` so v1 proofs cannot satisfy v2 checks). Canonical accounts hash uses keccak256 over `pubkey \|\| (is_signer<<1 \| is_writable)` for each AccountMeta sorted ascending by pubkey then signer-desc, writable-desc — implemented in `compute_accounts_hash_fr` in `adapt_execute_v2.rs` and mirrored off-chain in `packages/prover/src/adapt_v2.ts::computeAccountsHashFr`. Ceremony output: `circuits/build/ceremony/adapt_v2_final.zkey`, `adapt_v2_verification_key.json`. Verifier program ID: `DG7Fi75b2jkcUgG5K6Ekgpy7uigYxePPSxSSrdPzLGUd`. |
 
 ---
 

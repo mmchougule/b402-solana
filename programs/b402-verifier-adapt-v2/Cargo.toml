@@ -1,0 +1,31 @@
+[package]
+name = "b402-verifier-adapt-v2"
+version.workspace = true
+edition.workspace = true
+description = "b402 Groth16 verifier for the adapt v2 circuit (Phase 3 ABI)"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "b402_verifier_adapt_v2"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+
+[dependencies]
+anchor-lang.workspace = true
+groth16-solana.workspace = true
+solana-program.workspace = true
+thiserror.workspace = true
+indexmap = { version = "=2.9.0" }
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+
+[lints]
+workspace = true
