@@ -207,6 +207,14 @@ function bigintLE(v: bigint): Buffer {
   return b;
 }
 
+/** Skip register_adapter when the adapter's bytecode isn't on-chain yet
+ *  (phased deploy: pool + verifiers go first; adapters deploy + register later).
+ *  Override with B402_FORCE_REGISTER=1 to attempt registration regardless. */
+async function adapterIsDeployed(c: Connection, id: PublicKey): Promise<boolean> {
+  const acc = await c.getAccountInfo(id);
+  return acc !== null && acc.executable;
+}
+
 async function main(): Promise<void> {
   const c = new Connection(RPC_URL, 'confirmed');
   const admin = loadAdmin();
@@ -218,8 +226,18 @@ async function main(): Promise<void> {
   await ensureSetAdaptVerifier(c, admin);
   await ensureTokenConfig(c, admin, USDC, 'USDC', USDC_CAP);
   await ensureTokenConfig(c, admin, WSOL, 'wSOL', WSOL_CAP);
-  await ensureRegisterAdapter(c, admin, JUP_ADAPTER_ID, 'jupiter');
-  await ensureRegisterAdapter(c, admin, KAMINO_ADAPTER_ID, 'kamino');
+
+  const force = process.env.B402_FORCE_REGISTER === '1';
+  for (const [id, label] of [
+    [JUP_ADAPTER_ID, 'jupiter'] as const,
+    [KAMINO_ADAPTER_ID, 'kamino'] as const,
+  ]) {
+    if (!force && !(await adapterIsDeployed(c, id))) {
+      console.log(`▶ ${label} adapter program not yet deployed at ${id.toBase58()} — skipping register_adapter (re-run after deploy)`);
+      continue;
+    }
+    await ensureRegisterAdapter(c, admin, id, label);
+  }
 
   console.log('');
   console.log('✅ mainnet alpha pool ready');

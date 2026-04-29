@@ -8,11 +8,30 @@ from a private balance — without your wallet appearing on-chain as the
 executing party. Single-tx execution, composable with any Solana protocol
 via a registered adapter.
 
-Built ground-up for the SVM: Circom 2 circuits, Anchor BPF programs, Groth16
-verification through the `alt_bn128_*` syscalls, Poseidon-bound UTXO
-commitments with nullifier-set membership and viewing-key separation. The
-cryptographic primitives are standard (chosen for auditability against
-existing literature); the SVM-native runtime and adapter ABI are the novelty.
+Implementation: Circom 2 circuits, Anchor BPF programs, Groth16 verification
+through the `alt_bn128_*` syscalls (via `Lightprotocol/groth16-solana`),
+Poseidon-bound UTXO commitments, nullifier non-membership in a sharded set,
+and a viewing-key separation. The cryptographic primitives are standard
+(chosen for auditability against existing literature); what's specific to
+this repo is the on-Solana pool program and a proof-bound adapter ABI for
+composing into Jupiter, Kamino, and other registered protocols atomically
+from a private balance.
+
+## Use it on mainnet (one line, no env vars)
+
+```bash
+claude mcp add b402-solana -- npx -y @b402ai/solana-mcp@latest
+```
+
+Requires a Solana CLI keypair at `~/.config/solana/id.json` plus the token
+to shield (USDC or WSOL — the mints whitelisted on mainnet today). The
+hosted relayer signs `unshield` and `private_swap`, so the depositor wallet
+does not appear on those transactions.
+
+Optional environment overrides:
+- `B402_RPC_URL` — private RPC endpoint (Helius / Triton / QuickNode / Alchemy). Default is `api.mainnet-beta.solana.com`.
+- `B402_CLUSTER` — `devnet` for risk-free testing, `localnet` for a local validator. Default `mainnet`.
+- `B402_KEYPAIR_PATH` — alternate keypair path. Default `~/.config/solana/id.json`.
 
 ## Run it on devnet (~30 seconds)
 

@@ -5,6 +5,16 @@ target/
 .DS_Store
 *.log
 
+# Next.js build artifacts (apps/playground)
+.next/
+next-env.d.ts
+*.tsbuildinfo
+
+# Circuits copied into mcp-server at pack time. Source-of-truth lives at
+# circuits/build/ — packages/mcp-server/circuits/ is reproduced by
+# prepublishOnly. Never commit duplicates.
+packages/mcp-server/circuits/
+
 # Local skill installs / parallel agent staging — user-machine-specific.
 .agents/
 .codex-staging/
@@ -70,3 +80,12 @@ docs/LAUNCH-DRAFTS.md
 # Engineering spikes — throwaway design docs, runbooks, exploratory PRDs.
 # Spikes that mature into committed work get promoted to docs/prds/PRD-NN-...md.
 docs/spikes/
+
+# Internal ops state docs — never push to public repo. Use locally for handoff.
+ops/MAINNET-DEPLOY-RUNBOOK.md
+ops/MAINNET-STATE.md
+ops/PHASE-*.md
+
+# Local demo helper — hardcoded technical commentary not for public ridicule.
+# Source-of-truth for protocol facts is docs/ + circuits/ + the assurance repo.
+scripts/watch-logs.mjs

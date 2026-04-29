@@ -103,9 +103,13 @@ function loadKeypair(path: string): Keypair {
     throw new Error(`RELAYER_KEYPAIR ${path}: expected 64-byte JSON array, got ${Array.isArray(bytes) ? bytes.length : typeof bytes}`);
   }
   const u8 = new Uint8Array(bytes);
+  // NOTE: do NOT scrub `u8` after passing to `Keypair.fromSecretKey` — in
+  // some @solana/web3.js builds the resulting Keypair shares the underlying
+  // buffer, so `u8.fill(0)` corrupts the loaded secret. Symptoms: every
+  // signed tx returns `Transaction did not pass signature verification`
+  // because ed25519 derives a pubkey from a zeroed seed that doesn't match
+  // the (also-zeroed) declared pubkey at slot[0]. Let GC reclaim the buffer.
   const kp = Keypair.fromSecretKey(u8);
-  // Best-effort scrub of the temporary copy. The Keypair holds its own copy.
-  u8.fill(0);
   return kp;
 }
 

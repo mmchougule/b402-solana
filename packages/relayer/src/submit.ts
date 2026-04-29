@@ -122,9 +122,6 @@ export class RpcSubmitter implements Submitter {
 
     const vtx = new VersionedTransaction(msg);
 
-    // Collect signers. Relayer always signs. If the client supplied a user
-    // signature for a second signer slot, attach it directly via addSignature
-    // so we don't need the user's keypair in this process.
     vtx.sign([relayer]);
 
     if (input.userSignature) {
@@ -139,7 +136,7 @@ export class RpcSubmitter implements Submitter {
     let sig: string;
     try {
       sig = await connection.sendRawTransaction(wire, {
-        skipPreflight: true,
+        skipPreflight: false,
         maxRetries: 3,
         preflightCommitment: 'confirmed',
       });

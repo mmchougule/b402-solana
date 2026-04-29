@@ -1,0 +1,45 @@
+{
+  "name": "@b402ai/create-agent",
+  "version": "0.0.1",
+  "description": "Scaffold a private-DeFi agent on Solana (b402) in one command.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "create-b402-agent": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "templates",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mmchougule/b402-solana.git",
+    "directory": "packages/create-agent"
+  },
+  "homepage": "https://github.com/mmchougule/b402-solana#readme",
+  "bugs": "https://github.com/mmchougule/b402-solana/issues",
+  "keywords": [
+    "solana",
+    "privacy",
+    "agent",
+    "mcp",
+    "scaffolder"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && chmod +x dist/index.js",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^2.1.9"
+  }
+}

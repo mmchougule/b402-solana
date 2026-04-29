@@ -1,6 +1,8 @@
 {
   "name": "@b402ai/solana-shared",
   "version": "0.0.1",
+  "description": "Shared protocol constants, types, and encoding helpers for the b402 Solana SDK",
+  "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -9,6 +11,23 @@
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
     }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mmchougule/b402-solana.git",
+    "directory": "packages/shared"
+  },
+  "homepage": "https://github.com/mmchougule/b402-solana#readme",
+  "bugs": "https://github.com/mmchougule/b402-solana/issues",
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

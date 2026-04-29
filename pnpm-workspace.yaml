@@ -3,5 +3,8 @@ packages:
   - 'packages/shared'
   - 'packages/prover'
   - 'packages/relayer'
+  - 'packages/mcp-server'
+  - 'packages/create-agent'
+  - 'apps/playground'
   - 'circuits'
   - 'examples'

@@ -61,11 +61,12 @@ async function main() {
   const alice = Keypair.generate();
 
   // Fund alice from admin (devnet airdrop is rate-limited; admin already has SOL).
-  // 0.18 SOL: 2 × 0.07 SOL nullifier-shard rent + recipient ATA + tx fees.
+  // 0.32 SOL: ~0.07 SOL × 3 nullifier-shard rents (shield's, swap's IN-note,
+  // unshield's if different prefix) + recipient ATA rent + tx fees + buffer.
   const fundIx = SystemProgram.transfer({
     fromPubkey: admin.publicKey,
     toPubkey: alice.publicKey,
-    lamports: 0.18 * LAMPORTS_PER_SOL,
+    lamports: 0.32 * LAMPORTS_PER_SOL,
   });
   await sendAndConfirmTransaction(connection, new Transaction().add(fundIx), [admin]);
   const aliceBal = await connection.getBalance(alice.publicKey);

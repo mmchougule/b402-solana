@@ -37,7 +37,7 @@ import {
 } from '@solana/spl-token';
 import { keccak_256 } from '@noble/hashes/sha3';
 import { randomBytes as nodeRandomBytes } from 'node:crypto';
-import { FR_MODULUS, PROGRAM_IDS, leToFrReduced } from '@b402ai/solana-shared';
+import { FR_MODULUS, PROGRAM_IDS, B402_ALT_DEVNET, B402_ALT_MAINNET, leToFrReduced } from '@b402ai/solana-shared';
 import type { SpendableNote } from '@b402ai/solana-shared';
 import {
   AdaptProver,
@@ -83,14 +83,29 @@ export interface B402SolanaConfig {
   relayer?: Keypair;
   /** Optional program ID overrides (e.g. for localnet testing). */
   programIds?: Partial<typeof PROGRAM_IDS>;
+  /** Persist note state to disk so deposits survive process restart. The
+   *  store writes `<dir>/<viewingPubHex>.json` (one file per viewing pub
+   *  so multiple wallets coexist). Plaintext on disk — same threat model
+   *  as the Solana keypair file the wallet was derived from. */
+  notesPersistDir?: string;
+  /** HTTP relayer URL. When set, unshield + privateSwap (and other ops with
+   *  no required user signature) route through it — the on-chain fee payer
+   *  becomes the relayer's wallet, not the user's. shield still signs locally
+   *  because Anchor requires the depositor as a signer for the SPL transfer.
+   *  ready() calls /health once to discover the relayer's pubkey. */
+  relayerHttpUrl?: string;
+  /** Optional API key forwarded as `Authorization: Bearer <key>` to the relayer. */
+  relayerApiKey?: string;
 }
 
 export interface ShieldRequest {
   mint: PublicKey;
   amount: bigint;
   /**
-   * Skip on-chain encrypted-note publication (~120 B saved). Safe for
-   * self-shields where the same wallet will later unshield. Default true.
+   * Skip on-chain encrypted-note publication (~120 B saved). Default
+   * **false** — ciphertext is published so notes are recoverable from
+   * the chain alone via backfill. Set true only when you're certain you
+   * won't need recovery (e.g., ephemeral session, single-machine).
    */
   omitEncryptedNotes?: boolean;
 }
@@ -154,12 +169,23 @@ export class B402Solana {
   readonly programIds: typeof PROGRAM_IDS;
   readonly keypair: Keypair;
   readonly relayer: Keypair;
+  readonly notesPersistDir: string | undefined;
+  readonly relayerHttpUrl: string | undefined;
+  readonly relayerApiKey: string | undefined;
+  private _relayerHttp: { client: import('./relayer-http.js').RelayerHttpClient } | null = null;
 
   private _wallet: Wallet | null = null;
   private _notes: NoteStore | null = null;
   private _prover: TransactProver | null;
   private _adaptProver: AdaptProver | null;
   private _lastShield: { result: ShieldResult; mint: PublicKey } | null = null;
+  /** Fr-reduced mint bigint (as string) → original base58 PublicKey.
+   *  Built lazily in ready() from bundled common mints + the user's
+   *  on-chain token-account list. Augmented every time the SDK sees a
+   *  full mint pubkey (shield, unshield, privateSwap). One-way map —
+   *  reverse-resolves Fr from prior interactions; falls back to opaque
+   *  `unknown:<12hex>` label for never-seen mints. */
+  private _mintRegistry: Map<string, PublicKey> = new Map();
 
   constructor(config: B402SolanaConfig) {
     this.cluster = config.cluster;
@@ -168,6 +194,9 @@ export class B402Solana {
     this.programIds = { ...PROGRAM_IDS, ...(config.programIds ?? {}) };
     this.keypair = config.keypair;
     this.relayer = config.relayer ?? config.keypair;
+    this.notesPersistDir = config.notesPersistDir;
+    this.relayerHttpUrl = config.relayerHttpUrl;
+    this.relayerApiKey = config.relayerApiKey;
 
     if (config.prover) {
       this._prover = config.prover;
@@ -197,8 +226,116 @@ export class B402Solana {
         connection: this.connection,
         poolProgramId: new PublicKey(this.programIds.b402Pool),
         wallet: this._wallet,
+        ...(this.notesPersistDir ? { persist: { dir: this.notesPersistDir } } : {}),
       });
       await this._notes.start();
+    }
+    if (this._mintRegistry.size === 0) {
+      await this._buildMintRegistry();
+    }
+    if (this.relayerHttpUrl && !this._relayerHttp) {
+      const { fetchRelayerHealth, makeRelayerHttpClient } = await import('./relayer-http.js');
+      const health = await fetchRelayerHealth(this.relayerHttpUrl);
+      const expected = this.programIds.b402Pool.toString();
+      if (health.poolProgramId !== expected) {
+        throw new B402Error(
+          B402ErrorCode.InvalidConfig,
+          `relayer ${this.relayerHttpUrl} is wired to pool ${health.poolProgramId}, expected ${expected}`,
+        );
+      }
+      this._relayerHttp = {
+        client: makeRelayerHttpClient({
+          url: this.relayerHttpUrl,
+          pubkey: new PublicKey(health.relayerPubkey),
+          ...(this.relayerApiKey ? { apiKey: this.relayerApiKey } : {}),
+        }),
+      };
+    }
+  }
+
+  /** @internal — used by actions to route through the configured HTTP relayer. */
+  get relayerHttp(): import('./relayer-http.js').RelayerHttpClient | null {
+    return this._relayerHttp?.client ?? null;
+  }
+
+  /** Reverse-resolve a Fr-reduced mint bigint to the original base58 mint
+   *  pubkey if known. Returns undefined for mints we've never seen. */
+  resolveMint(tokenMintFr: bigint): PublicKey | undefined {
+    return this._mintRegistry.get(tokenMintFr.toString());
+  }
+
+  /**
+   * Public-side wallet balance — what the user holds in their Solana wallet
+   * (NOT shielded). Calls `getTokenAccountsByOwner` and returns one row
+   * per token account, with mint, raw amount, decimals, and the token
+   * account address. Includes lamport balance as a special "SOL" entry.
+   *
+   * Pair with `balance()` to give an agent a complete picture: public
+   * balance + private balance.
+   */
+  async walletBalance(): Promise<{
+    walletPubkey: string;
+    cluster: string;
+    sol: { amount: string; decimals: 9 };
+    tokens: Array<{ mint: string; amount: string; decimals: number; tokenAccount: string }>;
+  }> {
+    await this.ready();
+    const owner = this.keypair.publicKey;
+    const [lamports, tokenAccounts] = await Promise.all([
+      this.connection.getBalance(owner, 'confirmed'),
+      this.connection.getParsedTokenAccountsByOwner(owner, { programId: TOKEN_PROGRAM_ID }, 'confirmed'),
+    ]);
+    const tokens = tokenAccounts.value.map(({ pubkey, account }) => {
+      const info = (account.data as { parsed?: { info?: { mint?: string; tokenAmount?: { amount?: string; decimals?: number } } } }).parsed?.info ?? {};
+      return {
+        mint: info.mint ?? '',
+        amount: info.tokenAmount?.amount ?? '0',
+        decimals: info.tokenAmount?.decimals ?? 0,
+        tokenAccount: pubkey.toBase58(),
+      };
+    }).filter((t) => t.mint && t.amount !== '0');
+    return {
+      walletPubkey: owner.toBase58(),
+      cluster: this.cluster,
+      sol: { amount: String(lamports), decimals: 9 },
+      tokens,
+    };
+  }
+
+  /** Record a mint pubkey we've now seen, so future balance/holdings calls
+   *  can show the real base58 instead of the opaque `unknown:` label. */
+  learnMint(mint: PublicKey): void {
+    const fr = leToFrReduced(mint.toBytes());
+    this._mintRegistry.set(fr.toString(), mint);
+  }
+
+  /** Seed the mint registry from:
+   *    1. Bundled common mints (USDC/WSOL across clusters)
+   *    2. The user's on-chain SPL token accounts (every mint they own)
+   *  Both lookups are best-effort; an RPC failure here doesn't block the SDK. */
+  private async _buildMintRegistry(): Promise<void> {
+    // 1. Bundled known mints — small registry, zero cost, works on cold installs.
+    const bundled = [
+      'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', // USDC mainnet
+      'So11111111111111111111111111111111111111112',  // WSOL (mainnet + devnet share)
+      '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU', // USDC devnet
+    ];
+    for (const m of bundled) {
+      try { this.learnMint(new PublicKey(m)); } catch {}
+    }
+    // 2. User's own token accounts — anyone they hold a balance of.
+    try {
+      const r = await this.connection.getTokenAccountsByOwner(
+        this.keypair.publicKey,
+        { programId: TOKEN_PROGRAM_ID },
+      );
+      for (const acc of r.value) {
+        // SPL Token account layout: mint at offset 0, 32 bytes.
+        const mint = new PublicKey(acc.account.data.slice(0, 32));
+        this.learnMint(mint);
+      }
+    } catch {
+      // Best-effort. RPC outages don't block the SDK.
     }
   }
 
@@ -217,6 +354,19 @@ export class B402Solana {
       this.keypair.publicKey,
     );
 
+    // Resolve cluster-default ALT for shield. Required when publishing
+    // ciphertext on-chain (the safe default) — without ALT compression the
+    // tx exceeds Solana's 1232-byte cap. If no ALT is configured for this
+    // cluster (e.g. mainnet pre-Phase-B), gracefully degrade by skipping the
+    // ciphertext publication; the note is still tracked via the local
+    // NoteStore so balance/unshield work — only chain-side recovery is lost
+    // until the ALT is wired in a future SDK release.
+    const defaultAltStr =
+      this.cluster === 'mainnet' ? B402_ALT_MAINNET : this.cluster === 'devnet' ? B402_ALT_DEVNET : '';
+    const alt = defaultAltStr ? new PublicKey(defaultAltStr) : undefined;
+    const omitEncryptedNotes =
+      req.omitEncryptedNotes ?? (alt === undefined);
+
     const result = await shield({
       connection: this.connection,
       poolProgramId: new PublicKey(this.programIds.b402Pool),
@@ -228,10 +378,17 @@ export class B402Solana {
       depositor: this.keypair,
       relayer: this.relayer,
       amount: req.amount,
-      omitEncryptedNotes: req.omitEncryptedNotes,
+      omitEncryptedNotes,
+      ...(alt ? { alt } : {}),
     });
 
     this._lastShield = { result, mint: req.mint };
+    // Fast-path: SDK generated this note locally, so its plaintext is known.
+    // Inserting directly means balance() / holdings() reflect it without an
+    // RPC backfill.
+    this._notes!.insertNote(result.note);
+    // Remember the mint for future Fr→base58 resolution.
+    this.learnMint(req.mint);
     return result;
   }
 
@@ -249,12 +406,39 @@ export class B402Solana {
       );
     }
 
-    const note = req.note ?? this._lastShield?.result.note;
-    const mint = req.mint ?? this._lastShield?.mint;
+    // Resolve which deposit to spend.
+    //   - If both `note` and `mint` are provided, use them as-is.
+    //   - If `mint` is provided, find a spendable note in that mint (the
+    //     persistent NoteStore is the source of truth, NOT _lastShield —
+    //     _lastShield's mint may be stale or different).
+    //   - Otherwise fall back to _lastShield (single-shot dev flow).
+    let note: SpendableNote | undefined;
+    let mint: PublicKey | undefined;
+    if (req.note) {
+      note = req.note;
+      mint = req.mint ?? this._lastShield?.mint;
+    } else if (req.mint) {
+      const targetFr = leToFrReduced(req.mint.toBytes());
+      const candidates = this._notes!.getSpendable(targetFr);
+      if (candidates.length === 0) {
+        throw new B402Error(
+          B402ErrorCode.NoSpendableNotes,
+          `no private deposit in mint ${req.mint.toBase58().slice(0, 8)}…`,
+        );
+      }
+      // Pick the most-recently-added (last in insertion order). For a
+      // multi-deposit wallet, callers can pass `note` explicitly to
+      // pick a specific one.
+      note = candidates[candidates.length - 1];
+      mint = req.mint;
+    } else {
+      note = this._lastShield?.result.note;
+      mint = this._lastShield?.mint;
+    }
     if (!note || !mint) {
       throw new B402Error(
-        B402ErrorCode.InvalidConfig,
-        'no note to unshield — call shield() first or pass { note, mint } explicitly',
+        B402ErrorCode.NoSpendableNotes,
+        'no note to unshield — call shield() first, or pass { note, mint } explicitly',
       );
     }
 
@@ -294,7 +478,7 @@ export class B402Solana {
       zeroCacheLe,
     );
 
-    return unshield({
+    const result = await unshield({
       connection: this.connection,
       poolProgramId,
       verifierProgramId: new PublicKey(this.programIds.b402VerifierTransact),
@@ -306,7 +490,14 @@ export class B402Solana {
       recipientTokenAccount: recipientAta,
       recipientOwner: req.to,
       relayer: this.relayer,
+      ...(this._relayerHttp ? { relayerHttp: this._relayerHttp.client } : {}),
     });
+
+    // The IN note was spent — mark its commitment so it stops appearing in
+    // balance/holdings, and the persistence layer records the spend.
+    this._notes!.markSpent(note.commitment);
+
+    return result;
   }
 
   /**
@@ -316,6 +507,10 @@ export class B402Solana {
    */
   async privateSwap(req: PrivateSwapRequest): Promise<PrivateSwapResult> {
     await this.ready();
+    // Relayer pubkey bound into the ix's account[0] + relayer_fee_recipient
+    // placeholder + feeAtaSentinel derivation. When the HTTP relayer is in
+    // use, we use ITS pubkey so on-chain accounts match the actual fee payer.
+    const relayerPubkey = this._relayerHttp?.client.pubkey ?? this.relayer.publicKey;
     if (!this._prover) {
       throw new B402Error(
         B402ErrorCode.InvalidConfig,
@@ -332,23 +527,41 @@ export class B402Solana {
       throw new B402Error(B402ErrorCode.AmountOutOfRange, 'amount must be > 0');
     }
 
-    // 1. Find the note to spend.
+    // 1. Find the note to spend. Current circuit constraint: privateSwap
+    //    spends the WHOLE note — partial spends with a change-back to
+    //    the IN mint are not implemented in the adapt witness shape
+    //    (outValue: [expectedOut, 0n]; slot 1 is dummy). So we require
+    //    an EXACT-match deposit: amount == note.value. If the user has a
+    //    200k deposit and asks to swap 50k, surface the constraint
+    //    explicitly rather than silently swap 200k.
     const inMintFr = leToFrReduced(req.inMint.toBytes());
-    const note: SpendableNote | undefined =
-      req.note ??
-      (this._lastShield && this._lastShield.mint.equals(req.inMint)
-        ? this._lastShield.result.note
-        : undefined);
-    if (!note) {
-      throw new B402Error(
-        B402ErrorCode.NoSpendableNotes,
-        `no shielded note in ${req.inMint.toBase58().slice(0, 8)}…; call shield() first or pass { note }`,
-      );
+    let note: SpendableNote | undefined;
+    if (req.note) {
+      note = req.note;
+    } else {
+      const candidates = this._notes!.getSpendable(inMintFr);
+      if (candidates.length === 0) {
+        throw new B402Error(
+          B402ErrorCode.NoSpendableNotes,
+          `no private deposit in mint ${req.inMint.toBase58().slice(0, 8)}…`,
+        );
+      }
+      // Exact-value match required. If a deposit of exactly req.amount
+      // exists, use it; otherwise enumerate available sizes for the user.
+      note = candidates.find((n) => n.value === req.amount);
+      if (!note) {
+        const sizes = candidates.map((n) => n.value.toString()).join(', ');
+        throw new B402Error(
+          B402ErrorCode.InvalidConfig,
+          `private_swap requires an exact-match deposit. Available deposit sizes for this mint: [${sizes}]. Requested: ${req.amount}. ` +
+          `To swap a different amount, first shield exactly that amount, or unshield and reshield to split.`,
+        );
+      }
     }
-    if (note.value < req.amount) {
+    if (note.value !== req.amount) {
       throw new B402Error(
-        B402ErrorCode.InsufficientBalance,
-        `note has ${note.value} units but swap requested ${req.amount}`,
+        B402ErrorCode.InvalidConfig,
+        `private_swap: deposit value ${note.value} does not match requested amount ${req.amount}. Pass an exact-match deposit via { note, amount: note.value }.`,
       );
     }
 
@@ -462,7 +675,7 @@ export class B402Solana {
       [new TextEncoder().encode('b402/v1'), new TextEncoder().encode('adapter')],
       adapterProgramId,
     )[0];
-    const feeAtaSentinel = await getAssociatedTokenAddress(req.inMint, this.relayer.publicKey);
+    const feeAtaSentinel = await getAssociatedTokenAddress(req.inMint, relayerPubkey);
 
     // 9. Pool ix data — adapt_execute layout.
     const poolIxData = concat(
@@ -489,7 +702,7 @@ export class B402Solana {
       new Uint8Array([0b10]), // out_dummy_mask
       u16Le(nullPrefix),
       u16Le(dummyPrefix),
-      this.relayer.publicKey.toBytes(),
+      relayerPubkey.toBytes(),
       vecU8(adapterIxData),
       vecU8(actionPayload),
     );
@@ -498,7 +711,7 @@ export class B402Solana {
     const shardPda1 = nullifierShardPda(poolProgramId, dummyPrefix);
 
     const poolIxKeys = [
-      { pubkey: this.relayer.publicKey, isSigner: true, isWritable: true },
+      { pubkey: relayerPubkey, isSigner: true, isWritable: true },
       { pubkey: poolConfigPda(poolProgramId), isSigner: false, isWritable: false },
       { pubkey: adapterRegistryPda(poolProgramId), isSigner: false, isWritable: false },
       { pubkey: tokenConfigPda(poolProgramId, req.inMint), isSigner: false, isWritable: false },
@@ -543,24 +756,36 @@ export class B402Solana {
     const preInfo = await this.connection.getAccountInfo(outVaultPda);
     const preOut = preInfo ? readSplAmount(preInfo.data) : 0n;
 
-    // 12. v0 tx.
-    const blockhash = (await this.connection.getLatestBlockhash('confirmed')).blockhash;
-    const msg = new TransactionMessage({
-      payerKey: this.relayer.publicKey,
-      recentBlockhash: blockhash,
-      instructions: [cuIx, poolIx],
-    }).compileToV0Message([lookupTable]);
-    const vtx = new VersionedTransaction(msg);
-    vtx.sign([this.relayer]);
+    // 12. Submit. Privacy path: HTTP relayer signs + submits, user wallet
+    // never appears as fee payer. Local path: this.relayer signs locally.
+    let signature: string;
+    if (this._relayerHttp) {
+      const r = await this._relayerHttp.client.submit({
+        label: 'adapt',
+        ix: poolIx,
+        altAddresses: [altPubkey],
+        computeUnitLimit: 1_400_000,
+      });
+      signature = r.signature;
+    } else {
+      const blockhash = (await this.connection.getLatestBlockhash('confirmed')).blockhash;
+      const msg = new TransactionMessage({
+        payerKey: this.relayer.publicKey,
+        recentBlockhash: blockhash,
+        instructions: [cuIx, poolIx],
+      }).compileToV0Message([lookupTable]);
+      const vtx = new VersionedTransaction(msg);
+      vtx.sign([this.relayer]);
 
-    const signature = await this.connection.sendRawTransaction(vtx.serialize(), {
-      skipPreflight: true,
-      preflightCommitment: 'confirmed',
-    });
-    await this.connection.confirmTransaction(
-      { signature, blockhash, lastValidBlockHeight: (await this.connection.getLatestBlockhash()).lastValidBlockHeight },
-      'confirmed',
-    );
+      signature = await this.connection.sendRawTransaction(vtx.serialize(), {
+        skipPreflight: true,
+        preflightCommitment: 'confirmed',
+      });
+      await this.connection.confirmTransaction(
+        { signature, blockhash, lastValidBlockHeight: (await this.connection.getLatestBlockhash()).lastValidBlockHeight },
+        'confirmed',
+      );
+    }
 
     // 13. Compute outAmount from on-chain delta.
     const postInfo = await this.connection.getAccountInfo(outVaultPda);
@@ -580,6 +805,15 @@ export class B402Solana {
       ephemeralPub: encryptedOut.ephemeralPub,
       viewingTag: encryptedOut.viewingTag,
     };
+
+    // Fast-path: SDK knows the OUT note's plaintext (we built it). Insert
+    // directly so the next balance/holdings reflects it without RPC.
+    // Mark the IN commitment spent so getSpendable() filters it out without
+    // needing an on-chain nullifier scan.
+    this._notes!.insertNote(outNote);
+    this._notes!.markSpent(note.commitment);
+    this.learnMint(req.inMint);
+    this.learnMint(req.outMint);
 
     return { signature, outNote, outAmount };
   }
@@ -609,30 +843,246 @@ export class B402Solana {
 
   async status(): Promise<{
     cluster: string;
-    spendingPub: string;
-    viewingPub: string;
-    balances: Array<{ mint: string; amount: string; noteCount: number }>;
+    walletPubkey: string;
+    balances: Array<{ mint: string; amount: string; depositCount: number }>;
   }> {
     await this.ready();
-    const balances = new Map<bigint, { amount: bigint; count: number }>();
-    for (const note of (this._notes as NoteStore).getSpendable(0n)) {
-      const cur = balances.get(note.tokenMint) ?? { amount: 0n, count: 0 };
+    const agg = new Map<bigint, { amount: bigint; count: number }>();
+    for (const note of (this._notes as NoteStore).getAllSpendable()) {
+      const cur = agg.get(note.tokenMint) ?? { amount: 0n, count: 0 };
       cur.amount += note.value;
       cur.count += 1;
-      balances.set(note.tokenMint, cur);
+      agg.set(note.tokenMint, cur);
     }
-
     return {
       cluster: this.cluster,
-      spendingPub: this.wallet.spendingPub.toString(),
-      viewingPub: uint8ToHex(this.wallet.viewingPub),
-      balances: Array.from(balances.entries()).map(([mint, v]) => ({
-        mint: mint.toString(),
+      walletPubkey: this.keypair.publicKey.toBase58(),
+      balances: Array.from(agg.entries()).map(([fr, v]) => ({
+        mint: mintLabel(fr, this.resolveMint(fr)),
         amount: v.amount.toString(),
-        noteCount: v.count,
+        depositCount: v.count,
       })),
     };
   }
+
+  /**
+   * Per-deposit holdings owned by this client. Each entry is one private
+   * deposit that can be spent independently — agents that need a per-deposit
+   * view (rebalancing, partial unshields) use this; agents that only care
+   * about totals should use `balance()`.
+   *
+   * Default: in-memory snapshot (fast). Set `refresh: true` to re-sync from
+   * on-chain history first — useful only when the local NoteStore may be
+   * stale (multi-process, fresh-machine) since shield/unshield already
+   * update state locally on every call.
+   */
+  async holdings(opts: { mint?: PublicKey; refresh?: boolean } = {}): Promise<{
+    holdings: Array<{ id: string; mint: string; amount: string }>;
+  }> {
+    await this.ready();
+    if (opts.refresh === true) await this._notes!.backfill({ limit: 30 });
+    const filterFr = opts.mint ? leToFrReduced(opts.mint.toBytes()) : null;
+    const notes = filterFr != null
+      ? this._notes!.getSpendable(filterFr)
+      : this._notes!.getAllSpendable();
+    return {
+      holdings: notes.map((n) => ({
+        id: noteId(n.commitment),
+        mint: mintLabel(n.tokenMint, opts.mint ?? this.resolveMint(n.tokenMint)),
+        amount: n.value.toString(),
+      })),
+    };
+  }
+
+  /**
+   * Aggregate private balance grouped by mint. The default agent-facing
+   * read tool. Pass `mint` to filter to a single mint and resolve the
+   * mint's base58 address in the response; without a filter, mints are
+   * returned as opaque short labels (`unknown:<12hex>`) so agents have a
+   * stable key to compare across calls.
+   */
+  async balance(opts: { mint?: PublicKey; refresh?: boolean } = {}): Promise<{
+    balances: Array<{ mint: string; amount: string; depositCount: number }>;
+  }> {
+    await this.ready();
+    if (opts.refresh === true) await this._notes!.backfill({ limit: 30 });
+    const filterFr = opts.mint ? leToFrReduced(opts.mint.toBytes()) : null;
+    const agg = new Map<bigint, { amount: bigint; count: number }>();
+    const notes = filterFr != null
+      ? this._notes!.getSpendable(filterFr)
+      : this._notes!.getAllSpendable();
+    for (const n of notes) {
+      const cur = agg.get(n.tokenMint) ?? { amount: 0n, count: 0 };
+      cur.amount += n.value;
+      cur.count += 1;
+      agg.set(n.tokenMint, cur);
+    }
+    return {
+      balances: Array.from(agg.entries()).map(([fr, v]) => ({
+        mint: mintLabel(fr, opts.mint ?? this.resolveMint(fr)),
+        amount: v.amount.toString(),
+        depositCount: v.count,
+      })),
+    };
+  }
+
+  /**
+   * Poll for newly-arrived private deposits since a cursor. The cursor is
+   * an opaque token returned by previous calls — pass it back unchanged on
+   * each iteration. Omit it (or pass `undefined`) on the first call to read
+   * everything from the start.
+   *
+   * The SDK's live note subscription pushes new arrivals into the in-memory
+   * store as they land on-chain, so polling every few seconds gives an
+   * agent a near-real-time stream of incoming deposits without running a
+   * subscription protocol.
+   *
+   * Output is JSON-friendly with no ZK plumbing exposed.
+   */
+  async watchIncoming(opts: {
+    cursor?: string;
+    mint?: PublicKey;
+    refresh?: boolean;
+  } = {}): Promise<{
+    incoming: Array<{ id: string; mint: string; amount: string; receivedAt: number }>;
+    cursor: string;
+  }> {
+    await this.ready();
+    if (opts.refresh === true) await this._notes!.backfill({ limit: 30 });
+    const since = decodeCursor(opts.cursor);
+    const filterFr = opts.mint ? leToFrReduced(opts.mint.toBytes()) : undefined;
+    const fresh = this._notes!.getSpendableSince(since, filterFr);
+    let max = since;
+    for (const n of fresh) if (n.leafIndex > max) max = n.leafIndex;
+    const now = Date.now();
+    return {
+      incoming: fresh.map((n) => ({
+        id: noteId(n.commitment),
+        mint: mintLabel(n.tokenMint, opts.mint ?? this.resolveMint(n.tokenMint)),
+        amount: n.value.toString(),
+        receivedAt: now,
+      })),
+      cursor: encodeCursor(max),
+    };
+  }
+
+  /**
+   * Quote a swap via Jupiter Lite API (`https://lite-api.jup.ag/swap/v1`).
+   * Public, no auth. Useful for an agent to predict the OUT amount + slippage
+   * before committing to a `privateSwap` call.
+   *
+   * The quote is an off-chain estimate; actual on-chain execution may differ
+   * by up to `slippageBps`. Mainnet routes only — Jupiter does not index
+   * devnet liquidity.
+   */
+  async quoteSwap(opts: {
+    inMint: PublicKey;
+    outMint: PublicKey;
+    amount: bigint;
+    slippageBps?: number;
+  }): Promise<{
+    inMint: string;
+    outMint: string;
+    inAmount: string;
+    outAmount: string;
+    otherAmountThreshold: string;
+    slippageBps: number;
+    priceImpactPct: string;
+    routeHops: number;
+    contextSlot?: number;
+  }> {
+    const slippageBps = opts.slippageBps ?? 50;
+    const url = new URL('https://lite-api.jup.ag/swap/v1/quote');
+    url.searchParams.set('inputMint', opts.inMint.toBase58());
+    url.searchParams.set('outputMint', opts.outMint.toBase58());
+    url.searchParams.set('amount', opts.amount.toString());
+    url.searchParams.set('slippageBps', String(slippageBps));
+
+    const resp = await fetch(url, { headers: { accept: 'application/json' } });
+    if (!resp.ok) {
+      throw new B402Error(
+        B402ErrorCode.InvalidConfig,
+        `Jupiter quote failed: ${resp.status} ${resp.statusText}`,
+      );
+    }
+    const q = (await resp.json()) as {
+      inputMint: string;
+      outputMint: string;
+      inAmount: string;
+      outAmount: string;
+      otherAmountThreshold: string;
+      slippageBps: number;
+      priceImpactPct: string;
+      routePlan: unknown[];
+      contextSlot?: number;
+    };
+    return {
+      inMint: q.inputMint,
+      outMint: q.outputMint,
+      inAmount: q.inAmount,
+      outAmount: q.outAmount,
+      otherAmountThreshold: q.otherAmountThreshold,
+      slippageBps: q.slippageBps,
+      priceImpactPct: q.priceImpactPct,
+      routeHops: Array.isArray(q.routePlan) ? q.routePlan.length : 0,
+      contextSlot: q.contextSlot,
+    };
+  }
+
+  /**
+   * @internal Re-sync from on-chain history. Most agents should use
+   * `balance({ refresh: true })` or `holdings({ refresh: true })` instead;
+   * this is exposed for advanced cases that want explicit cursor control.
+   */
+  async refresh(opts: { limit?: number; before?: string } = {}): Promise<{
+    txsScanned: number;
+    eventsSeen: number;
+    depositsIngested: number;
+  }> {
+    await this.ready();
+    const r = await this._notes!.backfill({ limit: opts.limit ?? 100, before: opts.before });
+    return {
+      txsScanned: r.txsScanned,
+      eventsSeen: r.eventsSeen,
+      depositsIngested: r.notesIngested,
+    };
+  }
+}
+
+/** Opaque public ID for a private deposit. First 16 hex chars of the
+ *  commitment — stable across calls, doesn't reveal anything spendable. */
+function noteId(commitment: bigint): string {
+  return commitment.toString(16).padStart(64, '0').slice(0, 16);
+}
+
+/** Encode an internal cursor (currently a leaf index) into an opaque base64url
+ *  token. Versioned so the encoding can change without breaking clients. */
+function encodeCursor(leafIndex: bigint): string {
+  const payload = JSON.stringify({ v: 1, l: leafIndex.toString() });
+  return Buffer.from(payload, 'utf8').toString('base64url');
+}
+
+/** Decode an opaque cursor token back into an internal leaf index. Treats
+ *  missing/malformed cursors as "from the beginning". */
+function decodeCursor(cursor: string | undefined): bigint {
+  if (!cursor) return -1n;
+  try {
+    const obj = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as { v?: number; l?: string };
+    if (obj.v !== 1 || typeof obj.l !== 'string') return -1n;
+    return BigInt(obj.l);
+  } catch {
+    return -1n;
+  }
+}
+
+/** Resolve a Fr-reduced mint value to a human-readable label. If the caller
+ *  knows the mint pubkey (passed via opts.mint), return its base58. Otherwise
+ *  emit a stable opaque short label so the agent has SOMETHING to use as a key
+ *  across calls. */
+function mintLabel(tokenMintFr: bigint, knownMint: PublicKey | undefined): string {
+  if (knownMint) return knownMint.toBase58();
+  const hex = tokenMintFr.toString(16).padStart(64, '0').slice(0, 12);
+  return `unknown:${hex}`;
 }
 
 function defaultRpc(cluster: B402SolanaConfig['cluster']): string {
@@ -641,10 +1091,6 @@ function defaultRpc(cluster: B402SolanaConfig['cluster']): string {
     case 'devnet':  return clusterApiUrl('devnet');
     case 'localnet': return 'http://127.0.0.1:8899';
   }
-}
-
-function uint8ToHex(u: Uint8Array): string {
-  return Array.from(u).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 function bigintToLe32(v: bigint): Uint8Array {

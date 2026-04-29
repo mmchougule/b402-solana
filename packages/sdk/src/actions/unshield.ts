@@ -35,6 +35,7 @@ import { instructionDiscriminator, concat, u16Le, u32Le, u64Le, vecU8 } from '..
 import { ClientMerkleTree, type MerkleProof, buildZeroCache } from '../merkle.js';
 import { nullifierHash, feeBindHash, poseidonTagged } from '../poseidon.js';
 import type { Wallet } from '../wallet.js';
+import type { RelayerHttpClient } from '../relayer-http.js';
 
 export interface UnshieldParams {
   connection: Connection;
@@ -59,8 +60,15 @@ export interface UnshieldParams {
   recipientTokenAccount: PublicKey;
   /** Owner of `recipientTokenAccount`. Bound into the proof. */
   recipientOwner: PublicKey;
-  /** Pays SOL fee + creates nullifier shard PDA on first use. */
+  /** Local relayer keypair. Pays SOL fee + signs locally when `relayerHttp`
+   *  is not set. The pubkey is also bound into the on-chain account at
+   *  slot[0] — when `relayerHttp` is set, the remote service overwrites
+   *  that slot with its own pubkey before signing. */
   relayer: Keypair;
+  /** When set, submit via this remote relayer instead of local sign. The
+   *  on-chain fee payer becomes the relayer's wallet — the user's keypair
+   *  is never present in the resulting transaction. Privacy-preserving path. */
+  relayerHttp?: RelayerHttpClient;
 }
 
 export interface UnshieldResult {
@@ -72,9 +80,16 @@ export interface UnshieldResult {
 export async function unshield(params: UnshieldParams): Promise<UnshieldResult> {
   const {
     connection, poolProgramId, verifierProgramId, prover, wallet,
-    mint, note, tree, merkleProof, recipientTokenAccount, recipientOwner, relayer,
+    mint, note, tree, merkleProof, recipientTokenAccount, recipientOwner, relayer, relayerHttp,
   } = params;
   if (!tree && !merkleProof) throw new Error('unshield: provide `tree` or `merkleProof`');
+
+  // The relayer pubkey bound into the ix's account[0] + relayer_fee_recipient
+  // placeholder. When the HTTP relayer is in use, we use ITS pubkey so the
+  // on-chain accounts are consistent (the relayer service does still overwrite
+  // account[0], but matching pubkeys means observers see the same wallet
+  // regardless of mode). When no HTTP relayer, this is just the local relayer.
+  const relayerPubkey = relayerHttp?.pubkey ?? relayer.publicKey;
 
   // 1. Fresh root.
   const onChain = await fetchTreeState(connection, treeStatePda(poolProgramId));
@@ -180,7 +195,7 @@ export async function unshield(params: UnshieldParams): Promise<UnshieldResult> 
     u16Le(prefix),
     u16Le(0),
     // relayer_fee_recipient — unused (fee=0), pass relayer's pubkey as a benign default
-    relayer.publicKey.toBytes(),
+    relayerPubkey.toBytes(),
   );
 
   const shard0 = nullifierShardPda(poolProgramId, prefix);
@@ -189,7 +204,7 @@ export async function unshield(params: UnshieldParams): Promise<UnshieldResult> 
   const ix = new TransactionInstruction({
     programId: poolProgramId,
     keys: [
-      { pubkey: relayer.publicKey,                isSigner: true,  isWritable: true  },
+      { pubkey: relayerPubkey,                    isSigner: true,  isWritable: true  },
       { pubkey: poolConfigPda(poolProgramId),     isSigner: false, isWritable: false },
       { pubkey: tokenConfigPda(poolProgramId, mint), isSigner: false, isWritable: false },
       { pubkey: vaultPda(poolProgramId, mint),    isSigner: false, isWritable: true  },
@@ -207,13 +222,25 @@ export async function unshield(params: UnshieldParams): Promise<UnshieldResult> 
 
   const cuIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 });
 
-  const tx = new Transaction().add(cuIx, ix);
-  tx.feePayer = relayer.publicKey;
-  tx.recentBlockhash = (await connection.getLatestBlockhash('confirmed')).blockhash;
-  tx.sign(relayer);
-
-  const sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
-  await connection.confirmTransaction(sig, 'confirmed');
+  let sig: string;
+  if (relayerHttp) {
+    // Privacy path: remote relayer pays fee + signs. The user's keypair
+    // never appears in the resulting on-chain transaction.
+    const result = await relayerHttp.submit({
+      label: 'unshield',
+      ix,
+      computeUnitLimit: 1_400_000,
+    });
+    sig = result.signature;
+  } else {
+    // Local path: caller's `relayer` keypair pays fee + signs.
+    const tx = new Transaction().add(cuIx, ix);
+    tx.feePayer = relayer.publicKey;
+    tx.recentBlockhash = (await connection.getLatestBlockhash('confirmed')).blockhash;
+    tx.sign(relayer);
+    sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
+    await connection.confirmTransaction(sig, 'confirmed');
+  }
 
   return {
     signature: sig,
