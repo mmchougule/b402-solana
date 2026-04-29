@@ -7,7 +7,7 @@
  *   node dist/index.js <project-name>
  *
  * Writes a working agent template to ./<project-name> that runs shield →
- * tail_notes → unshield against b402's devnet pool. Honest about what's
+ * watch_incoming → unshield against b402's devnet pool. Honest about what's
  * needed: a Solana keypair, ~0.1 devnet SOL, and the prover artifacts URL
  * documented in the generated README.
  *

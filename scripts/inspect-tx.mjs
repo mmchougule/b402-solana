@@ -1,4 +1,4 @@
-import { Connection, PublicKey } from '@solana/web3.js';
+import { Connection } from '@solana/web3.js';
 
 const conn = new Connection('https://api.devnet.solana.com', 'confirmed');
 const SHIELD = '22Yw2Rwx6jkS2MEGgcoLg1BXz5dQixHzrT2QiB9XDEeTxcoiSRvgwjMDVWD6kYhGxyZ7wiX1Tf6uWH5bXpBvPSpV';

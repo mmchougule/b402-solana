@@ -3,8 +3,8 @@
  * tool handlers. Lives for the duration of the MCP session.
  *
  * Zero-config defaults:
- *   B402_RPC_URL         devnet: clusterApiUrl, mainnet: api.mainnet-beta
- *   B402_CLUSTER         devnet
+ *   B402_RPC_URL         mainnet: api.mainnet-beta, devnet: clusterApiUrl
+ *   B402_CLUSTER         mainnet (alpha live; set devnet for risk-free testing)
  *   B402_KEYPAIR_PATH    ~/.config/solana/id.json
  *   B402_CIRCUITS_ROOT   bundled artifacts shipped inside this package
  *

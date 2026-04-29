@@ -61,14 +61,14 @@ export const walletBalanceInput = z.object({}).strict();
 export const holdingsInput = z
   .object({
     mint: Base58Pubkey.optional().describe('Optional mint to filter by. Without a filter, mints are returned as opaque short labels so agents have a stable key to compare across calls.'),
-    refresh: z.boolean().optional().describe('Re-sync from on-chain history before reading. Default true. Set false for a fast in-memory snapshot.'),
+    refresh: z.boolean().optional().describe('Re-sync from on-chain history before reading. Default false (fast in-memory snapshot, since shield/unshield already update local state). Set true only when local state may be stale.'),
   })
   .strict();
 
 export const balanceInput = z
   .object({
     mint: Base58Pubkey.optional().describe('Optional mint to filter by. With a filter, the response resolves the mint base58.'),
-    refresh: z.boolean().optional().describe('Re-sync from on-chain history before reading. Default true.'),
+    refresh: z.boolean().optional().describe('Re-sync from on-chain history before reading. Default false. Set true only when local state may be stale.'),
   })
   .strict();
 
@@ -85,7 +85,7 @@ export const watchIncomingInput = z
   .object({
     cursor: z.string().optional().describe('Opaque cursor returned by a previous call. Omit on first call to read from the start.'),
     mint: Base58Pubkey.optional().describe('Optional mint filter; with a filter, the response resolves the mint to its base58 address.'),
-    refresh: z.boolean().optional().describe('Re-sync from on-chain history before reading. Default true.'),
+    refresh: z.boolean().optional().describe('Re-sync from on-chain history before reading. Default false. Set true only when local state may be stale.'),
   })
   .strict();
 

@@ -871,8 +871,10 @@ export class B402Solana {
    * view (rebalancing, partial unshields) use this; agents that only care
    * about totals should use `balance()`.
    *
-   * `refresh: true` (default) re-syncs from on-chain history before reading.
-   * Set `refresh: false` for fast in-memory snapshots.
+   * Default: in-memory snapshot (fast). Set `refresh: true` to re-sync from
+   * on-chain history first — useful only when the local NoteStore may be
+   * stale (multi-process, fresh-machine) since shield/unshield already
+   * update state locally on every call.
    */
   async holdings(opts: { mint?: PublicKey; refresh?: boolean } = {}): Promise<{
     holdings: Array<{ id: string; mint: string; amount: string }>;

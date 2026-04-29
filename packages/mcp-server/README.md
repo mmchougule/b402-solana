@@ -8,7 +8,7 @@ Model Context Protocol server exposing the b402 Solana SDK as agent-callable too
 claude mcp add b402-solana -- npx -y @b402ai/solana-mcp
 ```
 
-That's it. Defaults to devnet using your existing Solana CLI keypair (`~/.config/solana/id.json`) — circuit artifacts are bundled in the package, no separate clone needed.
+That's it. Defaults to mainnet using your existing Solana CLI keypair (`~/.config/solana/id.json`) — circuit artifacts are bundled in the package, no separate clone needed. Set `B402_CLUSTER=devnet` for risk-free testing.
 
 Then in any Claude Code session: `"What's my private balance on b402?"` → tools fire.
 
