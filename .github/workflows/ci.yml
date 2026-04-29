@@ -40,6 +40,9 @@ jobs:
           node-version: 20
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # Build workspace deps first — vitest resolves @b402ai/solana-shared via
+      # its compiled dist/ output, which doesn't exist until the package is built.
+      - run: pnpm --filter='@b402ai/solana-shared' build
       - run: pnpm --filter='@b402ai/solana' test
       - run: pnpm --filter='@b402ai/solana-shared' --if-present test
 
