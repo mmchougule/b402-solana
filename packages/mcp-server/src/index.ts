@@ -67,7 +67,7 @@ const logger: Logger = createLogger();
 const server = new Server(
   {
     name: 'b402-solana',
-    version: '0.0.5',
+    version: '0.0.6',
   },
   {
     capabilities: {
