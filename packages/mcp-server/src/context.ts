@@ -55,13 +55,22 @@ function defaultRpc(cluster: B402SolanaConfig['cluster']): string {
 }
 
 export function loadContext(): B402Context {
-  const clusterRaw = process.env.B402_CLUSTER ?? 'devnet';
+  const clusterRaw = process.env.B402_CLUSTER ?? 'mainnet';
   if (!['mainnet', 'devnet', 'localnet'].includes(clusterRaw)) {
     throw new Error(`B402_CLUSTER must be mainnet|devnet|localnet; got "${clusterRaw}"`);
   }
   const cluster = clusterRaw as B402SolanaConfig['cluster'];
 
   const rpcUrl = process.env.B402_RPC_URL ?? defaultRpc(cluster);
+  // Surface RPC choice to the user once at startup. Public mainnet RPC is
+  // free but throttles aggressively (~40 RPS per IP). Power users / agents
+  // running tight loops should set B402_RPC_URL to a private RPC.
+  if (cluster === 'mainnet' && !process.env.B402_RPC_URL) {
+    console.error(
+      '[b402-solana] using public mainnet RPC (api.mainnet-beta.solana.com). '
+      + 'For production agents set B402_RPC_URL to your Helius/Triton/QuickNode endpoint.',
+    );
+  }
 
   const keypairPath = path.resolve(
     process.env.B402_KEYPAIR_PATH ??

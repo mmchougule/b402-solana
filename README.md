@@ -14,6 +14,23 @@ commitments with nullifier-set membership and viewing-key separation. The
 cryptographic primitives are standard (chosen for auditability against
 existing literature); the SVM-native runtime and adapter ABI are the novelty.
 
+## Use it on mainnet (one line, no env vars)
+
+```bash
+claude mcp add b402-solana -- npx -y @b402ai/solana-mcp@latest
+```
+
+Requires a Solana CLI keypair at `~/.config/solana/id.json` with at least
+~0.07 SOL (covers first-time nullifier-shard rent + USDC ATA rent) plus
+the token to shield (USDC or WSOL — the two mints whitelisted on mainnet).
+Hosted relayer signs `unshield` and `private_swap`, so the depositor wallet
+does not appear on those transactions.
+
+Optional environment overrides:
+- `B402_RPC_URL` — private RPC endpoint (Helius / Triton / QuickNode / Alchemy). Default is `api.mainnet-beta.solana.com`.
+- `B402_CLUSTER` — `devnet` for risk-free testing, `localnet` for a local validator. Default `mainnet`.
+- `B402_KEYPAIR_PATH` — alternate keypair path. Default `~/.config/solana/id.json`.
+
 ## Run it on devnet (~30 seconds)
 
 ```bash

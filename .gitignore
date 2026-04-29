@@ -85,3 +85,7 @@ docs/spikes/
 ops/MAINNET-DEPLOY-RUNBOOK.md
 ops/MAINNET-STATE.md
 ops/PHASE-*.md
+
+# Local demo helper — hardcoded technical commentary not for public ridicule.
+# Source-of-truth for protocol facts is docs/ + circuits/ + the assurance repo.
+scripts/watch-logs.mjs

@@ -67,7 +67,7 @@ const logger: Logger = createLogger();
 const server = new Server(
   {
     name: 'b402-solana',
-    version: '0.0.6',
+    version: '0.0.7',
   },
   {
     capabilities: {
@@ -88,7 +88,12 @@ const server = new Server(
       '',
       'Privacy property: `unshield` and `private_swap` are signed/paid by b402\'s hosted relayer, NOT the user. The user wallet does not appear on those txs. `shield` is unavoidably signed by the user (Anchor requires depositor sig for SPL transfer auth).',
       '',
-      'Defaults: cluster=devnet, hosted relayer URL pre-wired, no env vars needed for read-only flows. To shield/unshield, the user\'s Solana keypair at ~/.config/solana/id.json is read.',
+      'Defaults: cluster=mainnet (alpha live), hosted relayer URL + API key pre-wired. The user\'s Solana CLI keypair at ~/.config/solana/id.json is read for shield (depositor signature). No env vars needed for the demo flow.',
+      '',
+      'Optional overrides the user can set before launch (mention only when relevant — agents in tight loops or hitting rate limits):',
+      '  B402_RPC_URL     — a private RPC endpoint (Helius / Triton / QuickNode / Alchemy). Default is public api.mainnet-beta.solana.com which throttles ~40 RPS per IP.',
+      '  B402_CLUSTER     — devnet for risk-free testing, localnet for a local validator. Default mainnet.',
+      '  B402_KEYPAIR_PATH — alternate Solana keypair file path. Default ~/.config/solana/id.json.',
       '',
       'When unsure, call `status` first — it returns wallet pubkey + private balances and is the cheapest snapshot.',
     ].join('\n'),
@@ -169,6 +174,22 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
   const args = rawArgs ?? {};
   const t0 = Date.now();
 
+  // Boundary-only telemetry: log the tool call shape (which mint, which
+  // amount) but never the recipient pubkey or a memo. mint + amount tell
+  // us what's being moved; the depositor signs the tx so it's already
+  // public; the recipient is the one piece we treat as private.
+  logger.info('tool.start', {
+    tool: name,
+    ...(typeof args === 'object' && args !== null
+      ? Object.fromEntries(
+          Object.entries(args as Record<string, unknown>).filter(([k]) =>
+            k === 'mint' || k === 'inMint' || k === 'outMint' ||
+            k === 'amount' || k === 'slippageBps',
+          ),
+        )
+      : {}),
+  });
+
   try {
     let result: unknown;
     switch (name) {
@@ -202,7 +223,20 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       default:
         throw new Error(`unknown tool: ${name}`);
     }
-    logger.info('tool.ok', { tool: name, ms: Date.now() - t0 });
+    // Surface tx-shaped fields from the response so the log is self-narrating
+    // (sig + commitment for shield → explorer link + Poseidon commitment in
+    // the right pane). The result shape varies per tool; we just sniff for
+    // known fields and only emit the ones present.
+    const r = result && typeof result === 'object' ? (result as Record<string, unknown>) : {};
+    const extras: Record<string, string> = {};
+    if (typeof r.signature === 'string') extras.sig = r.signature;
+    if (typeof r.commitment === 'string') extras.commitment = r.commitment;
+    if (typeof r.leafIndex === 'string') extras.leafIndex = r.leafIndex;
+    logger.info('tool.ok', {
+      tool: name,
+      ms: Date.now() - t0,
+      ...extras,
+    });
     return {
       content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
     };
