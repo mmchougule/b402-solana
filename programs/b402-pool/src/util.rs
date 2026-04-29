@@ -90,6 +90,65 @@ pub fn nullifier_insert(shard: &mut NullifierShard, nullifier: [u8; 32]) -> Resu
     Ok(())
 }
 
+/// Anchor-discriminator-and-id layout for `b402_nullifier::create_nullifier`.
+/// Used by `verify_nullifier_ix_in_tx` to confirm a sibling ix in the same
+/// tx will land the nullifier in Light's address tree.
+///
+/// Discriminator is the first 8 bytes of `sha256("global:create_nullifier")`,
+/// matching upstream `Lightprotocol/nullifier-program`. The trailing
+/// `[u8; 32]` id occupies bytes 174..206 of the ix data:
+///   8 (disc) + 129 (validity proof Borsh: 1+32+64+32) + 4 (PackedAddressTreeInfo)
+///   + 1 (output_state_tree_index) + 32 (id) = 174 bytes total.
+pub const B402_NULLIFIER_DISCRIMINATOR: [u8; 8] = [171, 144, 50, 154, 87, 170, 57, 66];
+pub const B402_NULLIFIER_ID_OFFSET: usize = 8 + 129 + 4 + 1; // = 142
+pub const B402_NULLIFIER_IX_DATA_LEN: usize = B402_NULLIFIER_ID_OFFSET + 32; // = 174
+
+/// Verify the same tx contains a `b402_nullifier::create_nullifier` ix
+/// whose `id` argument equals `expected_nullifier`. Searches starting at
+/// `start_index` in the instructions sysvar. Returns the index where the
+/// match was found (caller can resume search past this for the next
+/// nullifier).
+///
+/// This is the v2 nullifier-write enforcement pattern: pool doesn't write
+/// the nullifier itself, it just enforces the matching write happens in
+/// the same atomic tx via Light's address tree (cheaper, no shard rent).
+pub fn verify_nullifier_ix_in_tx(
+    ix_sysvar: &AccountInfo,
+    nullifier_program_id: &Pubkey,
+    expected_nullifier: &[u8; 32],
+    start_index: usize,
+) -> Result<usize> {
+    use anchor_lang::solana_program::sysvar::instructions::load_instruction_at_checked;
+
+    // Walk forward through the tx's ix list looking for a matching
+    // b402_nullifier::create_nullifier call.
+    for i in start_index..16 {
+        let ix = match load_instruction_at_checked(i, ix_sysvar) {
+            Ok(ix) => ix,
+            Err(_) => break, // past end of tx
+        };
+        if ix.program_id != *nullifier_program_id {
+            continue;
+        }
+        require!(
+            ix.data.len() == B402_NULLIFIER_IX_DATA_LEN,
+            PoolError::NullifierIxMalformed
+        );
+        require!(
+            ix.data[..8] == B402_NULLIFIER_DISCRIMINATOR,
+            PoolError::NullifierIxMalformed
+        );
+        let id_in_ix: &[u8; 32] = ix.data[B402_NULLIFIER_ID_OFFSET
+            ..B402_NULLIFIER_ID_OFFSET + 32]
+            .try_into()
+            .map_err(|_| error!(PoolError::NullifierIxMalformed))?;
+        if id_in_ix == expected_nullifier {
+            return Ok(i);
+        }
+    }
+    err!(PoolError::NullifierIxMissing)
+}
+
 pub fn shard_prefix(nullifier: &[u8; 32]) -> u16 {
     u16::from_le_bytes([nullifier[30], nullifier[31]])
 }

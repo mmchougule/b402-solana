@@ -42,6 +42,10 @@ pub enum PoolError {
     NullifierOrderingViolation = 1401,
     #[msg("nullifier routed to wrong shard")]
     NullifierShardMismatch = 1402,
+    #[msg("expected b402_nullifier::create_nullifier ix not present in tx")]
+    NullifierIxMissing = 1403,
+    #[msg("b402_nullifier ix has wrong shape (discriminator/length)")]
+    NullifierIxMalformed = 1404,
 
     #[msg("commitment already exists")]
     CommitmentAlreadyExists = 1500,

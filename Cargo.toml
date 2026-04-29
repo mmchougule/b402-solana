@@ -16,7 +16,14 @@ members = [
 # wants `indexmap >=2.12`, conflicting with the SBF-build `=2.9.0` pin required
 # by Solana's bundled rustc 1.84.1. Running its tests uses its own Cargo.lock:
 #   cargo test --manifest-path tests/onchain/Cargo.toml
-exclude = ["tests/onchain"]
+#
+# `programs/b402-nullifier` is intentionally NOT in this workspace either. It
+# pins anchor-lang 0.31.1 (light-sdk's required version) while the rest of the
+# workspace pins anchor-lang 0.30.1 for our mainnet-deployed b402_pool. Build
+# standalone with its own Cargo.lock:
+#   cargo build-sbf --manifest-path programs/b402-nullifier/Cargo.toml
+# b402_pool CPIs to b402-nullifier via raw invoke_signed — no shared Rust dep.
+exclude = ["tests/onchain", "programs/b402-nullifier"]
 
 [workspace.package]
 version = "0.0.1"

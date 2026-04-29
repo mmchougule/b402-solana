@@ -15,8 +15,9 @@
  */
 
 import {
+  AddressLookupTableAccount,
   ComputeBudgetProgram, Connection, Keypair, PublicKey, SystemProgram,
-  Transaction, TransactionInstruction,
+  Transaction, TransactionInstruction, TransactionMessage, VersionedTransaction,
 } from '@solana/web3.js';
 import { TOKEN_PROGRAM_ID } from '@solana/spl-token';
 
@@ -28,14 +29,20 @@ import { TransactProver, type TransactWitness } from '@b402ai/solana-prover';
 
 import {
   poolConfigPda, treeStatePda, tokenConfigPda, vaultPda,
-  nullifierShardPda, shardPrefix,
 } from '../programs/pda.js';
 import { fetchTreeState } from '../programs/tree-state.js';
-import { instructionDiscriminator, concat, u16Le, u32Le, u64Le, vecU8 } from '../programs/anchor.js';
+import { instructionDiscriminator, concat, u32Le, u64Le, vecU8 } from '../programs/anchor.js';
 import { ClientMerkleTree, type MerkleProof, buildZeroCache } from '../merkle.js';
 import { nullifierHash, feeBindHash, poseidonTagged } from '../poseidon.js';
 import type { Wallet } from '../wallet.js';
 import type { RelayerHttpClient } from '../relayer-http.js';
+import {
+  buildCreateNullifierIx,
+  getValidityProofForNullifier,
+} from '../light-nullifier.js';
+
+/** Sysvar instructions account. */
+const SYSVAR_INSTRUCTIONS = new PublicKey('Sysvar1nstructions1111111111111111111111111');
 
 export interface UnshieldParams {
   connection: Connection;
@@ -69,6 +76,27 @@ export interface UnshieldParams {
    *  on-chain fee payer becomes the relayer's wallet — the user's keypair
    *  is never present in the resulting transaction. Privacy-preserving path. */
   relayerHttp?: RelayerHttpClient;
+  /**
+   * v2 nullifier-set: stateless.js Rpc client wired to Photon. Required
+   * at v2 — without it, no validity proof can be fetched, which means
+   * the b402_nullifier::create_nullifier sibling ix can't be built.
+   * If omitted at call time, the function throws a clear error.
+   * Test fixtures: `createRpc(undefined, 'http://127.0.0.1:8784')`.
+   */
+  photonRpc?: unknown;
+  /**
+   * v2 nullifier-set: ALT pubkey to compress the combined unshield +
+   * b402_nullifier ix account list under Solana's 1232 B tx cap. The
+   * ALT must include Light's static accounts (light_system_program,
+   * registered_program_pda, account_compression_authority,
+   * account_compression_program, sysvar_instructions, b402_nullifier
+   * cpi_authority, output_queue), our pool's PDAs (pool_config,
+   * tree_state, vault, token_config, verifier_transact), and SystemProgram.
+   *
+   * If omitted, the SDK tries to send legacy and will fail with
+   * "Transaction too large" — caller must provide an ALT.
+   */
+  alt?: PublicKey;
 }
 
 export interface UnshieldResult {
@@ -81,6 +109,7 @@ export async function unshield(params: UnshieldParams): Promise<UnshieldResult> 
   const {
     connection, poolProgramId, verifierProgramId, prover, wallet,
     mint, note, tree, merkleProof, recipientTokenAccount, recipientOwner, relayer, relayerHttp,
+    photonRpc, alt,
   } = params;
   if (!tree && !merkleProof) throw new Error('unshield: provide `tree` or `merkleProof`');
 
@@ -101,7 +130,6 @@ export async function unshield(params: UnshieldParams): Promise<UnshieldResult> 
   // 3. Nullifier.
   const nullifierVal = await nullifierHash(wallet.spendingPriv, note.leafIndex);
   const nullifierLe = bigIntToLeBytes(nullifierVal);
-  const prefix = shardPrefix(nullifierLe);
 
   // 4. Recipient bind.
   const ownerBytes = recipientOwner.toBytes();
@@ -161,16 +189,16 @@ export async function unshield(params: UnshieldParams): Promise<UnshieldResult> 
     throw new Error('prover returned wrong public input count');
   }
 
-  // 7. Build the unshield instruction. Args layout:
+  // 7. Build the v2 unshield instruction. Args layout:
   //    UnshieldArgs {
   //      proof: Vec<u8>,
   //      public_inputs: TransactPublicInputs,
   //      encrypted_notes: Vec<EncryptedNote>,
   //      in_dummy_mask: u8,
   //      out_dummy_mask: u8,
-  //      nullifier_shard_prefix: [u16; 2],
   //      relayer_fee_recipient: Pubkey,
   //    }
+  // (v1 had `nullifier_shard_prefix: [u16; 2]` here — dropped in v2.)
   const ixData = concat(
     instructionDiscriminator('unshield'),
     vecU8(proof.proofBytes),
@@ -191,17 +219,12 @@ export async function unshield(params: UnshieldParams): Promise<UnshieldResult> 
     u32Le(0),
     new Uint8Array([0b10]),                // in_dummy_mask: input 0 real, input 1 dummy
     new Uint8Array([0b11]),                // out_dummy_mask: both dummy
-    // nullifier_shard_prefix: [u16; 2]
-    u16Le(prefix),
-    u16Le(0),
     // relayer_fee_recipient — unused (fee=0), pass relayer's pubkey as a benign default
     relayerPubkey.toBytes(),
   );
 
-  const shard0 = nullifierShardPda(poolProgramId, prefix);
-  const shard1 = nullifierShardPda(poolProgramId, 0);   // dummy — pool doesn't write to it
-
-  const ix = new TransactionInstruction({
+  // v2 account list — no shard PDAs, instructions sysvar instead.
+  const unshieldIx = new TransactionInstruction({
     programId: poolProgramId,
     keys: [
       { pubkey: relayerPubkey,                    isSigner: true,  isWritable: true  },
@@ -209,36 +232,53 @@ export async function unshield(params: UnshieldParams): Promise<UnshieldResult> 
       { pubkey: tokenConfigPda(poolProgramId, mint), isSigner: false, isWritable: false },
       { pubkey: vaultPda(poolProgramId, mint),    isSigner: false, isWritable: true  },
       { pubkey: recipientTokenAccount,            isSigner: false, isWritable: true  },
-      { pubkey: recipientTokenAccount,            isSigner: false, isWritable: true  }, // relayer_fee_token_account; reuse recipient when fee=0
+      { pubkey: recipientTokenAccount,            isSigner: false, isWritable: true  }, // relayer_fee_token_account; reuse when fee=0
       { pubkey: treeStatePda(poolProgramId),      isSigner: false, isWritable: true  },
       { pubkey: verifierProgramId,                isSigner: false, isWritable: false },
-      { pubkey: shard0,                           isSigner: false, isWritable: true  },
-      { pubkey: shard1,                           isSigner: false, isWritable: true  },
+      { pubkey: SYSVAR_INSTRUCTIONS,              isSigner: false, isWritable: false },
       { pubkey: TOKEN_PROGRAM_ID,                 isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId,          isSigner: false, isWritable: false },
     ],
     data: Buffer.from(ixData),
   });
 
+  // 8. v2 nullifier write — fetch validity proof from Photon and build
+  //    the b402_nullifier::create_nullifier sibling ix.
+  if (!photonRpc) {
+    throw new Error('unshield: v2 requires `photonRpc` (stateless.js Rpc client). See PRD-30 §3.6.');
+  }
+  const validityProof = await getValidityProofForNullifier(photonRpc, nullifierLe);
+  const nullifierIx = buildCreateNullifierIx(relayerPubkey, nullifierLe, validityProof);
+
   const cuIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 });
 
   let sig: string;
   if (relayerHttp) {
-    // Privacy path: remote relayer pays fee + signs. The user's keypair
-    // never appears in the resulting on-chain transaction.
-    const result = await relayerHttp.submit({
-      label: 'unshield',
-      ix,
-      computeUnitLimit: 1_400_000,
-    });
-    sig = result.signature;
+    throw new Error('unshield: HTTP relayer with v2 nullifier IMT pending — use local relayer for now');
   } else {
-    // Local path: caller's `relayer` keypair pays fee + signs.
-    const tx = new Transaction().add(cuIx, ix);
-    tx.feePayer = relayer.publicKey;
-    tx.recentBlockhash = (await connection.getLatestBlockhash('confirmed')).blockhash;
-    tx.sign(relayer);
-    sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
+    const blockhash = (await connection.getLatestBlockhash('confirmed')).blockhash;
+    if (alt) {
+      // v2 default path: combined unshield + b402_nullifier ixs exceed
+      // the 1232 B legacy cap. Use a versioned tx with ALT to compress
+      // recurring account references.
+      const altInfo = await connection.getAddressLookupTable(alt);
+      if (!altInfo.value) throw new Error(`unshield: ALT ${alt.toBase58()} not found`);
+      const lookupTable: AddressLookupTableAccount = altInfo.value;
+      const msg = new TransactionMessage({
+        payerKey: relayer.publicKey,
+        recentBlockhash: blockhash,
+        instructions: [cuIx, unshieldIx, nullifierIx],
+      }).compileToV0Message([lookupTable]);
+      const vtx = new VersionedTransaction(msg);
+      vtx.sign([relayer]);
+      sig = await connection.sendRawTransaction(vtx.serialize(), { skipPreflight: false });
+    } else {
+      const tx = new Transaction().add(cuIx, unshieldIx, nullifierIx);
+      tx.feePayer = relayer.publicKey;
+      tx.recentBlockhash = blockhash;
+      tx.sign(relayer);
+      sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
+    }
     await connection.confirmTransaction(sig, 'confirmed');
   }
 

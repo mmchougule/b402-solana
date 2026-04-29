@@ -36,13 +36,13 @@ use anchor_lang::solana_program::program::invoke;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
 use crate::constants::{
-    SEED_ADAPTERS, SEED_CONFIG, SEED_NULL, SEED_TOKEN, SEED_TREE, SEED_VAULT, TAG_ADAPT_BIND,
+    SEED_ADAPTERS, SEED_CONFIG, SEED_TOKEN, SEED_TREE, SEED_VAULT, TAG_ADAPT_BIND,
     TAG_COMMIT, TAG_FEE_BIND, TAG_MK_NODE, TAG_NULLIFIER, TAG_RECIPIENT_BIND, TAG_SPEND_KEY_PUB,
     VERSION_PREFIX,
 };
 use crate::error::PoolError;
 use crate::events::{AdaptExecuted, CommitmentAppended, NullifierSpent};
-use crate::state::{AdapterRegistry, NullifierShard, PoolConfig, TokenConfig, TreeState};
+use crate::state::{AdapterRegistry, PoolConfig, TokenConfig, TreeState};
 use crate::util;
 
 use super::shield::EncryptedNote;
@@ -73,7 +73,6 @@ pub struct AdaptExecuteArgs {
     pub encrypted_notes: Vec<EncryptedNote>, // 0..=2 entries
     pub in_dummy_mask: u8,
     pub out_dummy_mask: u8,
-    pub nullifier_shard_prefix: [u16; 2],
     pub relayer_fee_recipient: Pubkey,
     /// Exact bytes forwarded as the adapter's Anchor instruction data.
     /// First 8 bytes are the adapter's ix discriminator, checked against
@@ -172,23 +171,13 @@ pub struct AdaptExecute<'info> {
     )]
     pub relayer_fee_ta: Box<Account<'info, TokenAccount>>,
 
-    #[account(
-        init_if_needed,
-        payer = relayer,
-        space = NullifierShard::LEN,
-        seeds = [VERSION_PREFIX, SEED_NULL, &args.nullifier_shard_prefix[0].to_le_bytes()],
-        bump,
-    )]
-    pub nullifier_shard_0: AccountLoader<'info, NullifierShard>,
-
-    #[account(
-        init_if_needed,
-        payer = relayer,
-        space = NullifierShard::LEN,
-        seeds = [VERSION_PREFIX, SEED_NULL, &args.nullifier_shard_prefix[1].to_le_bytes()],
-        bump,
-    )]
-    pub nullifier_shard_1: AccountLoader<'info, NullifierShard>,
+    /// v2: pool no longer writes nullifier shard PDAs. Instead, it
+    /// verifies the same tx contains a `b402_nullifier::create_nullifier`
+    /// ix per non-dummy nullifier (which lands the nullifier in Light's
+    /// address tree). Sysvar lets us walk the tx's ix list.
+    /// CHECK: address constraint enforces the canonical sysvar pubkey.
+    #[account(address = anchor_lang::solana_program::sysvar::instructions::ID)]
+    pub instructions_sysvar: AccountInfo<'info>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -300,7 +289,8 @@ pub fn handler<'info>(
         );
     }
 
-    // Shard prefix consistency for non-dummy nullifiers.
+    // Dummy nullifier values must be zero. Sibling-ix verification
+    // for non-dummy nullifiers happens after proof verify (below).
     for i in 0..2 {
         let is_dummy = (args.in_dummy_mask >> i) & 1 == 1;
         if is_dummy {
@@ -308,13 +298,7 @@ pub fn handler<'info>(
                 pi.nullifier[i] == [0u8; 32],
                 PoolError::ProofPublicInputMismatch
             );
-            continue;
         }
-        let actual_prefix = util::shard_prefix(&pi.nullifier[i]);
-        require!(
-            actual_prefix == args.nullifier_shard_prefix[i],
-            PoolError::NullifierShardMismatch
-        );
     }
 
     // Relayer fee binding: fee comes out of in_vault (IN mint), so cap it
@@ -351,38 +335,34 @@ pub fn handler<'info>(
 
     let clock = Clock::get()?;
 
-    // Burn input nullifiers.
-    if (args.in_dummy_mask & 0b01) == 0 {
-        let mut shard = load_or_init_shard(
-            &ctx.accounts.nullifier_shard_0,
-            args.nullifier_shard_prefix[0],
-        )?;
-        require!(
-            shard.prefix == args.nullifier_shard_prefix[0],
-            PoolError::NullifierShardMismatch
-        );
-        util::nullifier_insert(&mut shard, pi.nullifier[0])?;
-        emit!(NullifierSpent {
-            nullifier: pi.nullifier[0],
-            shard: shard.prefix,
-            slot: clock.slot,
-        });
-    }
-    if (args.in_dummy_mask & 0b10) == 0 {
-        let mut shard = load_or_init_shard(
-            &ctx.accounts.nullifier_shard_1,
-            args.nullifier_shard_prefix[1],
-        )?;
-        require!(
-            shard.prefix == args.nullifier_shard_prefix[1],
-            PoolError::NullifierShardMismatch
-        );
-        util::nullifier_insert(&mut shard, pi.nullifier[1])?;
-        emit!(NullifierSpent {
-            nullifier: pi.nullifier[1],
-            shard: shard.prefix,
-            slot: clock.slot,
-        });
+    // v2: sibling-ix nullifier verification. Walk forward through the tx's
+    // instructions sysvar; for each non-dummy nullifier expect a matching
+    // b402_nullifier::create_nullifier ix (which lands the nullifier in
+    // Light's address tree). Light's verifier rejects double-spends —
+    // this check just enforces presence.
+    {
+        use anchor_lang::solana_program::sysvar::instructions::load_current_index_checked;
+        let ix_sysvar = &ctx.accounts.instructions_sysvar;
+        let current_ix_index = load_current_index_checked(ix_sysvar)? as usize;
+        let mut search_from = current_ix_index + 1;
+        for i in 0..2 {
+            let is_dummy = (args.in_dummy_mask >> i) & 1 == 1;
+            if is_dummy {
+                continue;
+            }
+            let found_at = util::verify_nullifier_ix_in_tx(
+                ix_sysvar,
+                &super::transact::B402_NULLIFIER_PROGRAM_ID,
+                &pi.nullifier[i],
+                search_from,
+            )?;
+            search_from = found_at + 1;
+            emit!(NullifierSpent {
+                nullifier: pi.nullifier[i],
+                shard: 0, // legacy field; meaningful only for v1
+                slot: clock.slot,
+            });
+        }
     }
 
     // Pool transfers public_amount_in to adapter_in_ta (pool PDA signs the vault).
@@ -523,21 +503,6 @@ fn u64_to_fr_le(v: u64) -> [u8; 32] {
     let mut out = [0u8; 32];
     out[..8].copy_from_slice(&v.to_le_bytes());
     out
-}
-
-fn load_or_init_shard<'a, 'info>(
-    loader: &'a AccountLoader<'info, NullifierShard>,
-    expected_prefix: u16,
-) -> Result<std::cell::RefMut<'a, NullifierShard>> {
-    if let Ok(mut shard) = loader.load_mut() {
-        if shard.count == 0 && shard.prefix == 0 {
-            shard.prefix = expected_prefix;
-        }
-        return Ok(shard);
-    }
-    let mut shard = loader.load_init()?;
-    shard.prefix = expected_prefix;
-    Ok(shard)
 }
 
 #[inline(never)]

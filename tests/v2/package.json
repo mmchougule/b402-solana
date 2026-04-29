@@ -1,0 +1,27 @@
+{
+  "name": "@b402ai/solana-v2-tests",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Phase 0-5 integration tests gating PRD-30 (Light Protocol IMT nullifier set).",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:phase0": "vitest run integration/",
+    "test:phase5": "vitest run e2e/"
+  },
+  "dependencies": {
+    "@b402ai/solana": "workspace:*",
+    "@b402ai/solana-shared": "workspace:*",
+    "@lightprotocol/stateless.js": "0.23.0-beta.5",
+    "@solana/web3.js": "^1.95.8",
+    "@solana/spl-token": "^0.4.9"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

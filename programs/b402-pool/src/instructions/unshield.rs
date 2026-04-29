@@ -4,12 +4,12 @@ use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 use anchor_lang::solana_program::poseidon::{hashv, Endianness, Parameters};
 
 use crate::constants::{
-    SEED_CONFIG, SEED_NULL, SEED_TOKEN, SEED_TREE, SEED_VAULT, TAG_COMMIT, TAG_FEE_BIND,
+    SEED_CONFIG, SEED_TOKEN, SEED_TREE, SEED_VAULT, TAG_COMMIT, TAG_FEE_BIND,
     TAG_MK_NODE, TAG_NULLIFIER, TAG_RECIPIENT_BIND, TAG_SPEND_KEY_PUB, VERSION_PREFIX,
 };
 use crate::error::PoolError;
 use crate::events::{CommitmentAppended, NullifierSpent, UnshieldExecuted};
-use crate::state::{NullifierShard, PoolConfig, TokenConfig, TreeState};
+use crate::state::{PoolConfig, TokenConfig, TreeState};
 use crate::util;
 
 use super::shield::{EncryptedNote, TransactPublicInputs};
@@ -22,7 +22,6 @@ pub struct UnshieldArgs {
     pub encrypted_notes: Vec<EncryptedNote>, // must be 2 entries
     pub in_dummy_mask: u8,
     pub out_dummy_mask: u8,
-    pub nullifier_shard_prefix: [u16; 2],
     pub relayer_fee_recipient: Pubkey,
 }
 
@@ -75,23 +74,12 @@ pub struct Unshield<'info> {
     /// CHECK: verified against pool_config.verifier_transact.
     pub verifier_program: AccountInfo<'info>,
 
-    #[account(
-        init_if_needed,
-        payer = relayer,
-        space = NullifierShard::LEN,
-        seeds = [VERSION_PREFIX, SEED_NULL, &args.nullifier_shard_prefix[0].to_le_bytes()],
-        bump,
-    )]
-    pub nullifier_shard_0: AccountLoader<'info, NullifierShard>,
-
-    #[account(
-        init_if_needed,
-        payer = relayer,
-        space = NullifierShard::LEN,
-        seeds = [VERSION_PREFIX, SEED_NULL, &args.nullifier_shard_prefix[1].to_le_bytes()],
-        bump,
-    )]
-    pub nullifier_shard_1: AccountLoader<'info, NullifierShard>,
+    /// v2: pool no longer writes nullifier shard PDAs. The same tx must
+    /// contain a `b402_nullifier::create_nullifier` ix per non-dummy
+    /// nullifier (which lands the nullifier in Light's address tree).
+    /// CHECK: address constraint enforces the canonical sysvar pubkey.
+    #[account(address = anchor_lang::solana_program::sysvar::instructions::ID)]
+    pub instructions_sysvar: AccountInfo<'info>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -145,11 +133,6 @@ pub fn handler(ctx: Context<Unshield>, args: UnshieldArgs) -> Result<()> {
             );
             continue;
         }
-        let actual_prefix = util::shard_prefix(&pi.nullifier[i]);
-        require!(
-            actual_prefix == args.nullifier_shard_prefix[i],
-            PoolError::NullifierShardMismatch
-        );
     }
 
     // Verify relayer fee recipient ATA matches relayer_fee_recipient pubkey.
@@ -204,37 +187,30 @@ pub fn handler(ctx: Context<Unshield>, args: UnshieldArgs) -> Result<()> {
 
     let clock = Clock::get()?;
 
-    if (args.in_dummy_mask & 0b01) == 0 {
-        let mut shard = load_or_init_shard(
-            &ctx.accounts.nullifier_shard_0,
-            args.nullifier_shard_prefix[0],
-        )?;
-        require!(
-            shard.prefix == args.nullifier_shard_prefix[0],
-            PoolError::NullifierShardMismatch
-        );
-        util::nullifier_insert(&mut shard, pi.nullifier[0])?;
-        emit!(NullifierSpent {
-            nullifier: pi.nullifier[0],
-            shard: shard.prefix,
-            slot: clock.slot
-        });
-    }
-    if (args.in_dummy_mask & 0b10) == 0 {
-        let mut shard = load_or_init_shard(
-            &ctx.accounts.nullifier_shard_1,
-            args.nullifier_shard_prefix[1],
-        )?;
-        require!(
-            shard.prefix == args.nullifier_shard_prefix[1],
-            PoolError::NullifierShardMismatch
-        );
-        util::nullifier_insert(&mut shard, pi.nullifier[1])?;
-        emit!(NullifierSpent {
-            nullifier: pi.nullifier[1],
-            shard: shard.prefix,
-            slot: clock.slot
-        });
+    // v2: sibling-ix nullifier verification.
+    {
+        use anchor_lang::solana_program::sysvar::instructions::load_current_index_checked;
+        let ix_sysvar = &ctx.accounts.instructions_sysvar;
+        let current_ix_index = load_current_index_checked(ix_sysvar)? as usize;
+        let mut search_from = current_ix_index + 1;
+        for i in 0..2 {
+            let is_dummy = (args.in_dummy_mask >> i) & 1 == 1;
+            if is_dummy {
+                continue;
+            }
+            let found_at = util::verify_nullifier_ix_in_tx(
+                ix_sysvar,
+                &super::transact::B402_NULLIFIER_PROGRAM_ID,
+                &pi.nullifier[i],
+                search_from,
+            )?;
+            search_from = found_at + 1;
+            emit!(NullifierSpent {
+                nullifier: pi.nullifier[i],
+                shard: 0,
+                slot: clock.slot
+            });
+        }
     }
 
     // Append change commitments.
@@ -322,21 +298,6 @@ fn u64_to_fr_le(v: u64) -> [u8; 32] {
     let mut out = [0u8; 32];
     out[..8].copy_from_slice(&v.to_le_bytes());
     out
-}
-
-fn load_or_init_shard<'a, 'info>(
-    loader: &'a AccountLoader<'info, NullifierShard>,
-    expected_prefix: u16,
-) -> Result<std::cell::RefMut<'a, NullifierShard>> {
-    if let Ok(mut shard) = loader.load_mut() {
-        if shard.count == 0 && shard.prefix == 0 {
-            shard.prefix = expected_prefix;
-        }
-        return Ok(shard);
-    }
-    let mut shard = loader.load_init()?;
-    shard.prefix = expected_prefix;
-    Ok(shard)
 }
 
 #[inline(never)]

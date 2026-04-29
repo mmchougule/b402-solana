@@ -161,6 +161,15 @@ export interface UnshieldRequest {
   note?: SpendableNote;
   /** Mint of the note. Required if `note` is supplied; otherwise inferred from last shield. */
   mint?: PublicKey;
+  /**
+   * v2 nullifier-set: stateless.js Rpc client wired to Photon. Required.
+   * SDK uses it to fetch a non-inclusion proof for the nullifier value
+   * before sending the tx.
+   */
+  photonRpc?: unknown;
+  /** v2 ALT: required to fit the unshield + b402_nullifier sibling ixs
+   *  under Solana's 1232 B v0-tx cap. See PRD-30. */
+  alt?: PublicKey;
 }
 
 export class B402Solana {
@@ -490,6 +499,8 @@ export class B402Solana {
       recipientTokenAccount: recipientAta,
       recipientOwner: req.to,
       relayer: this.relayer,
+      photonRpc: req.photonRpc,
+      alt: req.alt,
       ...(this._relayerHttp ? { relayerHttp: this._relayerHttp.client } : {}),
     });
 
