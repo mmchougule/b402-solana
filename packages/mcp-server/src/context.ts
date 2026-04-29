@@ -125,7 +125,7 @@ export function loadContext(): B402Context {
   // keypair if configured, otherwise the user's wallet).
   const defaultRelayerUrl: Record<typeof cluster, string | null> = {
     devnet: 'https://b402-solana-relayer-devnet-62092339396.us-central1.run.app',
-    mainnet: null, // wired at mainnet launch
+    mainnet: 'https://b402-solana-relayer-mainnet-62092339396.us-central1.run.app',
     localnet: null,
   };
   const relayerHttpUrl = process.env.B402_RELAYER_HTTP_URL === ''
@@ -135,8 +135,8 @@ export function loadContext(): B402Context {
   // hosted relayer rate-limits per-key (5 req/min on this public tier).
   // Override via B402_RELAYER_API_KEY for higher-tier access.
   const defaultApiKey: Record<typeof cluster, string | null> = {
-    devnet: 'kp_8a28d0e86074cde3',  // public devnet tier, 5 req/min
-    mainnet: null,                   // wired at mainnet launch
+    devnet: 'kp_8a28d0e86074cde3',   // public devnet tier, 5 req/min
+    mainnet: 'kp_53d31f4d4b758ea2',  // public mainnet tier, 5 req/min
     localnet: null,
   };
   const relayerApiKey = process.env.B402_RELAYER_API_KEY === ''

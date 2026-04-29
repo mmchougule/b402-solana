@@ -356,10 +356,16 @@ export class B402Solana {
 
     // Resolve cluster-default ALT for shield. Required when publishing
     // ciphertext on-chain (the safe default) — without ALT compression the
-    // tx exceeds Solana's 1232-byte cap.
+    // tx exceeds Solana's 1232-byte cap. If no ALT is configured for this
+    // cluster (e.g. mainnet pre-Phase-B), gracefully degrade by skipping the
+    // ciphertext publication; the note is still tracked via the local
+    // NoteStore so balance/unshield work — only chain-side recovery is lost
+    // until the ALT is wired in a future SDK release.
     const defaultAltStr =
       this.cluster === 'mainnet' ? B402_ALT_MAINNET : this.cluster === 'devnet' ? B402_ALT_DEVNET : '';
     const alt = defaultAltStr ? new PublicKey(defaultAltStr) : undefined;
+    const omitEncryptedNotes =
+      req.omitEncryptedNotes ?? (alt === undefined);
 
     const result = await shield({
       connection: this.connection,
@@ -372,7 +378,7 @@ export class B402Solana {
       depositor: this.keypair,
       relayer: this.relayer,
       amount: req.amount,
-      omitEncryptedNotes: req.omitEncryptedNotes,
+      omitEncryptedNotes,
       ...(alt ? { alt } : {}),
     });
 
