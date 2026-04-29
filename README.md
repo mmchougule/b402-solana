@@ -20,10 +20,9 @@ existing literature); the SVM-native runtime and adapter ABI are the novelty.
 claude mcp add b402-solana -- npx -y @b402ai/solana-mcp@latest
 ```
 
-Requires a Solana CLI keypair at `~/.config/solana/id.json` with at least
-~0.07 SOL (covers first-time nullifier-shard rent + USDC ATA rent) plus
-the token to shield (USDC or WSOL — the two mints whitelisted on mainnet).
-Hosted relayer signs `unshield` and `private_swap`, so the depositor wallet
+Requires a Solana CLI keypair at `~/.config/solana/id.json` plus the token
+to shield (USDC or WSOL — the mints whitelisted on mainnet today). The
+hosted relayer signs `unshield` and `private_swap`, so the depositor wallet
 does not appear on those transactions.
 
 Optional environment overrides:
