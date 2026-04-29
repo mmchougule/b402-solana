@@ -80,3 +80,8 @@ docs/LAUNCH-DRAFTS.md
 # Engineering spikes — throwaway design docs, runbooks, exploratory PRDs.
 # Spikes that mature into committed work get promoted to docs/prds/PRD-NN-...md.
 docs/spikes/
+
+# Internal ops state docs — never push to public repo. Use locally for handoff.
+ops/MAINNET-DEPLOY-RUNBOOK.md
+ops/MAINNET-STATE.md
+ops/PHASE-*.md
