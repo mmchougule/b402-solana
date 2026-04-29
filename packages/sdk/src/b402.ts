@@ -148,6 +148,14 @@ export interface PrivateSwapRequest {
    * before sending the tx.
    */
   photonRpc?: unknown;
+  /**
+   * Adapter-specific remaining accounts. Forwarded by the pool to the
+   * adapter CPI verbatim (in order), as `ctx.remaining_accounts`. Mock
+   * adapter doesn't need any. Kamino's `ra_deposit` layout requires 19;
+   * Jupiter's route accounts vary per quote. Caller must include all
+   * relevant entries in the ALT for the tx to fit under the 1232-byte cap.
+   */
+  remainingAccounts?: Array<{ pubkey: PublicKey; isSigner: boolean; isWritable: boolean }>;
 }
 
 export interface PrivateSwapResult {
