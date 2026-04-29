@@ -65,6 +65,9 @@ import { buildZeroCache, proveMostRecentLeaf } from './merkle.js';
 import { commitmentHash, feeBindHash, nullifierHash, poseidonTagged } from './poseidon.js';
 import { encryptNote } from './note-encryption.js';
 import { B402Error, B402ErrorCode } from './errors.js';
+import { buildCreateNullifierIx, getValidityProofForNullifier } from './light-nullifier.js';
+
+const SYSVAR_INSTRUCTIONS = new PublicKey('Sysvar1nstructions1111111111111111111111111');
 
 export interface B402SolanaConfig {
   cluster: 'mainnet' | 'devnet' | 'localnet';
@@ -139,6 +142,12 @@ export interface PrivateSwapRequest {
   actionPayload?: Uint8Array;
   /** Optional override for which note to spend. Defaults to the most-recently-shielded note in `inMint`. */
   note?: SpendableNote;
+  /**
+   * v2 nullifier-set: stateless.js Rpc client wired to Photon. Required.
+   * SDK uses it to fetch a non-inclusion proof for the nullifier value
+   * before sending the tx.
+   */
+  photonRpc?: unknown;
 }
 
 export interface PrivateSwapResult {
@@ -619,11 +628,11 @@ export class B402Solana {
       tree.leafCount,
     );
 
-    // 4. Nullifier + shard prefixes.
+    // 4. Nullifier. v2: shard prefixes are gone; the nullifier value goes
+    //    directly into Light Protocol's address tree via a sibling
+    //    b402_nullifier::create_nullifier ix (built below).
     const nullifierVal = await nullifierHash(this._wallet!.spendingPriv, note.leafIndex);
     const nullifierLe = bigintToLe32(nullifierVal);
-    const nullPrefix = shardPrefix(nullifierLe);
-    const dummyPrefix = (nullPrefix + 1) & 0xffff;
 
     // 5. Witness.
     const feeBind = await feeBindHash(0n, 0n);
@@ -711,15 +720,10 @@ export class B402Solana {
       u32Le(0), // encrypted_notes vec len = 0 (omit on-chain to save bytes)
       new Uint8Array([0b10]), // in_dummy_mask (slot 0 real, slot 1 dummy)
       new Uint8Array([0b10]), // out_dummy_mask
-      u16Le(nullPrefix),
-      u16Le(dummyPrefix),
       relayerPubkey.toBytes(),
       vecU8(adapterIxData),
       vecU8(actionPayload),
     );
-
-    const shardPda0 = nullifierShardPda(poolProgramId, nullPrefix);
-    const shardPda1 = nullifierShardPda(poolProgramId, dummyPrefix);
 
     const poolIxKeys = [
       { pubkey: relayerPubkey, isSigner: true, isWritable: true },
@@ -736,8 +740,7 @@ export class B402Solana {
       { pubkey: req.adapterInTa, isSigner: false, isWritable: true },
       { pubkey: req.adapterOutTa, isSigner: false, isWritable: true },
       { pubkey: feeAtaSentinel, isSigner: false, isWritable: true },
-      { pubkey: shardPda0, isSigner: false, isWritable: true },
-      { pubkey: shardPda1, isSigner: false, isWritable: true },
+      { pubkey: SYSVAR_INSTRUCTIONS, isSigner: false, isWritable: false },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ];
@@ -747,6 +750,19 @@ export class B402Solana {
       data: Buffer.from(poolIxData),
     });
     const cuIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 });
+
+    // 9b. v2 nullifier write — fetch validity proof from Photon and build
+    //     the b402_nullifier::create_nullifier sibling ix for the real
+    //     nullifier slot. mask 0b10 → slot 0 is real, slot 1 is dummy
+    //     (zero), so we need exactly one sibling ix.
+    if (!req.photonRpc) {
+      throw new B402Error(
+        B402ErrorCode.InvalidConfig,
+        'privateSwap: v2 requires `photonRpc` (stateless.js Rpc client). See PRD-30 §3.6.',
+      );
+    }
+    const validityProof = await getValidityProofForNullifier(req.photonRpc, nullifierLe);
+    const nullifierIx = buildCreateNullifierIx(relayerPubkey, nullifierLe, validityProof);
 
     // 10. Resolve ALT (caller-supplied or cluster default).
     const altPubkey = req.alt;
@@ -771,19 +787,16 @@ export class B402Solana {
     // never appears as fee payer. Local path: this.relayer signs locally.
     let signature: string;
     if (this._relayerHttp) {
-      const r = await this._relayerHttp.client.submit({
-        label: 'adapt',
-        ix: poolIx,
-        altAddresses: [altPubkey],
-        computeUnitLimit: 1_400_000,
-      });
-      signature = r.signature;
+      throw new B402Error(
+        B402ErrorCode.InvalidConfig,
+        'privateSwap: HTTP relayer with v2 nullifier IMT pending — submit() takes a single ix today; v2 needs pool + nullifier sibling. Use a local relayer or extend the relayer protocol first.',
+      );
     } else {
       const blockhash = (await this.connection.getLatestBlockhash('confirmed')).blockhash;
       const msg = new TransactionMessage({
         payerKey: this.relayer.publicKey,
         recentBlockhash: blockhash,
-        instructions: [cuIx, poolIx],
+        instructions: [cuIx, poolIx, nullifierIx],
       }).compileToV0Message([lookupTable]);
       const vtx = new VersionedTransaction(msg);
       vtx.sign([this.relayer]);
