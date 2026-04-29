@@ -36,6 +36,9 @@ POOL_ID="42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y"
 NULLIFIER_ID="2AnRZwWu6CTurZs1yQpqrcJWo4yRYL1xpeV78b2siweq"
 VERIFIER_TRANSACT_ID="Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK"
 VERIFIER_ADAPT_ID="3Y2tyhNSaUiW5AcZcmFGRyTMdnroxHxc5GqFQPcMTZae"
+MOCK_ADAPTER_ID="89kw33YDcbXfiayVNauz599LaDm51EuU8amWydpjYKgp"
+JUPITER_ADAPTER_ID="3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7"
+KAMINO_ADAPTER_ID="2enwFgcGKJDqruHpCtvmhtxe3DYcV3k72VTvoGcdt2rX"
 
 # --- External programs to clone from mainnet ---
 # Jupiter V6 (swap aggregator)
@@ -50,8 +53,11 @@ POOL_SO="$ROOT/target/deploy/b402_pool.so"
 NULLIFIER_SO="$ROOT/programs/b402-nullifier/target/deploy/b402_nullifier.so"
 VERIFIER_TRANSACT_SO="$ROOT/target/deploy/b402_verifier_transact.so"
 VERIFIER_ADAPT_SO="$ROOT/target/deploy/b402_verifier_adapt.so"
+MOCK_ADAPTER_SO="$ROOT/target/deploy/b402_mock_adapter.so"
+JUPITER_ADAPTER_SO="$ROOT/target/deploy/b402_jupiter_adapter.so"
+KAMINO_ADAPTER_SO="$ROOT/target/deploy/b402_kamino_adapter.so"
 
-for f in "$POOL_SO" "$NULLIFIER_SO" "$VERIFIER_TRANSACT_SO" "$VERIFIER_ADAPT_SO"; do
+for f in "$POOL_SO" "$NULLIFIER_SO" "$VERIFIER_TRANSACT_SO" "$VERIFIER_ADAPT_SO" "$MOCK_ADAPTER_SO" "$JUPITER_ADAPTER_SO" "$KAMINO_ADAPTER_SO"; do
   if [[ ! -f "$f" ]]; then
     echo "FAIL: missing $f — run 'anchor build' (and rebuild b402-nullifier separately)." >&2
     exit 1
@@ -73,6 +79,9 @@ echo "    pool:               $POOL_ID"
 echo "    nullifier:          $NULLIFIER_ID"
 echo "    verifier_transact:  $VERIFIER_TRANSACT_ID"
 echo "    verifier_adapt:     $VERIFIER_ADAPT_ID"
+echo "    mock_adapter:       $MOCK_ADAPTER_ID"
+echo "    jupiter_adapter:    $JUPITER_ADAPTER_ID"
+echo "    kamino_adapter:     $KAMINO_ADAPTER_ID"
 echo "    cloning jupiter v6: $JUPITER_V6"
 echo "    cloning kamino:     $KAMINO_LEND"
 echo "    cloning USDC:       $USDC_MINT"
@@ -86,4 +95,7 @@ light test-validator \
   --upgradeable-program "$NULLIFIER_ID" "$NULLIFIER_SO" "$UPGRADE_AUTH" \
   --upgradeable-program "$VERIFIER_TRANSACT_ID" "$VERIFIER_TRANSACT_SO" "$UPGRADE_AUTH" \
   --upgradeable-program "$VERIFIER_ADAPT_ID" "$VERIFIER_ADAPT_SO" "$UPGRADE_AUTH" \
+  --upgradeable-program "$MOCK_ADAPTER_ID" "$MOCK_ADAPTER_SO" "$UPGRADE_AUTH" \
+  --upgradeable-program "$JUPITER_ADAPTER_ID" "$JUPITER_ADAPTER_SO" "$UPGRADE_AUTH" \
+  --upgradeable-program "$KAMINO_ADAPTER_ID" "$KAMINO_ADAPTER_SO" "$UPGRADE_AUTH" \
   --validator-args "--url mainnet-beta --clone-upgradeable-program $JUPITER_V6 --clone-upgradeable-program $KAMINO_LEND --clone $USDC_MINT"

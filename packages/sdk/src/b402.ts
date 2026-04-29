@@ -697,7 +697,11 @@ export class B402Solana {
     )[0];
     const feeAtaSentinel = await getAssociatedTokenAddress(req.inMint, relayerPubkey);
 
-    // 9. Pool ix data — adapt_execute layout.
+    // 9. Pool ix data — adapt_execute layout (v2.1 wire-slim).
+    //    Dropped fields (still in the proof, derived on-chain from accounts):
+    //      - public_token_mint  → token_config_in.mint
+    //      - expected_out_mint  → token_config_out.mint
+    //    Saves 64 wire bytes; lets v0+ALT swap/lend tx fit under 1232 B.
     const poolIxData = concat(
       instructionDiscriminator('adapt_execute'),
       vecU8(proof.proofBytes),
@@ -708,7 +712,6 @@ export class B402Solana {
       proof.publicInputsLeBytes[4], // commitment_out[1]
       u64Le(req.amount),
       u64Le(0n),
-      req.inMint.toBytes(),
       u64Le(0n), // relayer_fee
       proof.publicInputsLeBytes[9], // relayer_fee_bind
       proof.publicInputsLeBytes[10], // root_bind
@@ -716,7 +719,6 @@ export class B402Solana {
       proof.publicInputsLeBytes[18], // adapter_id
       proof.publicInputsLeBytes[19], // action_hash
       u64Le(expectedOut),
-      req.outMint.toBytes(),
       u32Le(0), // encrypted_notes vec len = 0 (omit on-chain to save bytes)
       new Uint8Array([0b10]), // in_dummy_mask (slot 0 real, slot 1 dummy)
       new Uint8Array([0b10]), // out_dummy_mask

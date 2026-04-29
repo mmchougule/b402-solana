@@ -1,10 +1,14 @@
 //! `adapt_execute` — ZK-bound composable execution path (PRD-04 §3).
 //!
 //! Full flow, with all cryptographic bindings:
-//!   1. Parse AdaptPublicInputs (23 circuit public inputs + 2 pool-side args).
+//!   1. Parse AdaptPublicInputs (the wire-slim subset; v2.1 dropped two
+//!      Pubkey fields that travel as account-derived values instead).
 //!   2. Bind to pool state:
-//!        - public_token_mint          == token_config_in.mint
-//!        - expected_out_mint          == token_config_out.mint
+//!        - public_token_mint           is set from token_config_in.mint
+//!                                      when reconstructing the verifier's
+//!                                      23-element public-input vector.
+//!        - expected_out_mint           is set from token_config_out.mint
+//!                                      same way.
 //!        - adapter_program             is registered + enabled
 //!        - adapter_program ix disc    is allowlisted
 //!        - adapter_id (public input)  == keccak(adapter_program.key) mod p
@@ -48,6 +52,12 @@ use crate::util;
 use super::shield::EncryptedNote;
 use super::verifier_cpi;
 
+/// v2.1 ix-data trim: dropped `public_token_mint` and `expected_out_mint`
+/// (32B each) from the wire. The handler validates these against the
+/// already-trusted `token_config_*.mint` PDAs and re-injects them when
+/// reconstructing the verifier's 23-element public-input vector. The
+/// circuit + proof shape is unchanged; only the wire shape shrinks by 64B,
+/// letting v0+ALT swap/lend/redeem/perpOpen txs fit under 1232 bytes.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
 pub struct AdaptPublicInputs {
     pub merkle_root: [u8; 32],
@@ -55,7 +65,6 @@ pub struct AdaptPublicInputs {
     pub commitment_out: [[u8; 32]; 2],
     pub public_amount_in: u64,
     pub public_amount_out: u64,    // adapt requires this to be zero
-    pub public_token_mint: Pubkey, // IN mint
     pub relayer_fee: u64,
     pub relayer_fee_bind: [u8; 32],
     pub root_bind: [u8; 32],
@@ -63,7 +72,6 @@ pub struct AdaptPublicInputs {
     pub adapter_id: [u8; 32],  // keccak(adapter_program_id) mod p
     pub action_hash: [u8; 32], // Poseidon_3(adaptBindTag, keccakFr, expectedOutMint_Fr)
     pub expected_out_value: u64,
-    pub expected_out_mint: Pubkey, // OUT mint
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
@@ -213,19 +221,11 @@ pub fn handler<'info>(
     require!(pi.public_amount_in > 0, PoolError::PublicAmountExclusivity);
 
     // Mint bindings: token_config PDAs are validated by their seeds, so
-    // their .mint fields are the trusted on-chain values.
-    require!(
-        ctx.accounts.token_config_in.mint == pi.public_token_mint,
-        PoolError::MintMismatch
-    );
-    require!(
-        ctx.accounts.token_config_out.mint == pi.expected_out_mint,
-        PoolError::MintMismatch
-    );
-    require!(
-        ctx.accounts.token_config_out.mint == pi.expected_out_mint,
-        PoolError::MintMismatch
-    );
+    // their .mint fields are the trusted on-chain values. We bind the
+    // proof to these mints (not to wire-supplied pubkeys) by injecting
+    // them into the public-input vector during build_public_inputs_for_adapt.
+    let in_mint = ctx.accounts.token_config_in.mint;
+    let out_mint = ctx.accounts.token_config_out.mint;
 
     // Adapter registry + ix discriminator allowlist.
     let adapter_program_key = ctx.accounts.adapter_program.key();
@@ -262,7 +262,7 @@ pub fn handler<'info>(
     {
         let payload_keccak = keccak::hash(&args.action_payload).0;
         let payload_keccak_fr = util::reduce_le_mod_p(&payload_keccak);
-        let expected_out_mint_fr = util::reduce_le_mod_p(&pi.expected_out_mint.to_bytes());
+        let expected_out_mint_fr = util::reduce_le_mod_p(&out_mint.to_bytes());
         let expected_action_hash = hashv(
             Parameters::Bn254X5,
             Endianness::LittleEndian,
@@ -316,7 +316,7 @@ pub fn handler<'info>(
     }
 
     // Verify proof.
-    let public_inputs: Vec<[u8; 32]> = build_public_inputs_for_adapt(pi);
+    let public_inputs: Vec<[u8; 32]> = build_public_inputs_for_adapt(pi, &in_mint, &out_mint);
     let mut proof_bytes = [0u8; 256];
     proof_bytes.copy_from_slice(&args.proof);
     verifier_cpi::invoke_verify_adapt(
@@ -506,7 +506,11 @@ fn u64_to_fr_le(v: u64) -> [u8; 32] {
 }
 
 #[inline(never)]
-fn build_public_inputs_for_adapt(pi: &AdaptPublicInputs) -> Vec<[u8; 32]> {
+fn build_public_inputs_for_adapt(
+    pi: &AdaptPublicInputs,
+    in_mint: &Pubkey,
+    out_mint: &Pubkey,
+) -> Vec<[u8; 32]> {
     let mut v: Vec<[u8; 32]> = Vec::with_capacity(verifier_cpi::PUBLIC_INPUT_COUNT_ADAPT);
     // First 18 — identical layout to transact.
     v.push(pi.merkle_root);
@@ -516,7 +520,9 @@ fn build_public_inputs_for_adapt(pi: &AdaptPublicInputs) -> Vec<[u8; 32]> {
     v.push(pi.commitment_out[1]);
     v.push(u64_to_fr_le(pi.public_amount_in));
     v.push(u64_to_fr_le(pi.public_amount_out));
-    v.push(util::reduce_le_mod_p(&pi.public_token_mint.to_bytes()));
+    // public_token_mint: derived from token_config_in. Same value the
+    // circuit was generated against; just no longer travels on the wire.
+    v.push(util::reduce_le_mod_p(&in_mint.to_bytes()));
     v.push(u64_to_fr_le(pi.relayer_fee));
     v.push(pi.relayer_fee_bind);
     v.push(pi.root_bind);
@@ -531,7 +537,8 @@ fn build_public_inputs_for_adapt(pi: &AdaptPublicInputs) -> Vec<[u8; 32]> {
     v.push(pi.adapter_id);
     v.push(pi.action_hash);
     v.push(u64_to_fr_le(pi.expected_out_value));
-    v.push(util::reduce_le_mod_p(&pi.expected_out_mint.to_bytes()));
+    // expected_out_mint: derived from token_config_out, same circuit binding.
+    v.push(util::reduce_le_mod_p(&out_mint.to_bytes()));
     v.push(TAG_ADAPT_BIND);
     v
 }

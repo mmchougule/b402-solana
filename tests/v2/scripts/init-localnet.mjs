@@ -10,6 +10,7 @@ import path from "node:path";
 const RPC_URL = "http://127.0.0.1:8899";
 const POOL_ID = new PublicKey("42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y");
 const VERIFIER_T_ID = new PublicKey("Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK");
+const VERIFIER_A_ID = new PublicKey("3Y2tyhNSaUiW5AcZcmFGRyTMdnroxHxc5GqFQPcMTZae");
 
 const c = new Connection(RPC_URL, "confirmed");
 const admin = Keypair.fromSecretKey(new Uint8Array(JSON.parse(fs.readFileSync(path.join(os.homedir(), ".config/solana/id.json"), "utf8"))));
@@ -22,7 +23,7 @@ const data = Buffer.concat([
   admin.publicKey.toBuffer(),
   Buffer.from([1]),
   VERIFIER_T_ID.toBuffer(),
-  VERIFIER_T_ID.toBuffer(),
+  VERIFIER_A_ID.toBuffer(),
   VERIFIER_T_ID.toBuffer(),
   admin.publicKey.toBuffer(),
 ]);
