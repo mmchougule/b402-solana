@@ -130,6 +130,11 @@ export interface PrivateSwapRequest {
    *  the v0 tx under Solana's 1,232 B cap. Defaults to the b402 ALT for the
    *  configured cluster — supply your own for tests with fresh mints. */
   alt?: PublicKey;
+  /** Additional ALTs to include alongside `alt`. Solana allows up to 4 ALTs
+   *  per tx. Use this for adapters whose route already references a public
+   *  ALT (Jupiter publishes one per quote in
+   *  `swap.addressLookupTableAddresses`). */
+  alts?: PublicKey[];
   /** Expected output amount, in smallest units of `outMint`. Bound into the proof.
    *  Defaults to `amount` × 2 for the mock adapter (constant 2x). For real
    *  adapters the caller should pass a quote-based number. */
@@ -790,7 +795,13 @@ export class B402Solana {
     if (!altInfo.value) {
       throw new B402Error(B402ErrorCode.InvalidConfig, `ALT ${altPubkey.toBase58()} not found`);
     }
-    const lookupTable: AddressLookupTableAccount = altInfo.value;
+    const lookupTables: AddressLookupTableAccount[] = [altInfo.value];
+    // Fetch additional ALTs (e.g. Jupiter's published ALT per quote).
+    for (const extra of req.alts ?? []) {
+      const r = await this.connection.getAddressLookupTable(extra);
+      if (!r.value) throw new B402Error(B402ErrorCode.InvalidConfig, `ALT ${extra.toBase58()} not found`);
+      lookupTables.push(r.value);
+    }
 
     // 11. Pre-swap out-vault snapshot for outAmount calc.
     const outVaultPda = vaultPda(poolProgramId, req.outMint);
@@ -811,7 +822,7 @@ export class B402Solana {
         payerKey: this.relayer.publicKey,
         recentBlockhash: blockhash,
         instructions: [cuIx, poolIx, nullifierIx],
-      }).compileToV0Message([lookupTable]);
+      }).compileToV0Message(lookupTables);
       const vtx = new VersionedTransaction(msg);
       vtx.sign([this.relayer]);
 
