@@ -53,7 +53,7 @@ export const JUPITER_V6_PROGRAM_ID = 'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV
  * Regenerate with `pnpm --filter=@b402ai/solana-examples alt create`.
  */
 export const B402_ALT_DEVNET = '9FPYufa1KDkrn1VgfjkR7R667hbnTA7CNtmy38QcsuNj';
-export const B402_ALT_MAINNET = '' as const; // populated at mainnet launch
+export const B402_ALT_MAINNET = '3TSPLsa8aM5Xg9n8EHMuV5SK85RuMP96veFjv4BVrK9f' as const;
 
 /** Known mainnet mints we ship support for in v1. */
 export const MAINNET_MINTS = {
