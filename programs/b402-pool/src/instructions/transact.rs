@@ -14,9 +14,9 @@
 //! binding logic — all unchanged from v1 transact.
 
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::sysvar::instructions::{
-    self, load_current_index_checked,
-};
+use anchor_lang::solana_program::sysvar::instructions::{self};
+#[cfg(not(feature = "inline_cpi_nullifier"))]
+use anchor_lang::solana_program::sysvar::instructions::load_current_index_checked;
 use anchor_spl::token::Token;
 
 use crate::constants::{
@@ -48,6 +48,10 @@ pub struct TransactArgs {
     pub encrypted_notes: Vec<EncryptedNote>, // must be ≤ 2 entries
     pub in_dummy_mask: u8,
     pub out_dummy_mask: u8,
+    /// Phase 7 (`inline_cpi_nullifier`) ONLY. See
+    /// `unshield::UnshieldArgs::nullifier_cpi_payloads` for layout.
+    #[cfg(feature = "inline_cpi_nullifier")]
+    pub nullifier_cpi_payloads: Vec<Vec<u8>>,
 }
 
 #[derive(Accounts)]
@@ -84,7 +88,10 @@ pub struct Transact<'info> {
 }
 
 #[inline(never)]
-pub fn handler(ctx: Context<Transact>, args: TransactArgs) -> Result<()> {
+pub fn handler<'info>(
+    ctx: Context<'_, '_, '_, 'info, Transact<'info>>,
+    args: TransactArgs,
+) -> Result<()> {
     require!(args.proof.len() == 256, PoolError::InvalidInstructionData);
     require!(
         args.encrypted_notes.len() <= 2,
@@ -139,31 +146,84 @@ pub fn handler(ctx: Context<Transact>, args: TransactArgs) -> Result<()> {
         &public_inputs,
     )?;
 
-    // Sibling-ix check: for each non-dummy nullifier, find the matching
-    // b402_nullifier::create_nullifier ix in this tx. Light's verifier
-    // (called by that sibling ix) will reject double-spends — this check
-    // only enforces presence. Walk forward from the current ix.
-    let ix_sysvar = &ctx.accounts.instructions_sysvar;
-    let current_ix_index = load_current_index_checked(ix_sysvar)? as usize;
-    let mut search_from = current_ix_index + 1;
     let clock = Clock::get()?;
-    for i in 0..2 {
-        let is_dummy = (args.in_dummy_mask >> i) & 1 == 1;
-        if is_dummy {
-            continue;
+
+    // Nullifier write — sibling-ix path (v2.1) or inline CPI (Phase 7).
+    // See `unshield.rs` and `adapt_execute.rs` for the rationale; this
+    // handler keeps the same dual-mode pattern so all three call sites
+    // stay in sync.
+    #[cfg(not(feature = "inline_cpi_nullifier"))]
+    {
+        let ix_sysvar = &ctx.accounts.instructions_sysvar;
+        let current_ix_index = load_current_index_checked(ix_sysvar)? as usize;
+        let mut search_from = current_ix_index + 1;
+        for i in 0..2 {
+            let is_dummy = (args.in_dummy_mask >> i) & 1 == 1;
+            if is_dummy {
+                continue;
+            }
+            let found_at = util::verify_nullifier_ix_in_tx(
+                ix_sysvar,
+                &B402_NULLIFIER_PROGRAM_ID,
+                &pi.nullifier[i],
+                search_from,
+            )?;
+            search_from = found_at + 1;
+            emit!(NullifierSpent {
+                nullifier: pi.nullifier[i],
+                shard: 0,
+                slot: clock.slot
+            });
         }
-        let found_at = util::verify_nullifier_ix_in_tx(
-            ix_sysvar,
-            &B402_NULLIFIER_PROGRAM_ID,
-            &pi.nullifier[i],
-            search_from,
-        )?;
-        search_from = found_at + 1; // next nullifier search past this match
-        emit!(NullifierSpent {
-            nullifier: pi.nullifier[i],
-            shard: 0, // legacy field; meaningful only for v1, kept for event ABI compat
-            slot: clock.slot
-        });
+    }
+    #[cfg(feature = "inline_cpi_nullifier")]
+    {
+        use super::nullifier_cpi::{invoke_create_nullifier, B402_NULLIFIER_PROGRAM_ID as INLINE_NULL_PID};
+        const ACCT_PER_NULL: usize = 10;
+
+        let remaining = ctx.remaining_accounts;
+        require!(!remaining.is_empty(), PoolError::NullifierIxMalformed);
+        let nullifier_program = &remaining[0];
+        require!(
+            nullifier_program.key == &INLINE_NULL_PID,
+            PoolError::NullifierIxMalformed
+        );
+
+        let real_count = (0..2)
+            .filter(|i| (args.in_dummy_mask >> i) & 1 == 0)
+            .count();
+        require!(
+            args.nullifier_cpi_payloads.len() == real_count,
+            PoolError::NullifierIxMalformed
+        );
+        require!(
+            remaining.len() >= 1 + real_count * ACCT_PER_NULL,
+            PoolError::NullifierIxMalformed
+        );
+
+        let mut payload_idx = 0usize;
+        let mut acct_cursor = 1usize;
+        for i in 0..2 {
+            let is_dummy = (args.in_dummy_mask >> i) & 1 == 1;
+            if is_dummy {
+                continue;
+            }
+            let payload = &args.nullifier_cpi_payloads[payload_idx];
+            payload_idx += 1;
+            let null_accts = &remaining[acct_cursor..acct_cursor + ACCT_PER_NULL];
+            acct_cursor += ACCT_PER_NULL;
+            invoke_create_nullifier(
+                nullifier_program,
+                null_accts,
+                payload,
+                &pi.nullifier[i],
+            )?;
+            emit!(NullifierSpent {
+                nullifier: pi.nullifier[i],
+                shard: 0,
+                slot: clock.slot
+            });
+        }
     }
 
     // Ordering: if both real, nullifier[0] < nullifier[1].

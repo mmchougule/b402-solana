@@ -18,6 +18,14 @@ default = []
 # MUST NOT be enabled in devnet or mainnet builds. CI turns it on only for
 # running the adapt-delta invariant tests against litesvm.
 test-mock = []
+# Phase 7: pool CPIs into b402_nullifier::create_nullifier instead of relying
+# on a sibling ix verified through the instructions sysvar. Cuts ~150 wire B
+# (full b402_nullifier sibling ix preamble) per unshield/swap/lend tx.
+# Pairs with `b402-nullifier --features cpi-only`. Both programs MUST be
+# upgraded together: pool inline + nullifier sibling-mode crashes (no
+# instructions sysvar in inner CPI), and pool sibling + nullifier cpi-only
+# crashes (caller-program check rejects non-pool callers).
+inline_cpi_nullifier = []
 
 [dependencies]
 anchor-lang = { workspace = true, features = ["init-if-needed"] }

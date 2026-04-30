@@ -90,6 +90,13 @@ pub struct AdaptExecuteArgs {
     /// keccak256(action_payload) mod p and checks it matches the
     /// circuit's action_hash public input.
     pub action_payload: Vec<u8>,
+    /// Phase 7 (`inline_cpi_nullifier`) ONLY: per-non-dummy-nullifier
+    /// validity-proof + address-tree-info bytes. See
+    /// `unshield::UnshieldArgs::nullifier_cpi_payloads` for the layout
+    /// (134 B per entry). v2.1 builds (sibling-ix) do not carry this on
+    /// the wire — the field is feature-gated.
+    #[cfg(feature = "inline_cpi_nullifier")]
+    pub nullifier_cpi_payloads: Vec<Vec<u8>>,
 }
 
 #[derive(Accounts)]
@@ -335,11 +342,21 @@ pub fn handler<'info>(
 
     let clock = Clock::get()?;
 
-    // v2: sibling-ix nullifier verification. Walk forward through the tx's
-    // instructions sysvar; for each non-dummy nullifier expect a matching
-    // b402_nullifier::create_nullifier ix (which lands the nullifier in
-    // Light's address tree). Light's verifier rejects double-spends —
-    // this check just enforces presence.
+    // Nullifier insert into Light's address tree V2.
+    //
+    // v2.1 default (sibling-ix): walk the instructions sysvar; for each
+    // non-dummy nullifier confirm a matching b402_nullifier::create_nullifier
+    // ix is present in the same atomic tx.
+    //
+    // Phase 7 (`inline_cpi_nullifier`): pool CPIs into b402_nullifier
+    // directly. `remaining_accounts` layout in this mode:
+    //   [0]                       = b402_nullifier program AccountInfo
+    //   [1 .. 1+ACCT*real_count]  = b402_nullifier accounts (9 per real slot)
+    //   [1+ACCT*real_count ..]    = adapter-specific remaining accounts
+    //                                (forwarded verbatim to the adapter CPI)
+    // The adapter-CPI section is sliced AFTER the nullifier section below.
+    let nullifier_remaining_consumed: usize;
+    #[cfg(not(feature = "inline_cpi_nullifier"))]
     {
         use anchor_lang::solana_program::sysvar::instructions::load_current_index_checked;
         let ix_sysvar = &ctx.accounts.instructions_sysvar;
@@ -363,6 +380,60 @@ pub fn handler<'info>(
                 slot: clock.slot,
             });
         }
+        nullifier_remaining_consumed = 0;
+    }
+    #[cfg(feature = "inline_cpi_nullifier")]
+    {
+        use super::nullifier_cpi::{invoke_create_nullifier, B402_NULLIFIER_PROGRAM_ID};
+        // 1 payer + 1 ix sysvar + 8 Light accounts = 10 per nullifier insert
+        // (matches `b402_nullifier --features cpi-only` Accounts layout).
+        const ACCT_PER_NULL: usize = 10;
+
+        let remaining = ctx.remaining_accounts;
+        require!(!remaining.is_empty(), PoolError::NullifierIxMalformed);
+        let nullifier_program = &remaining[0];
+        require!(
+            nullifier_program.key == &B402_NULLIFIER_PROGRAM_ID,
+            PoolError::NullifierIxMalformed
+        );
+
+        let real_count = (0..2)
+            .filter(|i| (args.in_dummy_mask >> i) & 1 == 0)
+            .count();
+        require!(
+            args.nullifier_cpi_payloads.len() == real_count,
+            PoolError::NullifierIxMalformed
+        );
+        require!(
+            remaining.len() >= 1 + real_count * ACCT_PER_NULL,
+            PoolError::NullifierIxMalformed
+        );
+
+        let mut payload_idx = 0usize;
+        let mut acct_cursor = 1usize;
+        for i in 0..2 {
+            let is_dummy = (args.in_dummy_mask >> i) & 1 == 1;
+            if is_dummy {
+                continue;
+            }
+            let payload = &args.nullifier_cpi_payloads[payload_idx];
+            payload_idx += 1;
+            let null_accts = &remaining[acct_cursor..acct_cursor + ACCT_PER_NULL];
+            acct_cursor += ACCT_PER_NULL;
+            invoke_create_nullifier(
+                nullifier_program,
+                null_accts,
+                payload,
+                &pi.nullifier[i],
+            )?;
+            emit!(NullifierSpent {
+                nullifier: pi.nullifier[i],
+                shard: 0, // legacy field
+                slot: clock.slot,
+            });
+        }
+
+        nullifier_remaining_consumed = 1 + real_count * ACCT_PER_NULL;
     }
 
     // Pool transfers public_amount_in to adapter_in_ta (pool PDA signs the vault).
@@ -404,8 +475,14 @@ pub fn handler<'info>(
     let pre = ctx.accounts.out_vault.amount;
 
     // Build + CPI adapter. Unified ABI: six named accounts, then remaining.
+    //
+    // In `inline_cpi_nullifier` builds, the front of `remaining_accounts`
+    // belongs to the b402_nullifier CPI block above; only the tail past
+    // `nullifier_remaining_consumed` is forwarded to the adapter.
+    let adapter_remaining = &ctx.remaining_accounts[nullifier_remaining_consumed..];
+
     let adapter_metas: Vec<AccountMeta> = {
-        let mut m = Vec::with_capacity(6 + ctx.remaining_accounts.len());
+        let mut m = Vec::with_capacity(6 + adapter_remaining.len());
         m.push(AccountMeta::new_readonly(
             ctx.accounts.adapter_authority.key(),
             false,
@@ -418,7 +495,7 @@ pub fn handler<'info>(
             ctx.accounts.token_program.key(),
             false,
         ));
-        for a in ctx.remaining_accounts.iter() {
+        for a in adapter_remaining.iter() {
             if a.is_writable {
                 m.push(AccountMeta::new(*a.key, a.is_signer));
             } else {
@@ -428,14 +505,14 @@ pub fn handler<'info>(
         m
     };
     let mut adapter_infos: Vec<AccountInfo<'info>> =
-        Vec::with_capacity(6 + ctx.remaining_accounts.len());
+        Vec::with_capacity(6 + adapter_remaining.len());
     adapter_infos.push(ctx.accounts.adapter_authority.to_account_info());
     adapter_infos.push(ctx.accounts.in_vault.to_account_info());
     adapter_infos.push(ctx.accounts.out_vault.to_account_info());
     adapter_infos.push(ctx.accounts.adapter_in_ta.to_account_info());
     adapter_infos.push(ctx.accounts.adapter_out_ta.to_account_info());
     adapter_infos.push(ctx.accounts.token_program.to_account_info());
-    for a in ctx.remaining_accounts.iter() {
+    for a in adapter_remaining.iter() {
         adapter_infos.push(a.clone());
     }
 

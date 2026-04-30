@@ -23,6 +23,21 @@ pub struct UnshieldArgs {
     pub in_dummy_mask: u8,
     pub out_dummy_mask: u8,
     pub relayer_fee_recipient: Pubkey,
+    /// Phase 7 (`inline_cpi_nullifier`) ONLY: per-non-dummy-nullifier
+    /// validity-proof + address-tree-info bytes. Each entry is exactly 134
+    /// bytes:
+    ///   [proof Borsh 129][PackedAddressTreeInfo 4][output_state_tree_index 1].
+    /// Encoded length matches what `b402_nullifier::create_nullifier` expects
+    /// after its 8 B Anchor discriminator and before the 32 B `id`.
+    ///
+    /// Field is feature-gated, so the v2.1 mainnet build (sibling-ix) does
+    /// NOT carry it on the wire — preserving the on-chain ABI of the
+    /// already-deployed program. The SDK gates the same way (omit when not
+    /// in inline mode, append when targeting an inline-mode pool). Pool +
+    /// SDK MUST be upgraded together; the deploy script in
+    /// `docs/prds/PHASE-7-HANDOFF.md` walks through the order.
+    #[cfg(feature = "inline_cpi_nullifier")]
+    pub nullifier_cpi_payloads: Vec<Vec<u8>>,
 }
 
 #[derive(Accounts)]
@@ -86,7 +101,10 @@ pub struct Unshield<'info> {
 }
 
 #[inline(never)]
-pub fn handler(ctx: Context<Unshield>, args: UnshieldArgs) -> Result<()> {
+pub fn handler<'info>(
+    ctx: Context<'_, '_, '_, 'info, Unshield<'info>>,
+    args: UnshieldArgs,
+) -> Result<()> {
     require!(args.proof.len() == 256, PoolError::InvalidInstructionData);
     require!(
         args.encrypted_notes.len() <= 2,
@@ -187,7 +205,19 @@ pub fn handler(ctx: Context<Unshield>, args: UnshieldArgs) -> Result<()> {
 
     let clock = Clock::get()?;
 
-    // v2: sibling-ix nullifier verification.
+    // Nullifier insert into Light's address tree V2.
+    //
+    // v2.1 default (sibling-ix): walk the instructions sysvar; for each
+    // non-dummy nullifier, find the matching b402_nullifier::create_nullifier
+    // ix in the same atomic tx and assert its `id` arg matches. Light's
+    // verifier does the actual double-spend rejection.
+    //
+    // Phase 7 (`inline_cpi_nullifier`): pool CPIs into b402_nullifier
+    // directly, ~150 wire-bytes cheaper. The 9 nullifier accounts ride on
+    // `remaining_accounts`; per-nullifier proof + tree info bytes ride in
+    // `args.nullifier_cpi_payloads`. The first remaining_accounts slot must
+    // be the b402_nullifier program account itself.
+    #[cfg(not(feature = "inline_cpi_nullifier"))]
     {
         use anchor_lang::solana_program::sysvar::instructions::load_current_index_checked;
         let ix_sysvar = &ctx.accounts.instructions_sysvar;
@@ -205,6 +235,62 @@ pub fn handler(ctx: Context<Unshield>, args: UnshieldArgs) -> Result<()> {
                 search_from,
             )?;
             search_from = found_at + 1;
+            emit!(NullifierSpent {
+                nullifier: pi.nullifier[i],
+                shard: 0,
+                slot: clock.slot
+            });
+        }
+    }
+    #[cfg(feature = "inline_cpi_nullifier")]
+    {
+        use super::nullifier_cpi::{invoke_create_nullifier, B402_NULLIFIER_PROGRAM_ID};
+
+        // Slice layout in `remaining_accounts` (built by the SDK):
+        //   [0]                 = b402_nullifier program AccountInfo
+        //   [1 .. 1+ACCT]       = nullifier accounts for slot 0 (if real)
+        //   [1+ACCT .. 1+2*ACCT] = nullifier accounts for slot 1 (if real)
+        // ACCT = 9 (matches buildCreateNullifierIx's account count).
+        // 1 payer + 1 ix sysvar + 8 Light accounts = 10 per nullifier insert
+        // when callee is `b402_nullifier --features cpi-only`.
+        const ACCT_PER_NULL: usize = 10;
+        let remaining = ctx.remaining_accounts;
+        require!(!remaining.is_empty(), PoolError::NullifierIxMalformed);
+        let nullifier_program = &remaining[0];
+        require!(
+            nullifier_program.key == &B402_NULLIFIER_PROGRAM_ID,
+            PoolError::NullifierIxMalformed
+        );
+
+        let real_count = (0..2)
+            .filter(|i| (args.in_dummy_mask >> i) & 1 == 0)
+            .count();
+        require!(
+            args.nullifier_cpi_payloads.len() == real_count,
+            PoolError::NullifierIxMalformed
+        );
+        require!(
+            remaining.len() >= 1 + real_count * ACCT_PER_NULL,
+            PoolError::NullifierIxMalformed
+        );
+
+        let mut payload_idx = 0usize;
+        let mut acct_cursor = 1usize;
+        for i in 0..2 {
+            let is_dummy = (args.in_dummy_mask >> i) & 1 == 1;
+            if is_dummy {
+                continue;
+            }
+            let payload = &args.nullifier_cpi_payloads[payload_idx];
+            payload_idx += 1;
+            let null_accts = &remaining[acct_cursor..acct_cursor + ACCT_PER_NULL];
+            acct_cursor += ACCT_PER_NULL;
+            invoke_create_nullifier(
+                nullifier_program,
+                null_accts,
+                payload,
+                &pi.nullifier[i],
+            )?;
             emit!(NullifierSpent {
                 nullifier: pi.nullifier[i],
                 shard: 0,

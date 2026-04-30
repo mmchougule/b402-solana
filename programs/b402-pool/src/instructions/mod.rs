@@ -6,6 +6,11 @@ pub mod transact;
 pub mod unshield;
 pub mod verifier_cpi;
 
+// Phase 7: pool→b402_nullifier CPI helper. Compiled only when the
+// `inline_cpi_nullifier` feature is enabled. The sibling-ix path (today's
+// mainnet) keeps using `util::verify_nullifier_ix_in_tx`.
+pub mod nullifier_cpi;
+
 // TEST-ONLY MODULE: the `check_adapter_delta_mock` HANDLER (in lib.rs) is
 // gated behind `--features test-mock` so it can't be called. The types +
 // helper fn are always compiled so Anchor's `#[program]` macro codegen can

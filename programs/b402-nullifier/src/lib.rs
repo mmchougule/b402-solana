@@ -52,6 +52,21 @@ pub const LIGHT_CPI_SIGNER: CpiSigner =
 /// Mirrors `DomainTags.nullifier = 'b402/v1/null'` in shared/constants.ts.
 pub const SEED_NULL: &[u8] = b"b402/v1/null";
 
+/// Phase 7 (`cpi-only`): the only program permitted to CPI `create_nullifier`.
+/// Bytes match `programs/b402-pool/src/instructions/transact.rs::B402_NULLIFIER_PROGRAM_ID`'s
+/// counterpart (b402_pool's deployed program ID, base58
+/// `42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y`). Pool is the caller, this
+/// program is the callee — the constant naming reflects "pool program ID,
+/// as seen from b402_nullifier".
+#[cfg(feature = "cpi-only")]
+pub const B402_POOL_PROGRAM_ID: anchor_lang::solana_program::pubkey::Pubkey =
+    anchor_lang::solana_program::pubkey::Pubkey::new_from_array([
+        44, 250, 1, 237, 166, 224, 6, 72,
+        104, 142, 129, 186, 150, 124, 135, 38,
+        147, 149, 9, 35, 207, 145, 230, 13,
+        248, 105, 140, 166, 50, 208, 195, 22,
+    ]);
+
 #[program]
 pub mod b402_nullifier {
 
@@ -70,6 +85,34 @@ pub mod b402_nullifier {
         output_state_tree_index: u8,
         id: [u8; 32],
     ) -> Result<()> {
+        // Phase 7 (`cpi-only`): refuse all top-level invocations and any CPI
+        // whose top-level caller is not b402_pool. Defence-in-depth on top
+        // of the address-derivation isolation noted in the file header.
+        //
+        // We use `get_stack_height()` (Solana runtime) — returns 1 for the
+        // top-level ix, ≥ 2 for any CPI. When CPI'd, the instructions sysvar
+        // (passed in the `ix_sysvar` account slot) lets us look up the
+        // top-level ix's `program_id`.
+        #[cfg(feature = "cpi-only")]
+        {
+            use anchor_lang::solana_program::instruction::get_stack_height;
+            use anchor_lang::solana_program::sysvar::instructions::{
+                load_current_index_checked, load_instruction_at_checked,
+            };
+            // Stack height 1 = top-level dispatch. Reject — only CPIs allowed.
+            require!(
+                get_stack_height() > 1,
+                B402NullifierError::DirectCallRejected
+            );
+            let ix_sysvar = &ctx.accounts.ix_sysvar;
+            let current_idx = load_current_index_checked(ix_sysvar)? as usize;
+            let outer_ix = load_instruction_at_checked(current_idx, ix_sysvar)?;
+            require!(
+                outer_ix.program_id == crate::B402_POOL_PROGRAM_ID,
+                B402NullifierError::CallerNotB402Pool
+            );
+        }
+
         let light_cpi_accounts = CpiAccounts::new(
             ctx.accounts.signer.as_ref(),
             ctx.remaining_accounts,
@@ -115,12 +158,25 @@ pub struct CreateNullifier<'info> {
     /// signer because Light's system program checks it on the inner CPI.
     #[account(mut)]
     pub signer: Signer<'info>,
+    /// Phase 7 (`cpi-only`): instructions sysvar. Pool reads the top-level
+    /// ix from this sysvar to confirm the caller program_id is b402_pool.
+    /// Required only in `cpi-only` builds — the sibling-ix build does not
+    /// have this field, so the deployed v2.1 program ABI is unchanged
+    /// (existing SDK builds work against the deployed nullifier program).
+    /// CHECK: address constraint enforces the canonical instructions sysvar.
+    #[cfg(feature = "cpi-only")]
+    #[account(address = anchor_lang::solana_program::sysvar::instructions::ID)]
+    pub ix_sysvar: AccountInfo<'info>,
 }
 
 #[error_code]
 pub enum B402NullifierError {
     #[msg("Address tree pubkey did not match Light's V2 address tree")]
     WrongAddressTree,
+    #[msg("create_nullifier may only be invoked via CPI (cpi-only build)")]
+    DirectCallRejected,
+    #[msg("create_nullifier caller is not b402_pool (cpi-only build)")]
+    CallerNotB402Pool,
 }
 
 #[event]
