@@ -92,21 +92,23 @@ if [[ -f "$KAMINO_CLONE_FILE" ]]; then
     KAMINO_CLONE_ARGS="$KAMINO_CLONE_ARGS --clone-upgradeable-program $p"
   done
   # NOTE: light test-validator's --validator-args forwarding has a bug above
-  # ~7 --clone flags (validator silently exits 1; photon also breaks at 8).
-  # Direct solana-test-validator handles 16+ fine. Until we drop the light
-  # wrapper (Phase 7 task A), cap at the first 7 data accounts: market,
-  # reserve, marketAuth, plus the 4 most-essential reserve-referenced
-  # accounts (liquiditySupply, kUSDC mint, collateral vault, USDC mint).
-  KAMINO_DATA_LIMIT="${KAMINO_DATA_LIMIT:-7}"
-  count=0
+  # ~7 --clone flags. Direct solana-test-validator handles 16+ fine.
+  # Until we drop the light wrapper (Phase 7 task A), prioritize the
+  # essential accounts the deposit path needs: lending market, reserve,
+  # market authority, USDC mint, USDC vault, kUSDC mint, kUSDC vault.
+  # KAMINO_ESSENTIAL_DATA env var: space-separated pubkeys to clone first.
+  # Anything not in this list is filtered out.
+  # Defaults derived for the USDC main reserve (klend mainnet, market
+  # 7u3HeH...). Pubkeys must match `kamino-clone.ts`'s discovery output.
+  KAMINO_ESSENTIAL_DATA="${KAMINO_ESSENTIAL_DATA:-7u3HeHxYDLhnCoErrtycNokbQYbWGzLs6JSDqGAv5PfF D6q6wuQSrifJKZYpR1M8R4YawnLDtDsMmWM1NbBmgJ59 9DrvZvyWh1HuAoZxvYWMvkf2XCzryCpGgHqrMjyDWpmo EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v Bgq7trRgVMeq33yt235zM2onQ4bRDBsY5EWiTetF4qw6 B8V6WVjPxW1UGwVDfxH2d2r8SyT4cqn7dQRK6XneVa7D 3DzjXRfxRm6iejfyyMynR4tScddaanrePJ1NJU2XnPPL}"
+  is_essential() {
+    for k in $KAMINO_ESSENTIAL_DATA; do [[ "$1" == "$k" ]] && return 0; done
+    return 1
+  }
   for d in $(jq -r '.data[]?' "$KAMINO_CLONE_FILE"); do
     if is_builtin "$d"; then echo "    (skip builtin account $d)"; continue; fi
-    if [[ $count -ge $KAMINO_DATA_LIMIT ]]; then
-      echo "    (skip $d — past KAMINO_DATA_LIMIT=$KAMINO_DATA_LIMIT)"
-      continue
-    fi
+    if ! is_essential "$d"; then echo "    (skip non-essential $d)"; continue; fi
     KAMINO_CLONE_ARGS="$KAMINO_CLONE_ARGS --clone $d"
-    count=$((count + 1))
   done
 fi
 
@@ -137,10 +139,20 @@ if [[ ",$LOAD_AT_BOOT," == *",mock_adapter,"* ]]; then BOOT_ARGS="$BOOT_ARGS --u
 if [[ ",$LOAD_AT_BOOT," == *",jupiter_adapter,"* ]]; then BOOT_ARGS="$BOOT_ARGS --upgradeable-program $JUPITER_ADAPTER_ID $JUPITER_ADAPTER_SO $UPGRADE_AUTH"; fi
 if [[ ",$LOAD_AT_BOOT," == *",kamino_adapter,"* ]]; then BOOT_ARGS="$BOOT_ARGS --upgradeable-program $KAMINO_ADAPTER_ID $KAMINO_ADAPTER_SO $UPGRADE_AUTH"; fi
 
+# Optional: inject a pre-funded USDC ATA so alice has spendable USDC on
+# the fork (USDC mint authority is Circle's; we can't mint locally).
+# INJECT_USDC_ATA env var: path to a `solana account --output json` file.
+# Set ALICE_USDC_ATA to the ATA pubkey too.
+INJECT_ARGS=""
+if [[ -n "${INJECT_USDC_ATA:-}" && -n "${ALICE_USDC_ATA:-}" && -f "$INJECT_USDC_ATA" ]]; then
+  INJECT_ARGS="--account $ALICE_USDC_ATA $INJECT_USDC_ATA"
+  echo "    injecting USDC ATA $ALICE_USDC_ATA from $INJECT_USDC_ATA"
+fi
+
 # Trim leading/trailing whitespace + collapse internal spaces. Empty
 # arguments crash solana-test-validator with "Found argument '' which
 # wasn't expected" — that was the actual bug masking everything else.
-VALIDATOR_ARGS=$(echo "--url mainnet-beta $KAMINO_CLONE_ARGS" | tr -s ' ' | sed 's/^ //;s/ $//')
+VALIDATOR_ARGS=$(echo "--url mainnet-beta $KAMINO_CLONE_ARGS $INJECT_ARGS" | tr -s ' ' | sed 's/^ //;s/ $//')
 
 light test-validator $BOOT_ARGS \
   --validator-args "$VALIDATOR_ARGS"

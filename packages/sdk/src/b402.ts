@@ -753,6 +753,10 @@ export class B402Solana {
       { pubkey: SYSVAR_INSTRUCTIONS, isSigner: false, isWritable: false },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      // Adapter-specific tail. Pool's adapt_execute handler forwards these
+      // verbatim to the adapter CPI as `ctx.remaining_accounts` (see
+      // programs/b402-pool/src/instructions/adapt_execute.rs:421-438).
+      ...(req.remainingAccounts ?? []),
     ];
     const poolIx = new TransactionInstruction({
       programId: poolProgramId,
