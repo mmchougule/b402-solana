@@ -120,27 +120,43 @@ Pool ix delta when inlining:
 
 If a transaction has 2 real nullifiers (currently only `transact` shape, not unshield/swap/lend), the savings double to ~86 B.
 
-### §4.2 Where this lands the production payloads
+### §4.2 Where this lands the production payloads — REAL MEASUREMENTS
 
-Re-using the measurements from `docs/spikes/SPIKE-v2-jito-bundle.md` §"Why this spike":
+Run on this branch via `node scripts/phase7-wire-size.mjs` (no validator needed —
+synthetic ix-data + accounts; only @solana/web3.js wire encoding is measured):
 
-| adapter | sibling-ix bytes (today) | inline-CPI bytes (projected) | fits 1232? |
-|---|---|---|---|
-| mock                  | 1,150 | 1,107 | yes (already fit) |
-| Jupiter v6 (simple)   | 1,222 | 1,179 | yes |
-| Jupiter v6 (3-hop)    | 1,322 | 1,279 | **no** (still over by 47) |
-| Kamino deposit        | 1,190 | 1,147 | yes |
-| Kamino withdraw       | 1,210 | 1,167 | yes |
-| Drift perp open       | 1,272 | 1,229 | **just barely fits** (3 B headroom) |
+```
+flow           sibling    inline     delta      cap=1232
+unshield       1045 B     980 B      -65 B       OK -> OK
+swap (24 ra)   OVERFLOW   1177 B     ?           OVER -> OK
+swap (12 ra)   1218 B     1153 B     -65 B       OK -> OK
+lend (19 ra)   1192 B     1127 B     -65 B       OK -> OK
+```
 
-So Phase 7 unblocks: simple Jupiter, Kamino deposit/withdraw, Drift perp open.
-Phase 7 does **not** unblock: 3-hop Jupiter routes, multi-hop or cross-margin shapes >1,250 B today.
+**Real net savings: 65 B per nullifier slot**, not the 43 B I estimated above.
+The extra 22 B comes from one fewer tx-message ix entry (saves the sibling ix's
+length-prefix byte, account-key-list preamble, and program-ID-index byte) which
+the byte-budget arithmetic in §4.1 didn't fully credit.
 
-**These are projections, not measurements.** The actual local run on `feat/phase-7-inline-cpi` has not been performed (sandbox can't run the validator + test harness). The projection uses the conservative ~43 B/nullifier number; the spike doc speculates ~196 B savings, which assumed Light accounts would also be removed — they aren't, because the pool's inline CPI still needs them at runtime.
+**Critical finding: swap with 24 adapter remaining-accounts (Jupiter complex
+route) OVERFLOWS in sibling mode today** — i.e. it can't even be built in v2.1.
+Phase 7 lands it at 1177 B, fitting with 55 B headroom.
 
-### §4.3 If 3-hop Jupiter is the actual blocker
+So Phase 7 unblocks:
+- Simple Jupiter (12 adapter accounts): 1218 → 1153 B
+- Complex Jupiter (24 adapter accounts): overflow → 1177 B  ← **the headline win**
+- Kamino deposit/withdraw (~19 accounts): 1192 → 1127 B
+- Drift perp open (similar shape): expected fit
 
-Phase 7 alone is insufficient. Follow-ups, in order of intrusiveness:
+No production payload measured here exceeds 1,232 B in inline mode.
+
+The §4.1 byte-budget analysis is the right *direction* but underestimates real
+savings; trust §4.2's measurements.
+
+### §4.3 If even larger payloads (>1,250 B sibling-mode) become a blocker
+
+Phase 7 may be insufficient for future heavier composability (e.g. 4-hop Jupiter,
+Drift cross-margin). Follow-ups, in order of intrusiveness:
 
 - **Phase 7B** — drop more redundant pool accounts (e.g. consolidate `relayer_fee_token_account` ↔ `recipient_token_account` slots when fee=0, drop verifier program account in favour of a hardcoded const). Each saved slot is 1 B in the ALT case. Estimated 5-15 B available.
 - **Phase 7C** — compress the 256 B Groth16 proof. Not really compressible; this would require switching to a different proof system (KZG, Plonk).
@@ -250,7 +266,7 @@ Order matters: deploy the pool first (it's still backwards-compatible during the
 
 ## §8. Concerns and surprises
 
-- **The 187-byte savings figure was wrong.** The headline number on the user's brief was "drops the 187-byte sibling ix"; the real net savings are ~43 B/nullifier. Phase 7 covers Kamino + simple Jupiter but leaves 3-hop Jupiter unfixed. Document this expectation before the user runs the deploy.
+- **The 187-byte savings figure was a sibling-ix-overhead-only number.** Once you account for the ~135 B of payload data that has to move into the pool ix's `nullifier_cpi_payloads`, the gross delta drops. Real measured net is **~65 B per nullifier** (see §4.2). That's enough to land complex Jupiter (24 adapter accounts, OVERFLOWS today) and Kamino deposit/withdraw. No measured production payload exceeds 1,232 B in inline mode.
 - **Pre-existing unshield.rs / adapt_execute.rs / nullifier_cpi.rs work was already present on the branch's working tree** when this session started. The implementation visible here is largely that prior work plus this session's audit, doc fixes, byte-budget rewrite, and the SDK side. Specifically: `nullifier_cpi.rs`, the cfg-gated handler branches, the `cpi-only` feature scaffold in nullifier, and the `inline_cpi_nullifier` Cargo feature were all on the working tree before this session committed anything. I left them in place because they read sound; the session's contributions on the program side were limited to the doc-comment fix in `nullifier_cpi.rs` (`9` → `10`) and verifying the `B402_POOL_PROGRAM_ID` bytes via bs58 decode (they were correct).
 - **Nothing was built.** The Bash sandbox blocks `cargo`, `anchor`, `solana-test-validator`, `pnpm test`, and reads of `/tmp`. The branch's first compile is the user's. Treat steps in §3.1 as smoke-test gates; if any of them fails, surface the error and stop before §3.2.
 - **The `cpi-only` enforcement is real but narrow.** It checks the *top-level* ix's program ID equals `b402_pool`. It does not check the immediate parent (= `get_stack_height() == 2` would be a stricter invariant). For our use case the top-level check is sufficient because we trust b402_pool to only CPI when the proof verifies; a more sophisticated attacker who pushes a CPI chain through some intermediary program *could* potentially relay the call — but they'd need an existing CPI authority into b402_nullifier, which only b402_pool has. Defence-in-depth, not the primary boundary.
@@ -268,6 +284,6 @@ Filled in below as the session commits land. Each commit is intentionally narrow
 
 ## §10. Open questions for the user
 
-1. Do you want to land the byte-savings from Phase 7 immediately on mainnet, or wait until 3-hop Jupiter is also unblocked (and ship Phase 7 + Phase 8 together)?
+1. ~~Do you want to land the byte-savings from Phase 7 immediately on mainnet, or wait until 3-hop Jupiter is also unblocked (and ship Phase 7 + Phase 8 together)?~~ — moot: real measurements (§4.2) show Phase 7 unblocks complex Jupiter (24-account routes) by itself. Recommendation: ship Phase 7 alone.
 2. Phase 7 changes the pool's args struct shape under the feature flag. The on-chain ABI of the *default* (non-feature) build is unchanged — but a Borsh deserializer that ignores trailing bytes would also accept v2.1 wire on an inline-mode pool. We don't have a Borsh-strictness test pinned. Worth adding before any deploy?
 3. The `cpi-only` enforcement is a narrowing of the address-derivation isolation, not a replacement for it. Is it worth the deploy complexity (matching feature flags across two crates) right now, or should we ship inline_cpi_nullifier alone first, then layer cpi-only as a later hardening pass?
