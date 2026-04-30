@@ -182,3 +182,75 @@ function encodeAddressTreeInfo(info: {
   buf.writeUInt16LE(info.rootIndex, 2);
   return buf;
 }
+
+// ---------- Phase 7 helpers ----------
+
+/**
+ * Phase 7 inline-CPI mode — pool builds the inner b402_nullifier ix itself.
+ * The pool ix carries this opaque 134-byte payload per non-dummy nullifier.
+ * Layout (matches `programs/b402-pool/src/instructions/nullifier_cpi.rs`):
+ *   [0..129)   ValidityProof Borsh   (1 + 32 + 64 + 32)
+ *   [129..133) PackedAddressTreeInfo (4 bytes)
+ *   [133..134) output_state_tree_index (1 byte)
+ * The 8 B Anchor discriminator and the 32 B id are appended on-chain by
+ * `nullifier_cpi::build_inner_ix_data`. SDK stays out of that wire.
+ */
+export function buildNullifierCpiPayload(proof: NullifierProof): Buffer {
+  const payload = Buffer.concat([
+    encodeProof(proof.proof),
+    encodeAddressTreeInfo(proof.addressTreeInfo),
+    Buffer.from([proof.outputStateTreeIndex]),
+  ]);
+  if (payload.length !== 134) {
+    throw new Error(`buildNullifierCpiPayload: expected 134 B, got ${payload.length}`);
+  }
+  return payload;
+}
+
+/** Sysvar instructions account — needed in cpi-only b402_nullifier so the
+ *  callee can read the top-level ix's program_id and reject non-pool
+ *  callers. */
+const SYSVAR_INSTRUCTIONS_PUBKEY = new PublicKey(
+  'Sysvar1nstructions1111111111111111111111111',
+);
+
+/**
+ * Phase 7 inline-CPI mode — the 10 accounts the pool's CPI into
+ * `b402_nullifier::create_nullifier` (built with `--features cpi-only`) must
+ * forward, in the exact positional order
+ * `programs/b402-nullifier/src/lib.rs::CreateNullifier` expects:
+ *
+ *   [0] payer (signer, writable)
+ *   [1] instructions sysvar
+ *   [2] light_system_program
+ *   [3] cpi_authority (b402_nullifier PDA)
+ *   [4] registered_program_pda
+ *   [5] account_compression_authority
+ *   [6] account_compression_program
+ *   [7] system_program
+ *   [8] address_tree (writable)
+ *   [9] output_queue (writable)
+ *
+ * Returns plain web3.js AccountMetas. Pool prepends the b402_nullifier
+ * program account separately at remaining_accounts[0] of its own ix; the
+ * 10 accounts here come immediately after, repeated per non-dummy
+ * nullifier slot.
+ */
+export function buildNullifierCpiAccounts(
+  payer: PublicKey,
+  proof: NullifierProof,
+): AccountMeta[] {
+  const sys = stateless.defaultStaticAccountsStruct();
+  return [
+    { pubkey: payer, isSigner: true, isWritable: true },
+    { pubkey: SYSVAR_INSTRUCTIONS_PUBKEY, isSigner: false, isWritable: false },
+    { pubkey: stateless.LightSystemProgram.programId, isSigner: false, isWritable: false },
+    { pubkey: CPI_AUTHORITY, isSigner: false, isWritable: false },
+    { pubkey: sys.registeredProgramPda, isSigner: false, isWritable: false },
+    { pubkey: sys.accountCompressionAuthority, isSigner: false, isWritable: false },
+    { pubkey: sys.accountCompressionProgram, isSigner: false, isWritable: false },
+    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    { pubkey: proof.addressTree, isSigner: false, isWritable: true },
+    { pubkey: proof.outputQueue, isSigner: false, isWritable: true },
+  ];
+}

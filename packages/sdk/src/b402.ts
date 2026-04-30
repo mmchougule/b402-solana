@@ -65,7 +65,13 @@ import { buildZeroCache, proveMostRecentLeaf } from './merkle.js';
 import { commitmentHash, feeBindHash, nullifierHash, poseidonTagged } from './poseidon.js';
 import { encryptNote } from './note-encryption.js';
 import { B402Error, B402ErrorCode } from './errors.js';
-import { buildCreateNullifierIx, getValidityProofForNullifier } from './light-nullifier.js';
+import {
+  B402_NULLIFIER_PROGRAM_ID,
+  buildCreateNullifierIx,
+  buildNullifierCpiAccounts,
+  buildNullifierCpiPayload,
+  getValidityProofForNullifier,
+} from './light-nullifier.js';
 
 const SYSVAR_INSTRUCTIONS = new PublicKey('Sysvar1nstructions1111111111111111111111111');
 
@@ -99,6 +105,19 @@ export interface B402SolanaConfig {
   relayerHttpUrl?: string;
   /** Optional API key forwarded as `Authorization: Bearer <key>` to the relayer. */
   relayerApiKey?: string;
+  /**
+   * Phase 7: when **true**, build unshield/privateSwap/transact txs with
+   * pool→b402_nullifier as a CPI instead of a sibling ix. Cuts ~150 wire
+   * bytes per nullifier. ONLY safe when both deployed programs were built
+   * with the matching feature flag (`b402_pool --features inline_cpi_nullifier`
+   * + `b402_nullifier --features cpi-only`). Default **false** preserves
+   * the v2.1 wire format that today's mainnet build expects.
+   *
+   * Per-call override: `UnshieldRequest.inlineCpiNullifier` and
+   * `PrivateSwapRequest.inlineCpiNullifier` win over this class-level
+   * default when set.
+   */
+  inlineCpiNullifier?: boolean;
 }
 
 export interface ShieldRequest {
@@ -161,6 +180,9 @@ export interface PrivateSwapRequest {
    * relevant entries in the ALT for the tx to fit under the 1232-byte cap.
    */
   remainingAccounts?: Array<{ pubkey: PublicKey; isSigner: boolean; isWritable: boolean }>;
+  /** Phase 7 per-call override of `B402SolanaConfig.inlineCpiNullifier`.
+   *  See its docs. */
+  inlineCpiNullifier?: boolean;
 }
 
 export interface PrivateSwapResult {
@@ -192,6 +214,8 @@ export interface UnshieldRequest {
   /** v2 ALT: required to fit the unshield + b402_nullifier sibling ixs
    *  under Solana's 1232 B v0-tx cap. See PRD-30. */
   alt?: PublicKey;
+  /** Phase 7 per-call override of `B402SolanaConfig.inlineCpiNullifier`. */
+  inlineCpiNullifier?: boolean;
 }
 
 export class B402Solana {
@@ -203,6 +227,7 @@ export class B402Solana {
   readonly notesPersistDir: string | undefined;
   readonly relayerHttpUrl: string | undefined;
   readonly relayerApiKey: string | undefined;
+  readonly inlineCpiNullifier: boolean;
   private _relayerHttp: { client: import('./relayer-http.js').RelayerHttpClient } | null = null;
 
   private _wallet: Wallet | null = null;
@@ -228,6 +253,7 @@ export class B402Solana {
     this.notesPersistDir = config.notesPersistDir;
     this.relayerHttpUrl = config.relayerHttpUrl;
     this.relayerApiKey = config.relayerApiKey;
+    this.inlineCpiNullifier = config.inlineCpiNullifier ?? false;
 
     if (config.prover) {
       this._prover = config.prover;
@@ -523,6 +549,7 @@ export class B402Solana {
       relayer: this.relayer,
       photonRpc: req.photonRpc,
       alt: req.alt,
+      inlineNullifierCpi: req.inlineCpiNullifier ?? this.inlineCpiNullifier,
       ...(this._relayerHttp ? { relayerHttp: this._relayerHttp.client } : {}),
     });
 
@@ -710,12 +737,28 @@ export class B402Solana {
     )[0];
     const feeAtaSentinel = await getAssociatedTokenAddress(req.inMint, relayerPubkey);
 
-    // 9. Pool ix data — adapt_execute layout (v2.1 wire-slim).
+    // Resolve effective inline-CPI mode (per-call > class > default false).
+    const inlineNullifierCpi = req.inlineCpiNullifier ?? this.inlineCpiNullifier;
+
+    // 9. Fetch validity proof first — it's needed by both the sibling ix
+    //    (legacy mainnet path) and the inline-CPI payload (Phase 7 path).
+    if (!req.photonRpc) {
+      throw new B402Error(
+        B402ErrorCode.InvalidConfig,
+        'privateSwap: v2 requires `photonRpc` (stateless.js Rpc client). See PRD-30 §3.6.',
+      );
+    }
+    const validityProof = await getValidityProofForNullifier(req.photonRpc, nullifierLe);
+
+    // 9a. Pool ix data — adapt_execute layout (v2.1 wire-slim).
     //    Dropped fields (still in the proof, derived on-chain from accounts):
     //      - public_token_mint  → token_config_in.mint
     //      - expected_out_mint  → token_config_out.mint
     //    Saves 64 wire bytes; lets v0+ALT swap/lend tx fit under 1232 B.
-    const poolIxData = concat(
+    //    Phase 7 (`inlineNullifierCpi`): appends `nullifier_cpi_payloads:
+    //    Vec<Vec<u8>>` after `action_payload`. mask 0b10 → 1 real nullifier
+    //    slot → outer vec len = 1, single 134 B inner payload.
+    const poolIxParts: Uint8Array[] = [
       instructionDiscriminator('adapt_execute'),
       vecU8(proof.proofBytes),
       proof.publicInputsLeBytes[0], // merkle_root
@@ -738,7 +781,25 @@ export class B402Solana {
       relayerPubkey.toBytes(),
       vecU8(adapterIxData),
       vecU8(actionPayload),
-    );
+    ];
+    if (inlineNullifierCpi) {
+      // Vec<Vec<u8>> outer-len then per-entry vecU8 (1 real slot only).
+      poolIxParts.push(u32Le(1));
+      poolIxParts.push(vecU8(buildNullifierCpiPayload(validityProof)));
+    }
+    const poolIxData = concat(...poolIxParts);
+
+    // Inline-mode prefix that goes into `remaining_accounts` BEFORE the
+    // adapter-specific accounts. Pool's adapt_execute slices off
+    // `1 + 10 * real_nullifier_count` from the front for the b402_nullifier
+    // CPIs, then forwards the tail to the adapter CPI verbatim. Order MUST
+    // match `programs/b402-pool/src/instructions/adapt_execute.rs` slicing.
+    const inlineNullifierPrefix = inlineNullifierCpi
+      ? [
+          { pubkey: B402_NULLIFIER_PROGRAM_ID, isSigner: false, isWritable: false },
+          ...buildNullifierCpiAccounts(relayerPubkey, validityProof),
+        ]
+      : [];
 
     const poolIxKeys = [
       { pubkey: relayerPubkey, isSigner: true, isWritable: true },
@@ -758,9 +819,12 @@ export class B402Solana {
       { pubkey: SYSVAR_INSTRUCTIONS, isSigner: false, isWritable: false },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-      // Adapter-specific tail. Pool's adapt_execute handler forwards these
-      // verbatim to the adapter CPI as `ctx.remaining_accounts` (see
-      // programs/b402-pool/src/instructions/adapt_execute.rs:421-438).
+      // remaining_accounts: inline nullifier block (Phase 7 only) then
+      // adapter-specific entries. Pool's adapt_execute handler forwards
+      // the adapter section verbatim to the adapter CPI as
+      // `ctx.remaining_accounts` (see programs/b402-pool/src/instructions/
+      // adapt_execute.rs:421-438).
+      ...inlineNullifierPrefix,
       ...(req.remainingAccounts ?? []),
     ];
     const poolIx = new TransactionInstruction({
@@ -770,18 +834,13 @@ export class B402Solana {
     });
     const cuIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 });
 
-    // 9b. v2 nullifier write — fetch validity proof from Photon and build
-    //     the b402_nullifier::create_nullifier sibling ix for the real
-    //     nullifier slot. mask 0b10 → slot 0 is real, slot 1 is dummy
-    //     (zero), so we need exactly one sibling ix.
-    if (!req.photonRpc) {
-      throw new B402Error(
-        B402ErrorCode.InvalidConfig,
-        'privateSwap: v2 requires `photonRpc` (stateless.js Rpc client). See PRD-30 §3.6.',
-      );
-    }
-    const validityProof = await getValidityProofForNullifier(req.photonRpc, nullifierLe);
-    const nullifierIx = buildCreateNullifierIx(relayerPubkey, nullifierLe, validityProof);
+    // 9b. Build the sibling create_nullifier ix in legacy mode. In inline
+    //     mode the pool builds + invokes the inner ix itself, so no sibling
+    //     is appended to the tx — the tx contains exactly one outer ix
+    //     (apart from ComputeBudget).
+    const nullifierIx = inlineNullifierCpi
+      ? null
+      : buildCreateNullifierIx(relayerPubkey, nullifierLe, validityProof);
 
     // 10. Resolve ALT (caller-supplied or cluster default).
     const altPubkey = req.alt;
@@ -812,24 +871,25 @@ export class B402Solana {
     // never appears as fee payer. Local path: this.relayer signs locally.
     let signature: string;
     if (this._relayerHttp) {
-      // v2 path: pool ix + b402_nullifier sibling go in one atomic tx. The
-      // remote relayer accepts the sibling via `additionalIxs` and appends
-      // it after the main pool ix. Pool's instructions-sysvar walk verifies
-      // it on-chain.
+      // Sibling-ix path (v2.1): pool ix + b402_nullifier sibling go in one
+      // atomic tx via `additionalIxs`. Inline-CPI path (Phase 7): no
+      // sibling — pool CPIs into b402_nullifier itself.
       const r = await this._relayerHttp.client.submit({
         label: 'adapt',
         ix: poolIx,
         altAddresses: [altPubkey, ...(req.alts ?? [])],
         computeUnitLimit: 1_400_000,
-        additionalIxs: [nullifierIx],
+        additionalIxs: nullifierIx ? [nullifierIx] : [],
       });
       signature = r.signature;
     } else {
       const blockhash = (await this.connection.getLatestBlockhash('confirmed')).blockhash;
+      const localIxs: TransactionInstruction[] = [cuIx, poolIx];
+      if (nullifierIx) localIxs.push(nullifierIx);
       const msg = new TransactionMessage({
         payerKey: this.relayer.publicKey,
         recentBlockhash: blockhash,
-        instructions: [cuIx, poolIx, nullifierIx],
+        instructions: localIxs,
       }).compileToV0Message(lookupTables);
       const vtx = new VersionedTransaction(msg);
       vtx.sign([this.relayer]);

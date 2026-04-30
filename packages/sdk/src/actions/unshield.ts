@@ -37,7 +37,10 @@ import { nullifierHash, feeBindHash, poseidonTagged } from '../poseidon.js';
 import type { Wallet } from '../wallet.js';
 import type { RelayerHttpClient } from '../relayer-http.js';
 import {
+  B402_NULLIFIER_PROGRAM_ID,
   buildCreateNullifierIx,
+  buildNullifierCpiAccounts,
+  buildNullifierCpiPayload,
   getValidityProofForNullifier,
 } from '../light-nullifier.js';
 
@@ -97,6 +100,19 @@ export interface UnshieldParams {
    * "Transaction too large" — caller must provide an ALT.
    */
   alt?: PublicKey;
+  /**
+   * Phase 7 — when true, pool CPIs into b402_nullifier::create_nullifier
+   * directly instead of relying on a sibling create_nullifier ix in the
+   * same tx. Saves ~50 wire bytes per unshield (drops the sibling-ix
+   * envelope; pool ix data grows by 134 B for the validity-proof payload
+   * but the per-ix overhead + redundant relayer/program references go
+   * away). Only enable when targeting a pool deployed with
+   * `--features inline_cpi_nullifier`. The deployed mainnet v2.1 pool
+   * (slot ~416560668) does NOT support this and will reject the tx with
+   * `InvalidInstructionData` because the args struct grows by one
+   * `Vec<Vec<u8>>` field.
+   */
+  inlineNullifierCpi?: boolean;
 }
 
 export interface UnshieldResult {
@@ -109,7 +125,7 @@ export async function unshield(params: UnshieldParams): Promise<UnshieldResult> 
   const {
     connection, poolProgramId, verifierProgramId, prover, wallet,
     mint, note, tree, merkleProof, recipientTokenAccount, recipientOwner, relayer, relayerHttp,
-    photonRpc, alt,
+    photonRpc, alt, inlineNullifierCpi,
   } = params;
   if (!tree && !merkleProof) throw new Error('unshield: provide `tree` or `merkleProof`');
 
@@ -189,7 +205,13 @@ export async function unshield(params: UnshieldParams): Promise<UnshieldResult> 
     throw new Error('prover returned wrong public input count');
   }
 
-  // 7. Build the v2 unshield instruction. Args layout:
+  // 7. Fetch validity proof — needed in both modes (sibling-ix and inline).
+  if (!photonRpc) {
+    throw new Error('unshield: v2 requires `photonRpc` (stateless.js Rpc client). See PRD-30 §3.6.');
+  }
+  const validityProof = await getValidityProofForNullifier(photonRpc, nullifierLe);
+
+  // 8. Build the v2 unshield instruction. Args layout:
   //    UnshieldArgs {
   //      proof: Vec<u8>,
   //      public_inputs: TransactPublicInputs,
@@ -197,9 +219,11 @@ export async function unshield(params: UnshieldParams): Promise<UnshieldResult> 
   //      in_dummy_mask: u8,
   //      out_dummy_mask: u8,
   //      relayer_fee_recipient: Pubkey,
+  //      // Phase 7 (`inlineNullifierCpi`) ONLY:
+  //      nullifier_cpi_payloads: Vec<Vec<u8>>,
   //    }
   // (v1 had `nullifier_shard_prefix: [u16; 2]` here — dropped in v2.)
-  const ixData = concat(
+  const ixDataParts: Uint8Array[] = [
     instructionDiscriminator('unshield'),
     vecU8(proof.proofBytes),
     // TransactPublicInputs
@@ -221,53 +245,84 @@ export async function unshield(params: UnshieldParams): Promise<UnshieldResult> 
     new Uint8Array([0b11]),                // out_dummy_mask: both dummy
     // relayer_fee_recipient — unused (fee=0), pass relayer's pubkey as a benign default
     relayerPubkey.toBytes(),
-  );
+  ];
+  if (inlineNullifierCpi) {
+    // Vec<Vec<u8>> = u32(LE) outer-len, then per-entry vecU8.
+    // 1 real nullifier in unshield (slot 0), so vec len = 1.
+    ixDataParts.push(u32Le(1));
+    ixDataParts.push(vecU8(buildNullifierCpiPayload(validityProof)));
+  }
+  const ixData = concat(...ixDataParts);
 
-  // v2 account list — no shard PDAs, instructions sysvar instead.
+  // Pool ix account list. In sibling-ix mode (v2.1, mainnet today) the
+  // instructions sysvar is at slot 8 and the pool walks it to verify the
+  // sibling create_nullifier ix. In inline mode (Phase 7) the pool CPIs
+  // into b402_nullifier itself, so the sysvar slot is unused — the pool
+  // program tolerates any account in that slot (the sysvar address
+  // constraint stays so legacy clients keep working). To keep the SDK
+  // single-pathed for the named accounts, we leave the sysvar there in
+  // both modes; the inline-mode handler simply doesn't read it.
+  const baseKeys = [
+    { pubkey: relayerPubkey,                    isSigner: true,  isWritable: true  },
+    { pubkey: poolConfigPda(poolProgramId),     isSigner: false, isWritable: false },
+    { pubkey: tokenConfigPda(poolProgramId, mint), isSigner: false, isWritable: false },
+    { pubkey: vaultPda(poolProgramId, mint),    isSigner: false, isWritable: true  },
+    { pubkey: recipientTokenAccount,            isSigner: false, isWritable: true  },
+    { pubkey: recipientTokenAccount,            isSigner: false, isWritable: true  }, // relayer_fee_token_account; reuse when fee=0
+    { pubkey: treeStatePda(poolProgramId),      isSigner: false, isWritable: true  },
+    { pubkey: verifierProgramId,                isSigner: false, isWritable: false },
+    { pubkey: SYSVAR_INSTRUCTIONS,              isSigner: false, isWritable: false },
+    { pubkey: TOKEN_PROGRAM_ID,                 isSigner: false, isWritable: false },
+    { pubkey: SystemProgram.programId,          isSigner: false, isWritable: false },
+  ];
+  // In inline mode, append the b402_nullifier program + its 10 accounts to
+  // remaining_accounts. Layout matches `nullifier_cpi.rs::invoke_create_nullifier`:
+  //   remaining[0]    = b402_nullifier program (readonly, non-signer)
+  //   remaining[1..11] = 10 nullifier accounts (per buildNullifierCpiAccounts)
+  //                     (payer, ix sysvar, light_system_program, …, output_queue)
+  const remainingForInline = inlineNullifierCpi
+    ? [
+        { pubkey: B402_NULLIFIER_PROGRAM_ID, isSigner: false, isWritable: false },
+        ...buildNullifierCpiAccounts(relayerPubkey, validityProof),
+      ]
+    : [];
   const unshieldIx = new TransactionInstruction({
     programId: poolProgramId,
-    keys: [
-      { pubkey: relayerPubkey,                    isSigner: true,  isWritable: true  },
-      { pubkey: poolConfigPda(poolProgramId),     isSigner: false, isWritable: false },
-      { pubkey: tokenConfigPda(poolProgramId, mint), isSigner: false, isWritable: false },
-      { pubkey: vaultPda(poolProgramId, mint),    isSigner: false, isWritable: true  },
-      { pubkey: recipientTokenAccount,            isSigner: false, isWritable: true  },
-      { pubkey: recipientTokenAccount,            isSigner: false, isWritable: true  }, // relayer_fee_token_account; reuse when fee=0
-      { pubkey: treeStatePda(poolProgramId),      isSigner: false, isWritable: true  },
-      { pubkey: verifierProgramId,                isSigner: false, isWritable: false },
-      { pubkey: SYSVAR_INSTRUCTIONS,              isSigner: false, isWritable: false },
-      { pubkey: TOKEN_PROGRAM_ID,                 isSigner: false, isWritable: false },
-      { pubkey: SystemProgram.programId,          isSigner: false, isWritable: false },
-    ],
+    keys: [...baseKeys, ...remainingForInline],
     data: Buffer.from(ixData),
   });
 
-  // 8. v2 nullifier write — fetch validity proof from Photon and build
-  //    the b402_nullifier::create_nullifier sibling ix.
-  if (!photonRpc) {
-    throw new Error('unshield: v2 requires `photonRpc` (stateless.js Rpc client). See PRD-30 §3.6.');
-  }
-  const validityProof = await getValidityProofForNullifier(photonRpc, nullifierLe);
-  const nullifierIx = buildCreateNullifierIx(relayerPubkey, nullifierLe, validityProof);
+  // 9. Build the sibling create_nullifier ix — only when NOT in inline
+  //    mode. In inline mode the pool program builds the inner ix itself
+  //    via `nullifier_cpi::invoke_create_nullifier`, saving ~50 wire B
+  //    per tx (drops the sibling-ix envelope; pool ix data grows by
+  //    1 + 134 = 135 B for the validity-proof payload, but the per-ix
+  //    overhead + redundant relayer/program references go away).
+  const nullifierIx = inlineNullifierCpi
+    ? null
+    : buildCreateNullifierIx(relayerPubkey, nullifierLe, validityProof);
 
   const cuIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 });
 
   let sig: string;
   if (relayerHttp) {
-    // v2 path: pass the b402_nullifier sibling ix as `additionalIxs`. The
-    // remote relayer appends it to the tx message after the main unshield
-    // ix; pool's instructions-sysvar walk verifies it on-chain.
+    // Sibling-ix mode: pass the b402_nullifier ix as `additionalIxs`. The
+    // remote relayer appends it after the main unshield ix; pool's
+    // instructions-sysvar walk verifies it on-chain.
+    // Inline mode: no sibling ix to append.
     const r = await relayerHttp.submit({
       label: 'unshield',
       ix: unshieldIx,
       altAddresses: alt ? [alt] : [],
       computeUnitLimit: 1_400_000,
-      additionalIxs: [nullifierIx],
+      additionalIxs: nullifierIx ? [nullifierIx] : [],
     });
     sig = r.signature;
     return { signature: sig, nullifier: nullifierVal, amountTransferred: note.value };
   } else {
     const blockhash = (await connection.getLatestBlockhash('confirmed')).blockhash;
+    const ixs: TransactionInstruction[] = [cuIx, unshieldIx];
+    if (nullifierIx) ixs.push(nullifierIx);
     if (alt) {
       // v2 default path: combined unshield + b402_nullifier ixs exceed
       // the 1232 B legacy cap. Use a versioned tx with ALT to compress
@@ -278,13 +333,13 @@ export async function unshield(params: UnshieldParams): Promise<UnshieldResult> 
       const msg = new TransactionMessage({
         payerKey: relayer.publicKey,
         recentBlockhash: blockhash,
-        instructions: [cuIx, unshieldIx, nullifierIx],
+        instructions: ixs,
       }).compileToV0Message([lookupTable]);
       const vtx = new VersionedTransaction(msg);
       vtx.sign([relayer]);
       sig = await connection.sendRawTransaction(vtx.serialize(), { skipPreflight: false });
     } else {
-      const tx = new Transaction().add(cuIx, unshieldIx, nullifierIx);
+      const tx = new Transaction().add(...ixs);
       tx.feePayer = relayer.publicKey;
       tx.recentBlockhash = blockhash;
       tx.sign(relayer);
