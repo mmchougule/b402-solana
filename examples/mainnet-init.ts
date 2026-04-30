@@ -55,10 +55,34 @@ const USDC = new PublicKey(process.env.USDC ?? 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4w
 const WSOL = new PublicKey(process.env.WSOL ?? 'So11111111111111111111111111111111111111112');
 
 // Conservative alpha caps. Adjustable via set_max_tvl post-deploy.
-const USDC_DECIMALS = 6n;
-const WSOL_DECIMALS = 9n;
-const USDC_CAP = 100_000n * 10n ** USDC_DECIMALS; // 100k USDC
-const WSOL_CAP = 300n     * 10n ** WSOL_DECIMALS; // 300 wSOL  (~ $50k at $170/SOL)
+// Per-mint cap = max TVL the pool can hold of that token, NOT a market-cap
+// rejection. Caps verified against on-chain mint supply + plain SPL-Token
+// owner check. All Token-2022 + transfer-hook mints are excluded.
+const USDC_CAP = 100_000n        * 10n ** 6n;  // 100k USDC
+const WSOL_CAP = 300n            * 10n ** 9n;  // 300 wSOL  (~$50k @ $170/SOL)
+const USDT_CAP = 100_000n        * 10n ** 6n;  // 100k USDT
+const JUP_CAP  = 2_000_000n      * 10n ** 6n;  // 2M JUP    (~$1.6M @ $0.80)
+const JTO_CAP  = 500_000n        * 10n ** 9n;  // 500k JTO  (~$1M @ $2)
+const BONK_CAP = 100_000_000_000n * 10n ** 5n; // 100B BONK (~$2M @ $0.00002)
+const WIF_CAP  = 1_000_000n      * 10n ** 6n;  // 1M WIF    (~$3M @ $3)
+const PYTH_CAP = 3_000_000n      * 10n ** 6n;  // 3M PYTH   (~$1M @ $0.30)
+const RAY_CAP  = 500_000n        * 10n ** 6n;  // 500k RAY  (~$1M @ $2)
+const ORCA_CAP = 500_000n        * 10n ** 6n;  // 500k ORCA (~$1.5M @ $3)
+
+// Top-10 Solana token mints for v2.1 alpha. All verified plain SPL Token
+// (not Token-2022) with on-chain supply matching publicly known issuance.
+const TOP_TOKENS = [
+  { mint: USDC, label: 'USDC', cap: USDC_CAP },
+  { mint: WSOL, label: 'wSOL', cap: WSOL_CAP },
+  { mint: new PublicKey('Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'), label: 'USDT', cap: USDT_CAP },
+  { mint: new PublicKey('JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN'), label: 'JUP',  cap: JUP_CAP  },
+  { mint: new PublicKey('jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL'), label: 'JTO',  cap: JTO_CAP  },
+  { mint: new PublicKey('DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263'), label: 'BONK', cap: BONK_CAP },
+  { mint: new PublicKey('EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm'), label: 'WIF',  cap: WIF_CAP  },
+  { mint: new PublicKey('HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3'), label: 'PYTH', cap: PYTH_CAP },
+  { mint: new PublicKey('4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R'), label: 'RAY',  cap: RAY_CAP  },
+  { mint: new PublicKey('orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE'), label: 'ORCA', cap: ORCA_CAP },
+];
 
 const SYSVAR_RENT_PUBKEY = new PublicKey('SysvarRent111111111111111111111111111111111');
 
@@ -224,8 +248,9 @@ async function main(): Promise<void> {
 
   await ensureInitPool(c, admin);
   await ensureSetAdaptVerifier(c, admin);
-  await ensureTokenConfig(c, admin, USDC, 'USDC', USDC_CAP);
-  await ensureTokenConfig(c, admin, WSOL, 'wSOL', WSOL_CAP);
+  for (const t of TOP_TOKENS) {
+    await ensureTokenConfig(c, admin, t.mint, t.label, t.cap);
+  }
 
   const force = process.env.B402_FORCE_REGISTER === '1';
   for (const [id, label] of [
@@ -241,8 +266,7 @@ async function main(): Promise<void> {
 
   console.log('');
   console.log('✅ mainnet alpha pool ready');
-  console.log(`   USDC cap: ${USDC_CAP.toString()} (${(Number(USDC_CAP) / 1e6).toLocaleString()} USDC)`);
-  console.log(`   wSOL cap: ${WSOL_CAP.toString()} (${(Number(WSOL_CAP) / 1e9).toLocaleString()} wSOL)`);
+  console.log(`   ${TOP_TOKENS.length} token configs registered`);
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
