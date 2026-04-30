@@ -27,6 +27,8 @@ import { fileURLToPath } from 'node:url';
 
 import { Keypair, clusterApiUrl } from '@solana/web3.js';
 import { B402Solana, type B402SolanaConfig } from '@b402ai/solana';
+import { B402_ALT_MAINNET, B402_ALT_DEVNET } from '@b402ai/solana-shared';
+import { PublicKey } from '@solana/web3.js';
 
 function loadKeypair(p: string): Keypair {
   return Keypair.fromSecretKey(new Uint8Array(JSON.parse(fs.readFileSync(p, 'utf8'))));
@@ -35,6 +37,8 @@ function loadKeypair(p: string): Keypair {
 export interface B402Context {
   b402: B402Solana;
   cluster: B402SolanaConfig['cluster'];
+  rpcUrl: string;
+  b402AltMainnet?: PublicKey;
 }
 
 const __filename = fileURLToPath(import.meta.url);
@@ -137,9 +141,20 @@ export function loadContext(): B402Context {
     mainnet: 'https://b402-solana-relayer-mainnet-62092339396.us-central1.run.app',
     localnet: null,
   };
-  const relayerHttpUrl = process.env.B402_RELAYER_HTTP_URL === ''
+  // Local relayer keypair takes precedence — if user supplied one, never
+  // route through the hosted HTTP relayer (which doesn't yet support v2's
+  // multi-ix submissions). Empty-string and 'none' both disable explicitly.
+  // Set B402_RELAYER_HTTP_URL=none to disable when using the user wallet
+  // as both signer + fee payer.
+  const httpRelayerEnv = process.env.B402_RELAYER_HTTP_URL;
+  const httpRelayerDisabled =
+    httpRelayerEnv === '' ||
+    httpRelayerEnv === 'none' ||
+    httpRelayerEnv === 'false' ||
+    relayer !== undefined;
+  const relayerHttpUrl = httpRelayerDisabled
     ? undefined
-    : (process.env.B402_RELAYER_HTTP_URL ?? defaultRelayerUrl[cluster] ?? undefined);
+    : (httpRelayerEnv ?? defaultRelayerUrl[cluster] ?? undefined);
   // Default API key embedded so npm users don't need any env config; the
   // hosted relayer rate-limits per-key (5 req/min on this public tier).
   // Override via B402_RELAYER_API_KEY for higher-tier access.
@@ -166,5 +181,10 @@ export function loadContext(): B402Context {
     ...(relayerApiKey ? { relayerApiKey } : {}),
   });
 
-  return { b402, cluster };
+  // Cluster-default ALT for unshield/swap. Empty constant = no default;
+  // unshield will then build a per-call ALT (slower but works).
+  const altStr = cluster === 'mainnet' ? B402_ALT_MAINNET : cluster === 'devnet' ? B402_ALT_DEVNET : '';
+  const b402AltMainnet = altStr ? new PublicKey(altStr) : undefined;
+
+  return { b402, cluster, rpcUrl, b402AltMainnet };
 }

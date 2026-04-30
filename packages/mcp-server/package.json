@@ -1,6 +1,6 @@
 {
   "name": "@b402ai/solana-mcp",
-  "version": "0.0.9",
+  "version": "0.0.11",
   "description": "Model Context Protocol server exposing the b402 Solana SDK as agent-callable tools (Claude Code, Cursor, any MCP runtime)",
   "license": "Apache-2.0",
   "type": "module",
@@ -55,9 +55,10 @@
     "@b402ai/solana": "workspace:*",
     "@b402ai/solana-prover": "workspace:*",
     "@b402ai/solana-shared": "workspace:*",
+    "@lightprotocol/stateless.js": "0.23.0-beta.5",
     "@modelcontextprotocol/sdk": "^1.0.4",
-    "@solana/web3.js": "^1.95.8",
     "@solana/spl-token": "^0.4.9",
+    "@solana/web3.js": "^1.95.8",
     "zod": "^3.23.8",
     "zod-to-json-schema": "^3.23.5"
   },
