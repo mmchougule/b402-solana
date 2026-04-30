@@ -25,6 +25,11 @@ export interface RelayerHttpClient {
     altAddresses?: PublicKey[];
     computeUnitLimit?: number;
     userSignature?: { signature: Uint8Array; pubkey: PublicKey };
+    /** v2 sibling ixs (e.g. b402_nullifier::create_nullifier). Appended
+     *  after the main pool ix in the same atomic tx. The relayer doesn't
+     *  inspect them — pool's instructions-sysvar walk is the trust
+     *  boundary. */
+    additionalIxs?: TransactionInstruction[];
   }): Promise<{ signature: string; slot: number }>;
 }
 
@@ -61,7 +66,7 @@ export function makeRelayerHttpClient(opts: {
   const base = trim(opts.url);
   return {
     pubkey: opts.pubkey,
-    async submit({ label, ix, altAddresses, computeUnitLimit, userSignature }) {
+    async submit({ label, ix, altAddresses, computeUnitLimit, userSignature, additionalIxs }) {
       const accountKeys = ix.keys.map((k) => ({
         pubkey: k.pubkey.toBase58(),
         isSigner: k.isSigner,
@@ -84,6 +89,17 @@ export function makeRelayerHttpClient(opts: {
       if (userSignature) {
         body.userSignature = bytesToBase64(userSignature.signature);
         body.userPubkey = userSignature.pubkey.toBase58();
+      }
+      if (additionalIxs && additionalIxs.length > 0) {
+        body.additionalIxs = additionalIxs.map((extra) => ({
+          programId: extra.programId.toBase58(),
+          ixData: bytesToBase64(extra.data),
+          accountKeys: extra.keys.map((k) => ({
+            pubkey: k.pubkey.toBase58(),
+            isSigner: k.isSigner,
+            isWritable: k.isWritable,
+          })),
+        }));
       }
       const resp = await fetch(`${base}/relay/${label}`, {
         method: 'POST',

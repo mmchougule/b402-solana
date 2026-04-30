@@ -812,10 +812,18 @@ export class B402Solana {
     // never appears as fee payer. Local path: this.relayer signs locally.
     let signature: string;
     if (this._relayerHttp) {
-      throw new B402Error(
-        B402ErrorCode.InvalidConfig,
-        'privateSwap: HTTP relayer with v2 nullifier IMT pending — submit() takes a single ix today; v2 needs pool + nullifier sibling. Use a local relayer or extend the relayer protocol first.',
-      );
+      // v2 path: pool ix + b402_nullifier sibling go in one atomic tx. The
+      // remote relayer accepts the sibling via `additionalIxs` and appends
+      // it after the main pool ix. Pool's instructions-sysvar walk verifies
+      // it on-chain.
+      const r = await this._relayerHttp.client.submit({
+        label: 'adapt',
+        ix: poolIx,
+        altAddresses: [altPubkey, ...(req.alts ?? [])],
+        computeUnitLimit: 1_400_000,
+        additionalIxs: [nullifierIx],
+      });
+      signature = r.signature;
     } else {
       const blockhash = (await this.connection.getLatestBlockhash('confirmed')).blockhash;
       const msg = new TransactionMessage({

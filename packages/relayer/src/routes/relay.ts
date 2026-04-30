@@ -100,6 +100,12 @@ export function registerRelayRoute(
         userSig = { signature: sigBytes, pubkey: new PublicKey(body.userPubkey) };
       }
 
+      const additionalIxs = (body.additionalIxs ?? []).map((extra) => ({
+        programId: new PublicKey(extra.programId),
+        ixData: Uint8Array.from(Buffer.from(extra.ixData, 'base64')),
+        accountKeys: extra.accountKeys,
+      }));
+
       const result = await deps.submitter.submit({
         programId: deps.cfg.poolProgramId,
         ixData,
@@ -107,6 +113,7 @@ export function registerRelayRoute(
         altAddresses,
         computeUnitLimit: body.computeUnitLimit ?? deps.cfg.computeUnitLimit,
         userSignature: userSig,
+        additionalIxs,
       });
 
       req.log.info(

@@ -254,7 +254,18 @@ export async function unshield(params: UnshieldParams): Promise<UnshieldResult> 
 
   let sig: string;
   if (relayerHttp) {
-    throw new Error('unshield: HTTP relayer with v2 nullifier IMT pending — use local relayer for now');
+    // v2 path: pass the b402_nullifier sibling ix as `additionalIxs`. The
+    // remote relayer appends it to the tx message after the main unshield
+    // ix; pool's instructions-sysvar walk verifies it on-chain.
+    const r = await relayerHttp.submit({
+      label: 'unshield',
+      ix: unshieldIx,
+      altAddresses: alt ? [alt] : [],
+      computeUnitLimit: 1_400_000,
+      additionalIxs: [nullifierIx],
+    });
+    sig = r.signature;
+    return { signature: sig, nullifier: nullifierVal, amountTransferred: note.value };
   } else {
     const blockhash = (await connection.getLatestBlockhash('confirmed')).blockhash;
     if (alt) {

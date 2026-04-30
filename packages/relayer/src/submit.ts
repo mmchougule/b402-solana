@@ -28,6 +28,14 @@ import {
 import type { AccountMetaInput } from './validate.js';
 import { Errors } from './errors.js';
 
+/** Sibling ix appended after the main pool ix. Used for v2's b402_nullifier
+ *  :: create_nullifier sibling that the pool verifies via instructions sysvar. */
+export interface AdditionalIxInput {
+  programId: PublicKey;
+  ixData: Uint8Array;
+  accountKeys: AccountMetaInput[];
+}
+
 export interface SubmitInput {
   programId: PublicKey;
   ixData: Uint8Array;
@@ -36,6 +44,8 @@ export interface SubmitInput {
   computeUnitLimit: number;
   /** Optional pre-signed user signature: base64 64-byte ed25519 sig + signing pubkey. */
   userSignature?: { signature: Uint8Array; pubkey: PublicKey };
+  /** v2: sibling ixs appended after the main pool ix in the same tx. */
+  additionalIxs?: AdditionalIxInput[];
 }
 
 export interface SubmitResult {
@@ -113,11 +123,40 @@ export class RpcSubmitter implements Submitter {
       data: Buffer.from(input.ixData),
     });
 
+    // v2 sibling ixs (e.g. b402_nullifier::create_nullifier). Appended after
+    // the main pool ix so the pool's instructions-sysvar walk finds them.
+    // The relayer doesn't inspect them — pool's on-chain verification is the
+    // trust boundary. Each sibling ix's accounts are forwarded verbatim
+    // EXCEPT for any signer slot referencing the relayer placeholder, which
+    // gets remapped to the relayer pubkey (matches main-ix slot[0] semantics).
+    const additionalIxs: TransactionInstruction[] = [];
+    for (const extra of input.additionalIxs ?? []) {
+      const remapped = extra.accountKeys.map((k) => ({
+        pubkey: k.isSigner && k.isWritable && new PublicKey(k.pubkey).equals(first.pubkey === undefined ? relayer.publicKey : new PublicKey(first.pubkey))
+          ? relayer.publicKey
+          : new PublicKey(k.pubkey),
+        isSigner: k.isSigner,
+        isWritable: k.isWritable,
+      }));
+      // Simpler: any sibling-ix signer slot defaults to the relayer pubkey
+      // (the only signer the relayer can produce). Callers building unshield
+      // / privateSwap pass the relayer placeholder as the sibling-ix signer.
+      const finalKeys = remapped.map((k) => ({
+        ...k,
+        pubkey: k.isSigner ? relayer.publicKey : k.pubkey,
+      }));
+      additionalIxs.push(new TransactionInstruction({
+        programId: extra.programId,
+        keys: finalKeys,
+        data: Buffer.from(extra.ixData),
+      }));
+    }
+
     const blockhash = (await connection.getLatestBlockhash('confirmed')).blockhash;
     const msg = new TransactionMessage({
       payerKey: relayer.publicKey,
       recentBlockhash: blockhash,
-      instructions: [cuIx, ix],
+      instructions: [cuIx, ix, ...additionalIxs],
     }).compileToV0Message(luts);
 
     const vtx = new VersionedTransaction(msg);
