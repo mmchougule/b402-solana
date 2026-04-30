@@ -20,7 +20,7 @@ pub struct AddTokenConfig<'info> {
         seeds = [VERSION_PREFIX, SEED_CONFIG],
         bump,
     )]
-    pub pool_config: Account<'info, PoolConfig>,
+    pub pool_config: Box<Account<'info, PoolConfig>>,
 
     #[account(
         init_if_needed,
@@ -29,9 +29,9 @@ pub struct AddTokenConfig<'info> {
         seeds = [VERSION_PREFIX, SEED_TOKEN, mint.key().as_ref()],
         bump,
     )]
-    pub token_config: Account<'info, TokenConfig>,
+    pub token_config: Box<Account<'info, TokenConfig>>,
 
-    pub mint: Account<'info, Mint>,
+    pub mint: Box<Account<'info, Mint>>,
 
     #[account(
         init_if_needed,
@@ -41,7 +41,7 @@ pub struct AddTokenConfig<'info> {
         seeds = [VERSION_PREFIX, SEED_VAULT, mint.key().as_ref()],
         bump,
     )]
-    pub vault: Account<'info, TokenAccount>,
+    pub vault: Box<Account<'info, TokenAccount>>,
 
     pub token_program: Program<'info, Token>,
     pub associated_token_program: Program<'info, AssociatedToken>,
