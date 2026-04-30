@@ -28,6 +28,7 @@ import {
   SystemProgram,
   TransactionInstruction,
 } from '@solana/web3.js';
+import * as stateless from '@lightprotocol/stateless.js';
 
 /** Forked nullifier program — see `programs/b402-nullifier/src/lib.rs::declare_id!`. */
 export const B402_NULLIFIER_PROGRAM_ID = new PublicKey(
@@ -74,8 +75,6 @@ export async function getValidityProofForNullifier(
   rpc: unknown,
   nullifierLeBytes: Uint8Array,
 ): Promise<NullifierProof> {
-  const stateless = (await import('@lightprotocol/stateless.js')) as typeof import('@lightprotocol/stateless.js');
-
   const address = deriveNullifierAddress(nullifierLeBytes);
   const r = rpc as ReturnType<typeof stateless.createRpc>;
 
@@ -108,8 +107,6 @@ export async function getValidityProofForNullifier(
 
 /** Derive the address that `create_nullifier(id)` will insert. */
 export function deriveNullifierAddress(nullifierLeBytes: Uint8Array): PublicKey {
-  // Lazy-load to avoid circular dep at module init.
-  const stateless = require('@lightprotocol/stateless.js');
   const seed = stateless.deriveAddressSeedV2([SEED_NULL, nullifierLeBytes]);
   return stateless.deriveAddressV2(
     seed,
@@ -142,7 +139,6 @@ export function buildCreateNullifierIx(
     Buffer.from(nullifierLeBytes),
   ]);
 
-  const stateless = require('@lightprotocol/stateless.js');
   const sys = stateless.defaultStaticAccountsStruct();
 
   const accounts: AccountMeta[] = [
