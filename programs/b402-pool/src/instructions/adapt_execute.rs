@@ -69,7 +69,11 @@ pub struct AdaptPublicInputs {
     pub relayer_fee_bind: [u8; 32],
     pub root_bind: [u8; 32],
     pub recipient_bind: [u8; 32],
-    pub adapter_id: [u8; 32],  // keccak(adapter_program_id) mod p
+    // Phase 7B trim: adapter_id (= keccak(adapter_program_id) mod p) is no
+    // longer carried on the wire. Pool reconstructs it on-chain from the
+    // adapter_program account at line ~258 and feeds the recomputed value
+    // into the verifier vector — same circuit, same proof binding, just
+    // -32 wire bytes per adapt_execute.
     pub action_hash: [u8; 32], // Poseidon_3(adaptBindTag, keccakFr, expectedOutMint_Fr)
     pub expected_out_value: u64,
 }
@@ -96,7 +100,7 @@ pub struct AdaptExecuteArgs {
     /// (134 B per entry). v2.1 builds (sibling-ix) do not carry this on
     /// the wire — the field is feature-gated.
     #[cfg(feature = "inline_cpi_nullifier")]
-    pub nullifier_cpi_payloads: Vec<Vec<u8>>,
+    pub nullifier_cpi_payloads: Vec<[u8; 134]>,
 }
 
 #[derive(Accounts)]
@@ -252,15 +256,10 @@ pub fn handler<'info>(
             PoolError::AdapterNotRegistered
         );
 
-        // Circuit's adapter_id public input must match keccak of program ID,
-        // reduced mod Fr. Prevents a proof for adapter X from being replayed
-        // against adapter Y.
-        let digest = keccak::hash(adapter_program_key.as_ref()).0;
-        let expected_adapter_id = util::reduce_le_mod_p(&digest);
-        require!(
-            pi.adapter_id == expected_adapter_id,
-            PoolError::InvalidAdapterBinding
-        );
+        // adapter_id (= keccak(adapter_program_id) mod p) — the pool
+        // reconstructs it from the adapter_program account and feeds the
+        // recomputed value to the verifier (see build_public_inputs_for_adapt).
+        // Phase 7B trim: no longer in args — pool is the source of truth.
     }
 
     // action_hash binding: circuit proved Poseidon_3 over (adaptBindTag,
@@ -323,7 +322,7 @@ pub fn handler<'info>(
     }
 
     // Verify proof.
-    let public_inputs: Vec<[u8; 32]> = build_public_inputs_for_adapt(pi, &in_mint, &out_mint);
+    let public_inputs: Vec<[u8; 32]> = build_public_inputs_for_adapt(pi, &in_mint, &out_mint, &adapter_program_key);
     let mut proof_bytes = [0u8; 256];
     proof_bytes.copy_from_slice(&args.proof);
     verifier_cpi::invoke_verify_adapt(
@@ -587,6 +586,7 @@ fn build_public_inputs_for_adapt(
     pi: &AdaptPublicInputs,
     in_mint: &Pubkey,
     out_mint: &Pubkey,
+    adapter_program: &Pubkey,
 ) -> Vec<[u8; 32]> {
     let mut v: Vec<[u8; 32]> = Vec::with_capacity(verifier_cpi::PUBLIC_INPUT_COUNT_ADAPT);
     // First 18 — identical layout to transact.
@@ -611,7 +611,9 @@ fn build_public_inputs_for_adapt(
     v.push(TAG_FEE_BIND);
     v.push(TAG_RECIPIENT_BIND);
     // Adapt-specific — 5 more.
-    v.push(pi.adapter_id);
+    // adapter_id: pool reconstructs from adapter_program account.
+    let adapter_id_digest = anchor_lang::solana_program::keccak::hash(adapter_program.as_ref()).0;
+    v.push(util::reduce_le_mod_p(&adapter_id_digest));
     v.push(pi.action_hash);
     v.push(u64_to_fr_le(pi.expected_out_value));
     // expected_out_mint: derived from token_config_out, same circuit binding.

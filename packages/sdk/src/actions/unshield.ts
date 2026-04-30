@@ -247,10 +247,11 @@ export async function unshield(params: UnshieldParams): Promise<UnshieldResult> 
     relayerPubkey.toBytes(),
   ];
   if (inlineNullifierCpi) {
-    // Vec<Vec<u8>> = u32(LE) outer-len, then per-entry vecU8.
+    // Vec<[u8; 134]> = u32(LE) outer-len, then 134 raw bytes per entry (no
+    // inner length varint — Phase 7B trim, saves 4 wire bytes per nullifier).
     // 1 real nullifier in unshield (slot 0), so vec len = 1.
     ixDataParts.push(u32Le(1));
-    ixDataParts.push(vecU8(buildNullifierCpiPayload(validityProof)));
+    ixDataParts.push(buildNullifierCpiPayload(validityProof));
   }
   const ixData = concat(...ixDataParts);
 

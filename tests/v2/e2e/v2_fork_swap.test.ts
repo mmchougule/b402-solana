@@ -330,6 +330,8 @@ describe('Phase 6c — v2 fork swap stress', () => {
           rpcUrl: SOLANA_RPC,
           keypair: alice,
           relayer,
+          // Phase 7 toggle (set INLINE_CPI=1 to use inline-CPI nullifier path).
+          inlineCpiNullifier: process.env.INLINE_CPI === '1',
           proverArtifacts: {
             wasmPath: path.join(circuits, 'transact_js/transact.wasm'),
             zkeyPath: path.join(circuits, 'ceremony/transact_final.zkey'),

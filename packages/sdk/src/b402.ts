@@ -772,7 +772,8 @@ export class B402Solana {
       proof.publicInputsLeBytes[9], // relayer_fee_bind
       proof.publicInputsLeBytes[10], // root_bind
       proof.publicInputsLeBytes[11], // recipient_bind
-      proof.publicInputsLeBytes[18], // adapter_id
+      // Phase 7B trim: adapter_id is no longer on the wire — pool reconstructs
+      // from the adapter_program account on-chain. -32 bytes per adapt_execute.
       proof.publicInputsLeBytes[19], // action_hash
       u64Le(expectedOut),
       u32Le(0), // encrypted_notes vec len = 0 (omit on-chain to save bytes)
@@ -783,9 +784,10 @@ export class B402Solana {
       vecU8(actionPayload),
     ];
     if (inlineNullifierCpi) {
-      // Vec<Vec<u8>> outer-len then per-entry vecU8 (1 real slot only).
+      // Vec<[u8; 134]>: outer u32 len, then 134 raw bytes per entry (no inner
+      // length varint — Phase 7B trim, saves 4 wire bytes per nullifier).
       poolIxParts.push(u32Le(1));
-      poolIxParts.push(vecU8(buildNullifierCpiPayload(validityProof)));
+      poolIxParts.push(buildNullifierCpiPayload(validityProof));
     }
     const poolIxData = concat(...poolIxParts);
 
@@ -893,6 +895,21 @@ export class B402Solana {
       }).compileToV0Message(lookupTables);
       const vtx = new VersionedTransaction(msg);
       vtx.sign([this.relayer]);
+
+      // PHASE-7 DEBUG: tx-size breakdown so we can see what's not ALT-compressed.
+      if (process.env.B402_DEBUG_TX === '1') {
+        const ser = vtx.serialize();
+        // eslint-disable-next-line no-console
+        console.log(`[b402 privateSwap] serialized=${ser.length} B, staticKeys=${msg.staticAccountKeys.length}, alts=${msg.addressTableLookups.length}`);
+        for (const k of msg.staticAccountKeys) {
+          // eslint-disable-next-line no-console
+          console.log(`  static: ${k.toBase58()}`);
+        }
+        for (const a of msg.addressTableLookups) {
+          // eslint-disable-next-line no-console
+          console.log(`  alt ${a.accountKey.toBase58()}: writable=${a.writableIndexes.length}, readonly=${a.readonlyIndexes.length}`);
+        }
+      }
 
       signature = await this.connection.sendRawTransaction(vtx.serialize(), {
         skipPreflight: true,

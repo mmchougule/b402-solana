@@ -383,6 +383,12 @@ describe('Phase 6c — v2 fork lend (Kamino USDC deposit through pool::adapt_exe
           rpcUrl: SOLANA_RPC,
           keypair: aliceKey,
           relayer: sharedRelayer,
+          // Phase 7 toggle. Set INLINE_CPI=1 to exercise the inline-CPI
+          // nullifier path (pool builds the b402_nullifier::create_nullifier
+          // CPI itself instead of relying on a sibling ix). Required against
+          // a pool deployed with --features inline_cpi_nullifier + nullifier
+          // with --features cpi-only.
+          inlineCpiNullifier: process.env.INLINE_CPI === '1',
           proverArtifacts: {
             wasmPath: path.join(circuits, 'transact_js/transact.wasm'),
             zkeyPath: path.join(circuits, 'ceremony/transact_final.zkey'),

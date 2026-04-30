@@ -51,7 +51,7 @@ pub struct TransactArgs {
     /// Phase 7 (`inline_cpi_nullifier`) ONLY. See
     /// `unshield::UnshieldArgs::nullifier_cpi_payloads` for layout.
     #[cfg(feature = "inline_cpi_nullifier")]
-    pub nullifier_cpi_payloads: Vec<Vec<u8>>,
+    pub nullifier_cpi_payloads: Vec<[u8; 134]>,
 }
 
 #[derive(Accounts)]

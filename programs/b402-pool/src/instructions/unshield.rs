@@ -37,7 +37,7 @@ pub struct UnshieldArgs {
     /// SDK MUST be upgraded together; the deploy script in
     /// `docs/prds/PHASE-7-HANDOFF.md` walks through the order.
     #[cfg(feature = "inline_cpi_nullifier")]
-    pub nullifier_cpi_payloads: Vec<Vec<u8>>,
+    pub nullifier_cpi_payloads: Vec<[u8; 134]>,
 }
 
 #[derive(Accounts)]
