@@ -893,6 +893,15 @@ export class B402Solana {
         recentBlockhash: blockhash,
         instructions: localIxs,
       }).compileToV0Message(lookupTables);
+      // PHASE-7 DEBUG: log size BEFORE sign so we see compiled message stats
+      // even when serialize() throws during vtx.sign().
+      if (process.env.B402_DEBUG_TX === '1') {
+        // eslint-disable-next-line no-console
+        console.log(`[b402 privateSwap] compiled: staticKeys=${msg.staticAccountKeys.length}, alts=${msg.addressTableLookups.length}`);
+        for (const k of msg.staticAccountKeys) console.log(`  static: ${k.toBase58()}`);
+        for (const a of msg.addressTableLookups) console.log(`  alt ${a.accountKey.toBase58()}: writable=${a.writableIndexes.length}, readonly=${a.readonlyIndexes.length}`);
+        try { console.log('  message bytes:', msg.serialize().length); } catch (e) { console.log('  message serialize threw:', (e as Error).message); }
+      }
       const vtx = new VersionedTransaction(msg);
       vtx.sign([this.relayer]);
 
