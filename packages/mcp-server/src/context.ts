@@ -142,10 +142,12 @@ export function loadContext(): B402Context {
     localnet: null,
   };
   // Local relayer keypair takes precedence — if user supplied one, never
-  // route through the hosted HTTP relayer (which doesn't yet support v2's
-  // multi-ix submissions). Empty-string and 'none' both disable explicitly.
-  // Set B402_RELAYER_HTTP_URL=none to disable when using the user wallet
-  // as both signer + fee payer.
+  // route through the hosted HTTP relayer. Empty-string and 'none' both
+  // disable explicitly. Set B402_RELAYER_HTTP_URL=none to disable when
+  // using the user wallet as both signer + fee payer.
+  // (Hosted relayer >= 0.0.4 supports v2 multi-ix submission via
+  // additionalIxs — the b402_nullifier::create_nullifier sibling rides in
+  // the same atomic tx as the main pool ix.)
   const httpRelayerEnv = process.env.B402_RELAYER_HTTP_URL;
   const httpRelayerDisabled =
     httpRelayerEnv === '' ||
