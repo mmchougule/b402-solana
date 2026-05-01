@@ -14,6 +14,11 @@ no-idl = []
 no-log-ix-name = []
 cpi = ["no-entrypoint"]
 default = []
+# Phase 9: 24-input shape (adds outSpendingPub[0] alias). Pairs with
+# b402-pool `--features phase_9_dual_note`. The VK in vk.rs is Phase 7B
+# (23-input); the Phase 9 VK lands together with this feature flip after
+# the trusted-setup ceremony.
+phase_9_dual_note = []
 
 [dependencies]
 anchor-lang.workspace = true

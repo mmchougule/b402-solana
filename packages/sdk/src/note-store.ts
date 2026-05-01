@@ -186,6 +186,9 @@ export class NoteStore {
     eventsSeen: number;
     notesIngested: number;
     cursorAdvanced: boolean;
+    /** True if pagination hit MAX_PAGES before reaching the prior cursor.
+     *  Callers should re-invoke `backfill` to keep walking the tail. */
+    truncated: boolean;
   }> {
     const limit = opts.limit ?? 30;
     const fromMode = opts.from ?? 'cursor';
@@ -201,12 +204,16 @@ export class NoteStore {
     let eventsSeen = 0;
     let notesIngested = 0;
     let newestSig: string | null = null;
+    let truncated = false;
 
     // Page through (newest → cursor]. Stop when the page comes back empty
     // or shorter than `limit` (last page).
     let before: string | undefined = opts.before;
     // Bound iterations defensively — at limit=30 this caps the worst-case
     // catch-up at 300 tx, which is far past any reasonable offline window.
+    // If the user does manage to exceed it we MUST NOT advance the cursor —
+    // otherwise we'd permanently skip whatever sits between the oldest sig
+    // we processed and the original cursor.
     const MAX_PAGES = 10;
     for (let page = 0; page < MAX_PAGES; page += 1) {
       const sigs = await this.opts.connection.getSignaturesForAddress(
@@ -263,16 +270,24 @@ export class NoteStore {
       // the OLDEST sig from this page as the `before` cursor.
       if (sigs.length < limit) break;
       before = sigs[sigs.length - 1].signature;
+      // If we're about to exit on the page-cap, flag truncation so we
+      // know NOT to advance the cursor below.
+      if (page === MAX_PAGES - 1) truncated = true;
     }
 
+    // Only advance the cursor when we actually walked the entire range
+    // back to the prior cursor (or past it on first run, when cursor was
+    // null and we exhausted the available history). On truncation, the
+    // tail between `before` and the prior cursor is unprocessed — leaving
+    // the cursor where it was means the next call resumes that work.
     let cursorAdvanced = false;
-    if (newestSig && newestSig !== this._backfillCursor) {
+    if (newestSig && !truncated && newestSig !== this._backfillCursor) {
       this._backfillCursor = newestSig;
       cursorAdvanced = true;
       this._persist();
     }
 
-    return { txsScanned, eventsSeen, notesIngested, cursorAdvanced };
+    return { txsScanned, eventsSeen, notesIngested, cursorAdvanced, truncated };
   }
 
   private async handleLogs(_logs: Logs): Promise<void> {

@@ -63,7 +63,9 @@ import {
 import { instructionDiscriminator, concat, u16Le, u32Le, u64Le, vecU8 } from './programs/anchor.js';
 import { buildZeroCache, proveMostRecentLeaf } from './merkle.js';
 import { commitmentHash, feeBindHash, nullifierHash, poseidonTagged } from './poseidon.js';
-import { computeExcessCommitment, deriveExcessRandom } from './excess.js';
+// Phase 9 helpers (deriveExcessRandom, computeExcessCommitment) are exposed
+// via ./index.ts for downstream code; b402.ts itself doesn't call them in
+// the Phase 7B (default-deployed) wire shape.
 import { encryptNote } from './note-encryption.js';
 import { B402Error, B402ErrorCode } from './errors.js';
 import {
@@ -886,16 +888,10 @@ export class B402Solana {
       // -32 bytes per adapt_execute, offsetting the +32B from out_spending_pub
       // so net wire stays at the Phase 7B size.
       u64Le(expectedOut),
-      // Phase 9 dual-note: out_spending_pub. Carried on the wire as a 32B
-      // LE Fr — same encoding used by every other Fr public input. The
-      // pool forwards it to the verifier at index 23, and uses it to
-      // recompute the excess-output commitment when delta > expected.
-      // MUST match the prover's witness `outSpendingPubA` (see line ~798).
-      // NOTE: `proof.publicInputsLeBytes[23]` carries the same value
-      // (the prover put it there per the new `public[]` list); we use the
-      // proof-output bytes here so a single source of truth (the prover)
-      // governs both the verifier vector and the wire copy.
-      proof.publicInputsLeBytes[23], // out_spending_pub
+      // Phase 9 dual-note out_spending_pub byte goes here when the
+      // matching pool/verifier feature lands post-ceremony. Pool's default
+      // build (Phase 7B) does not consume this byte — adding it now would
+      // make the wire deserialize 32 bytes off.
       u32Le(0), // encrypted_notes vec len = 0 (omit on-chain to save bytes)
       new Uint8Array([0b10]), // in_dummy_mask (slot 0 real, slot 1 dummy)
       new Uint8Array([0b10]), // out_dummy_mask
@@ -1077,48 +1073,14 @@ export class B402Solana {
     // directly so the next balance/holdings reflects it without RPC.
     this._notes!.insertNote(outNote);
 
-    // Phase 9 dual-note: if the adapter delivered MORE than the proof-bound
-    // floor, the pool appended a second leaf at `tree.leafCount + 1`. Mirror
-    // the pool's deterministic excess-leaf derivation locally so the SDK
-    // can spend it later without indexer assistance.
-    //
-    // Determinism contract (must stay in sync with
-    // `programs/b402-pool/src/instructions/adapt_execute.rs`):
-    //   random_b      = Poseidon(commitment_a, TAG_EXCESS) LE
-    //   commitment_b  = Poseidon(TAG_COMMIT, outMintFr, excess, random_b, spendingPub) LE
-    let excessNote: SpendableNote | undefined;
-    const excess = outAmount - expectedOut;
-    if (excess > 0n) {
-      const randomB = await deriveExcessRandom(outCommitment);
-      const commitmentB = await computeExcessCommitment(
-        outMintFr,
-        excess,
-        randomB,
-        this._wallet!.spendingPub,
-      );
-      excessNote = {
-        tokenMint: outMintFr,
-        value: excess,
-        random: randomB,
-        spendingPub: this._wallet!.spendingPub,
-        spendingPriv: this._wallet!.spendingPriv,
-        commitment: commitmentB,
-        // Main note went to leaf `tree.leafCount`; the excess immediately
-        // follows. The pool's `tree_append` increments `leaf_count` exactly
-        // once per non-dummy `commitment_out[i]` in the loop above the
-        // excess block, then once more for the excess leaf.
-        leafIndex: tree.leafCount + 1n,
-        // No on-chain ciphertext for the excess leaf — pool emitted zero
-        // padding (see ExcessNoteMinted block in adapt_execute.rs). The
-        // SDK reconstructs the plaintext locally; off-chain backfill of
-        // this note from a fresh device requires the same on-chain data
-        // the pool used (commitment_a + tag) plus the wallet's keys.
-        encryptedBytes: new Uint8Array(0),
-        ephemeralPub: new Uint8Array(0),
-        viewingTag: new Uint8Array(0),
-      };
-      this._notes!.insertNote(excessNote);
-    }
+    // Phase 9 dual-note local-mirror block lives here when the on-chain
+    // feature ships. The deterministic-derivation helpers
+    // (`deriveExcessRandom`, `computeExcessCommitment`) are exported from
+    // ./excess.js so the integration is mechanical — read commitment_a +
+    // TAG_EXCESS, derive random_b + commitment_b, insertNote at leafCount+1.
+    // Until then, excess delta stays in the shared vault (Phase 7B
+    // behaviour, what's currently deployed on mainnet).
+    const excessNote: SpendableNote | undefined = undefined;
 
     this.learnMint(req.inMint);
     this.learnMint(req.outMint);

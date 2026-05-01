@@ -26,6 +26,16 @@ test-mock = []
 # instructions sysvar in inner CPI), and pool sibling + nullifier cpi-only
 # crashes (caller-program check rejects non-pool callers).
 inline_cpi_nullifier = []
+# Phase 9: dual-note minting via outSpendingPub-bound excess commitment.
+# Bumps adapt-circuit public-input count 23 → 24, adds `out_spending_pub` to
+# AdaptPublicInputs, and mints commitment_b for actual-out > expected-out.
+# Requires the matching Phase 9 trusted-setup VK in b402-verifier-adapt
+# (build that crate with the same feature flag). DEFAULT OFF — without
+# the feature, builds produce the Phase 7B 23-input shape that matches the
+# currently deployed verifier program. Enabling on the deployed mainnet
+# pool without redeploying the verifier with a regenerated VK rejects
+# every adapt proof.
+phase_9_dual_note = []
 
 [dependencies]
 anchor-lang = { workspace = true, features = ["init-if-needed"] }

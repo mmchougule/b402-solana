@@ -45,7 +45,7 @@ async fn test_create_nullifier() {
 
 #[tokio::test]
 async fn test_create_nullifier_step_by_step() {
-    let config = ProgramTestConfig::new(true, Some(vec![("light_nullifier_program", PROGRAM_ID)]));
+    let config = ProgramTestConfig::new(true, Some(vec![("b402_nullifier", PROGRAM_ID)]));
     let mut rpc = LightProgramTest::new(config).await.unwrap();
     let payer = rpc.get_payer().insecure_clone();
 
@@ -74,7 +74,7 @@ async fn test_create_nullifier_step_by_step() {
 
 #[tokio::test]
 async fn test_create_nullifier_duplicate_fails() {
-    let config = ProgramTestConfig::new(true, Some(vec![("light_nullifier_program", PROGRAM_ID)]));
+    let config = ProgramTestConfig::new(true, Some(vec![("b402_nullifier", PROGRAM_ID)]));
     let mut rpc = LightProgramTest::new(config).await.unwrap();
     let payer = rpc.get_payer().insecure_clone();
 

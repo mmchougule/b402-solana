@@ -15,11 +15,13 @@ use anchor_lang::solana_program::program::invoke;
 use crate::error::PoolError;
 
 pub const PUBLIC_INPUT_COUNT: usize = 18;
-/// Phase 9 dual-note minting bumped this from 23 → 24. Index 23 is the new
-/// `outSpendingPub[0]` alias (see circuits/adapt.circom and
-/// `AdaptPublicInputs::out_spending_pub`). Old proofs (23 inputs) are NOT
-/// backward-compatible — the verifier program must be redeployed with a
-/// matching VK from the Phase 9 trusted setup before this constant ships.
+/// Adapt-CPI public-input count. Pairs with `b402_verifier_adapt::PUBLIC_INPUT_COUNT`
+/// — both crates must be built with the same `phase_9_dual_note` setting.
+///   default (Phase 7B):     23
+///   phase_9_dual_note: 24 (adds outSpendingPub[0] alias, post-ceremony)
+#[cfg(not(feature = "phase_9_dual_note"))]
+pub const PUBLIC_INPUT_COUNT_ADAPT: usize = 23;
+#[cfg(feature = "phase_9_dual_note")]
 pub const PUBLIC_INPUT_COUNT_ADAPT: usize = 24;
 
 /// sha256("global:verify")[0..8]. Pre-computed to avoid hashing at runtime.

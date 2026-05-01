@@ -41,11 +41,15 @@ use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
 use crate::constants::{
     SEED_ADAPTERS, SEED_CONFIG, SEED_TOKEN, SEED_TREE, SEED_VAULT, TAG_ADAPT_BIND,
-    TAG_COMMIT, TAG_EXCESS, TAG_FEE_BIND, TAG_MK_NODE, TAG_NULLIFIER, TAG_RECIPIENT_BIND,
+    TAG_COMMIT, TAG_FEE_BIND, TAG_MK_NODE, TAG_NULLIFIER, TAG_RECIPIENT_BIND,
     TAG_SPEND_KEY_PUB, VERSION_PREFIX,
 };
+#[cfg(feature = "phase_9_dual_note")]
+use crate::constants::TAG_EXCESS;
 use crate::error::PoolError;
-use crate::events::{AdaptExecuted, CommitmentAppended, ExcessNoteMinted, NullifierSpent};
+use crate::events::{AdaptExecuted, CommitmentAppended, NullifierSpent};
+#[cfg(feature = "phase_9_dual_note")]
+use crate::events::ExcessNoteMinted;
 use crate::state::{AdapterRegistry, PoolConfig, TokenConfig, TreeState};
 use crate::util;
 
@@ -84,7 +88,9 @@ pub struct AdaptPublicInputs {
     /// Phase 9 dual-note: outSpendingPub[0] (the real OUT note's spending
     /// pub) lifted to a public input by the circuit so the pool can
     /// recompute the excess-output commitment in Rust. 32-byte little-endian
-    /// Fr — same encoding as every other Fr public input.
+    /// Fr — same encoding as every other Fr public input. Feature-gated;
+    /// Phase 7B (default) builds do not carry this field.
+    #[cfg(feature = "phase_9_dual_note")]
     pub out_spending_pub: [u8; 32],
 }
 
@@ -591,6 +597,12 @@ pub fn handler<'info>(
         // note is bound to the same spending_pub as the main note via the
         // Poseidon commitment, so only the holder of `spending_priv` can
         // ever spend it.
+        // Feature-gated: Phase 7B builds (default) leave excess in the
+        // shared vault and skip this block. Phase 9 builds opt in by
+        // compiling with `--features phase_9_dual_note`, which also bumps
+        // PUBLIC_INPUT_COUNT to 24 and requires the matching VK.
+        #[cfg(feature = "phase_9_dual_note")]
+        {
         let excess: u64 = delta
             .checked_sub(pi.expected_out_value)
             .ok_or(error!(PoolError::ArithmeticUnderflow))?;
@@ -648,6 +660,7 @@ pub fn handler<'info>(
                 excess,
             });
         }
+        } // end #[cfg(feature = "phase_9_dual_note")] block
     }
 
     emit!(AdaptExecuted {
@@ -713,7 +726,9 @@ fn build_public_inputs_for_adapt(
     // Phase 9 dual-note (verifier index 23): outSpendingPub[0]. Forwarded
     // straight from the wire — the verifier rejects any value that wasn't
     // the prover's real outSpendingPub[0] because the circuit constrains
-    // outSpendingPubA === outSpendingPub[0].
+    // outSpendingPubA === outSpendingPub[0]. Only emitted when the
+    // matching VK has the 24-input shape (post-ceremony).
+    #[cfg(feature = "phase_9_dual_note")]
     v.push(pi.out_spending_pub);
     v
 }
