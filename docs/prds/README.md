@@ -42,6 +42,7 @@ The v2 ABI is **non-breaking with respect to deployments**: v1 devnet deployment
 | 21 | PQ-Readiness Migration Path | Forward |
 | 22 | Bonded Relayer Market | Forward |
 | 23 | Encrypted Intents Layer | Forward |
+| 24 | Falcon Intent Attestation | Forward |
 
 Forward PRDs are not on the v2 critical path. They are specified now so the v1/v2 architecture does not preclude any of them.
 
