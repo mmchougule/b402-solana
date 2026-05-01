@@ -97,9 +97,9 @@ pub fn nullifier_insert(shard: &mut NullifierShard, nullifier: [u8; 32]) -> Resu
 /// Discriminator is the first 8 bytes of `sha256("global:create_nullifier")`,
 /// matching upstream `Lightprotocol/nullifier-program`. The trailing
 /// `[u8; 32]` id occupies bytes 142..174 of the ix data:
-///   8 (disc) + 129 (validity proof Borsh: 1+32+64+32) + 4 (PackedAddressTreeInfo)
-///   + 1 (output_state_tree_index) = 142 byte prefix; id is the last 32.
-///   Total ix-data length: 142 + 32 = 174.
+///     8 (disc) + 129 (validity proof Borsh: 1+32+64+32) + 4 (PackedAddressTreeInfo)
+///     + 1 (output_state_tree_index) = 142 byte prefix; id is the last 32.
+///     Total ix-data length: 142 + 32 = 174.
 pub const B402_NULLIFIER_DISCRIMINATOR: [u8; 8] = [171, 144, 50, 154, 87, 170, 57, 66];
 pub const B402_NULLIFIER_ID_OFFSET: usize = 8 + 129 + 4 + 1; // = 142
 pub const B402_NULLIFIER_IX_DATA_LEN: usize = B402_NULLIFIER_ID_OFFSET + 32; // = 174
