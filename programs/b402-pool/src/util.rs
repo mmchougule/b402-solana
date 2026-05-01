@@ -96,9 +96,10 @@ pub fn nullifier_insert(shard: &mut NullifierShard, nullifier: [u8; 32]) -> Resu
 ///
 /// Discriminator is the first 8 bytes of `sha256("global:create_nullifier")`,
 /// matching upstream `Lightprotocol/nullifier-program`. The trailing
-/// `[u8; 32]` id occupies bytes 174..206 of the ix data:
+/// `[u8; 32]` id occupies bytes 142..174 of the ix data:
 ///   8 (disc) + 129 (validity proof Borsh: 1+32+64+32) + 4 (PackedAddressTreeInfo)
-///   + 1 (output_state_tree_index) + 32 (id) = 174 bytes total.
+///   + 1 (output_state_tree_index) = 142 byte prefix; id is the last 32.
+///   Total ix-data length: 142 + 32 = 174.
 pub const B402_NULLIFIER_DISCRIMINATOR: [u8; 8] = [171, 144, 50, 154, 87, 170, 57, 66];
 pub const B402_NULLIFIER_ID_OFFSET: usize = 8 + 129 + 4 + 1; // = 142
 pub const B402_NULLIFIER_IX_DATA_LEN: usize = B402_NULLIFIER_ID_OFFSET + 32; // = 174
@@ -121,8 +122,13 @@ pub fn verify_nullifier_ix_in_tx(
     use anchor_lang::solana_program::sysvar::instructions::load_instruction_at_checked;
 
     // Walk forward through the tx's ix list looking for a matching
-    // b402_nullifier::create_nullifier call.
-    for i in start_index..16 {
+    // b402_nullifier::create_nullifier call. No upper bound — Solana caps
+    // instructions per tx at 64; `load_instruction_at_checked` returns Err
+    // once we walk past the last ix in the message, which is our exit. A
+    // hardcoded `..16` here would falsely return NullifierIxMissing on any
+    // composable tx with >16 ixs (e.g. a Jupiter route through 8-12 hops
+    // bundled with CU + pool + nullifier).
+    for i in start_index.. {
         let ix = match load_instruction_at_checked(i, ix_sysvar) {
             Ok(ix) => ix,
             Err(_) => break, // past end of tx

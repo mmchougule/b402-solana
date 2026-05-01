@@ -1,6 +1,6 @@
 #![cfg(feature = "test-sbf")]
 
-use light_nullifier_program::sdk::{
+use b402_nullifier::sdk::{
     build_instruction, create_nullifier_ix, derive_nullifier_address, fetch_proof,
     PROGRAM_ID,
 };
@@ -9,7 +9,7 @@ use solana_sdk::signature::Signer;
 
 #[tokio::test]
 async fn test_create_nullifier() {
-    let config = ProgramTestConfig::new(true, Some(vec![("light_nullifier_program", PROGRAM_ID)]));
+    let config = ProgramTestConfig::new(true, Some(vec![("b402_nullifier", PROGRAM_ID)]));
     let mut rpc = LightProgramTest::new(config).await.unwrap();
     let payer = rpc.get_payer().insecure_clone();
 

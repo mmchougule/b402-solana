@@ -26,9 +26,12 @@ pub fn output_queue() -> Pubkey {
     solana_sdk::pubkey!("oq5oh5ZR3yGomuQgFduNDzjtGvVWfDRGLuDVjv9a96P")
 }
 
-/// Derives the nullifier address for a given ID.
+/// Derives the nullifier address for a given ID. Must use the same domain-
+/// tagged seed (`SEED_NULL = b"b402/v1/null"`) as the on-chain handler in
+/// `lib.rs::create_nullifier`, otherwise SDK-derived addresses won't match
+/// the addresses the program actually inserts.
 pub fn derive_nullifier_address(id: &[u8; 32]) -> [u8; 32] {
-    let (address, _) = derive_address(&[b"nullifier", id], &address_tree(), &PROGRAM_ID);
+    let (address, _) = derive_address(&[crate::SEED_NULL, id], &address_tree(), &PROGRAM_ID);
     address
 }
 

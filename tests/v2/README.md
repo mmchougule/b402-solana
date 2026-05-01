@@ -9,12 +9,10 @@ tests/v2/
   integration/         Phase 0 — Light fixture + Photon
     light_protocol_localnet.test.ts
     photon_indexer.test.ts
-  e2e/                 Phase 5 — full shield/unshield flows
-    v2_localnet_100_wallets.test.ts
-    v2_mainnet_fork_100_wallets.test.ts
-    v2_double_spend.test.ts
-    v2_concurrent_unshield.test.ts
-    v2_reorg_recovery.test.ts
+  e2e/                 Phase 5/6c — full shield/unshield + adapter flows
+    v2_localnet_stress.test.ts
+    v2_fork_swap.test.ts
+    v2_fork_lend.test.ts
 ```
 
 Phase 1 (`b402_nullifier` program tests) lives in `programs/b402-nullifier/tests/`.
@@ -40,7 +38,7 @@ cargo install --git https://github.com/lightprotocol/photon.git \
 light test-validator
 
 # Run Phase 0 tests against it (in another terminal)
-pnpm --filter='@b402ai/solana-tests' test tests/v2/integration/
+pnpm --filter='@b402ai/solana-v2-tests' test tests/v2/integration/
 
 # Tear down
 pkill -f "light test-validator"
