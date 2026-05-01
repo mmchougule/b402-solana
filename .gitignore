@@ -90,3 +90,19 @@ ops/PHASE-*.md
 # Local demo helper — hardcoded technical commentary not for public ridicule.
 # Source-of-truth for protocol facts is docs/ + circuits/ + the assurance repo.
 scripts/watch-logs.mjs
+
+# One-off ops / mainnet harness scripts. Embed RPC keys, deploy authority
+# pubkeys, hardcoded mint addresses — never product code, never commit.
+# Public examples that don't embed secrets stay tracked above (e2e.ts,
+# swap-e2e.ts, etc.).
+examples/extend*.mjs
+examples/init-relayer-fee-ata.mjs
+examples/mainnet-jupiter-swap-demo.ts
+examples/mainnet-phase7-smoke.ts
+examples/mainnet-end-to-end-demo.ts
+examples/mainnet-swap-matrix.ts
+examples/devnet-phase7-smoke.ts
+examples/check-bal.ts
+examples/check-tree*.mjs
+examples/snapshot.ts
+examples/vaults.mjs
