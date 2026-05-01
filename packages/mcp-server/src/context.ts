@@ -169,10 +169,19 @@ export function loadContext(): B402Context {
     ? undefined
     : (process.env.B402_RELAYER_API_KEY || defaultApiKey[cluster] || undefined);
 
+  // Phase 7B mainnet pool requires inline-CPI mode (sibling-mode rejected
+  // since the upgrade at slot ~458500000). Default ON for mainnet only;
+  // devnet pool is also Phase 7B-upgraded so flip there too. Localnet
+  // varies — leave to caller. Override via B402_INLINE_CPI=0|1.
+  const inlineCpiNullifier = process.env.B402_INLINE_CPI != null
+    ? process.env.B402_INLINE_CPI === '1'
+    : (cluster === 'mainnet' || cluster === 'devnet');
+
   const b402 = new B402Solana({
     cluster,
     rpcUrl,
     keypair,
+    inlineCpiNullifier,
     proverArtifacts: { wasmPath: transactWasm, zkeyPath: transactZkey },
     ...(haveAdapt
       ? { adaptProverArtifacts: { wasmPath: adaptWasm, zkeyPath: adaptZkey } }
