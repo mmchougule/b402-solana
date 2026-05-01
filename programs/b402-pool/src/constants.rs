@@ -40,6 +40,11 @@ pub const TAG_FEE_BIND: [u8; 32] = tag_fr_le(b"b402/v1/fee-bind");
 pub const TAG_ROOT_BIND: [u8; 32] = tag_fr_le(b"b402/v1/root-bind");
 pub const TAG_ADAPT_BIND: [u8; 32] = tag_fr_le(b"b402/v1/adapt-bind");
 pub const TAG_RECIPIENT_BIND: [u8; 32] = tag_fr_le(b"b402/v1/recipient-bind");
+/// Phase 9 dual-note minting: domain tag for the deterministic random_b
+/// derivation `Poseidon(commitment_a, TAG_EXCESS)`. Same `tag_fr_le`
+/// convention as the other 9 tags (NOT a Poseidon hash — see PHASE-9
+/// spike notes §5).
+pub const TAG_EXCESS: [u8; 32] = tag_fr_le(b"b402/v1/excess");
 
 /// Encode a tag string to its canonical 32-byte LE Fr representation.
 ///
@@ -82,6 +87,7 @@ mod tests {
             TAG_ROOT_BIND,
             TAG_ADAPT_BIND,
             TAG_RECIPIENT_BIND,
+            TAG_EXCESS,
         ];
         for i in 0..all.len() {
             for j in (i + 1)..all.len() {

@@ -14,8 +14,10 @@ include "circomlib/circuits/poseidon.circom";
  * and mints output notes in `expectedOutMint`, provably bound to an adapter
  * program + instruction payload + expected minimum output.
  *
- * Public inputs (23 total; first 18 match TransactPublicInputs for byte-level
- * compatibility with the prover package. Last 5 are adapt-specific):
+ * Public inputs (24 total; first 18 match TransactPublicInputs for byte-level
+ * compatibility with the prover package. Indexes 18..22 are adapt-specific.
+ * Index 23 was added by Phase 9 dual-note minting so the pool can recompute
+ * `commitment_b` for the excess output leaf — see PHASE-9-dual-note-minting.md):
  *   0:  merkleRoot
  *   1:  nullifier[0]
  *   2:  nullifier[1]
@@ -39,6 +41,10 @@ include "circomlib/circuits/poseidon.circom";
  *   20: expectedOutValue         = pool's minimum output delta
  *   21: expectedOutMint          = OUT mint
  *   22: adaptBindTag             = domain tag 'b402/v1/adapt-bind'
+ *   23: outSpendingPubA          = outSpendingPub[0] (Phase 9 dual-note: pool
+ *                                 reads this to compute commitment_b for the
+ *                                 excess output leaf — keeps the dummy slot
+ *                                 outSpendingPub[1] private)
  *
  * Distinct from transact:
  *   - Two mint bindings: input notes bind to publicTokenMint; output notes
@@ -85,6 +91,14 @@ template Adapt(depth) {
     signal input expectedOutValue;
     signal input expectedOutMint;
     signal input adaptBindTag;
+
+    // Phase 9 dual-note: the real OUT note's spending pub. Promoted here so
+    // the pool program can recompute the excess-output commitment in Rust
+    // (it needs spending_pub as a Poseidon input). Constrained below to equal
+    // outSpendingPub[0]. The dummy slot outSpendingPub[1] stays private —
+    // circom does not allow indexed elements in `component main { public[] }`,
+    // so we publish a dedicated alias instead of the whole array.
+    signal input outSpendingPubA;
 
     // ===== Private inputs =====
     signal input inTokenMint[2];
@@ -276,6 +290,11 @@ template Adapt(depth) {
     signal _rootBindAck;
     _adapterIdAck <== adapterId  * 1;
     _rootBindAck  <== rootBind   * 1;
+
+    // Phase 9 dual-note: bind the public alias to the real OUT slot's
+    // spending_pub. This is the only spendingPub the pool needs to see —
+    // dummy slot stays private. One extra constraint.
+    outSpendingPubA === outSpendingPub[0];
 }
 
 component main {
@@ -300,6 +319,9 @@ component main {
         actionHash,
         expectedOutValue,
         expectedOutMint,
-        adaptBindTag
+        adaptBindTag,
+        // Phase 9 dual-note: appended at the end so existing proof-input
+        // indices (0..22) keep their meaning. New index = 23.
+        outSpendingPubA
     ]
 } = Adapt(26);

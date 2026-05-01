@@ -15,8 +15,12 @@ use vk::ADAPT_VK;
 
 declare_id!("3Y2tyhNSaUiW5AcZcmFGRyTMdnroxHxc5GqFQPcMTZae");
 
-/// Adapt circuit has 23 public inputs (18 from transact + 5 adapt-specific).
-pub const PUBLIC_INPUT_COUNT: usize = 23;
+/// Adapt circuit has 24 public inputs as of Phase 9 dual-note minting:
+/// 18 from transact-layout + 5 adapt-specific + 1 outSpendingPubA alias.
+/// Pre-Phase-9 builds expected 23 — bumping this constant without
+/// redeploying the matching VK (regenerated from the new ceremony) makes
+/// every proof reject.
+pub const PUBLIC_INPUT_COUNT: usize = 24;
 
 pub fn reverse_endianness(input: &[u8; 32]) -> [u8; 32] {
     let mut out = [0u8; 32];

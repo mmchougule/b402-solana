@@ -41,11 +41,11 @@ use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
 use crate::constants::{
     SEED_ADAPTERS, SEED_CONFIG, SEED_TOKEN, SEED_TREE, SEED_VAULT, TAG_ADAPT_BIND,
-    TAG_COMMIT, TAG_FEE_BIND, TAG_MK_NODE, TAG_NULLIFIER, TAG_RECIPIENT_BIND, TAG_SPEND_KEY_PUB,
-    VERSION_PREFIX,
+    TAG_COMMIT, TAG_EXCESS, TAG_FEE_BIND, TAG_MK_NODE, TAG_NULLIFIER, TAG_RECIPIENT_BIND,
+    TAG_SPEND_KEY_PUB, VERSION_PREFIX,
 };
 use crate::error::PoolError;
-use crate::events::{AdaptExecuted, CommitmentAppended, NullifierSpent};
+use crate::events::{AdaptExecuted, CommitmentAppended, ExcessNoteMinted, NullifierSpent};
 use crate::state::{AdapterRegistry, PoolConfig, TokenConfig, TreeState};
 use crate::util;
 
@@ -71,11 +71,21 @@ pub struct AdaptPublicInputs {
     pub recipient_bind: [u8; 32],
     // Phase 7B trim: adapter_id (= keccak(adapter_program_id) mod p) is no
     // longer carried on the wire. Pool reconstructs it on-chain from the
-    // adapter_program account at line ~258 and feeds the recomputed value
-    // into the verifier vector — same circuit, same proof binding, just
-    // -32 wire bytes per adapt_execute.
-    pub action_hash: [u8; 32], // Poseidon_3(adaptBindTag, keccakFr, expectedOutMint_Fr)
+    // adapter_program account and feeds the recomputed value into the
+    // verifier vector.
+    //
+    // Phase 9 wire-size compensator: action_hash (= Poseidon_3(adaptBindTag,
+    // keccak(action_payload) mod p, expected_out_mint Fr)) is also dropped
+    // from the wire. Pool already reconstructs `expected_action_hash` for
+    // the binding check below; the same value is passed to the verifier.
+    // Saves 32B per adapt_execute, offsetting the +32B from out_spending_pub
+    // so net wire stays at the Phase 7B size.
     pub expected_out_value: u64,
+    /// Phase 9 dual-note: outSpendingPub[0] (the real OUT note's spending
+    /// pub) lifted to a public input by the circuit so the pool can
+    /// recompute the excess-output commitment in Rust. 32-byte little-endian
+    /// Fr — same encoding as every other Fr public input.
+    pub out_spending_pub: [u8; 32],
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
@@ -262,14 +272,17 @@ pub fn handler<'info>(
         // Phase 7B trim: no longer in args — pool is the source of truth.
     }
 
-    // action_hash binding: circuit proved Poseidon_3 over (adaptBindTag,
-    // keccak(action_payload) mod p, expected_out_mint Fr). Pool recomputes
-    // and rejects any tampering between proof gen and submission.
-    {
+    // action_hash: circuit proved Poseidon_3 over (adaptBindTag,
+    // keccak(action_payload) mod p, expected_out_mint Fr). Pool reconstructs
+    // it from on-chain values (action_payload + token_config_out.mint) and
+    // feeds the recomputed value to the verifier — same proof binding,
+    // 32 fewer wire bytes per adapt_execute (Phase 9 trim, mirrors the
+    // adapter_id removal from Phase 7B).
+    let computed_action_hash: [u8; 32] = {
         let payload_keccak = keccak::hash(&args.action_payload).0;
         let payload_keccak_fr = util::reduce_le_mod_p(&payload_keccak);
         let expected_out_mint_fr = util::reduce_le_mod_p(&out_mint.to_bytes());
-        let expected_action_hash = hashv(
+        hashv(
             Parameters::Bn254X5,
             Endianness::LittleEndian,
             &[
@@ -279,12 +292,8 @@ pub fn handler<'info>(
             ],
         )
         .map_err(|_| error!(PoolError::InvalidInstructionData))?
-        .to_bytes();
-        require!(
-            pi.action_hash == expected_action_hash,
-            PoolError::InvalidAdapterBinding
-        );
-    }
+        .to_bytes()
+    };
 
     // Root ring membership.
     {
@@ -322,7 +331,7 @@ pub fn handler<'info>(
     }
 
     // Verify proof.
-    let public_inputs: Vec<[u8; 32]> = build_public_inputs_for_adapt(pi, &in_mint, &out_mint, &adapter_program_key);
+    let public_inputs: Vec<[u8; 32]> = build_public_inputs_for_adapt(pi, &in_mint, &out_mint, &adapter_program_key, &computed_action_hash);
     let mut proof_bytes = [0u8; 256];
     proof_bytes.copy_from_slice(&args.proof);
     verifier_cpi::invoke_verify_adapt(
@@ -531,7 +540,23 @@ pub fn handler<'info>(
         PoolError::AdapterReturnedLessThanMin
     );
 
-    // Append output commitments to the tree.
+    // Append output commitments to the tree, then (Phase 9 dual-note) any
+    // excess delta as a SECOND commitment owned by the same spending_pub.
+    //
+    // Invariant chain that makes the excess leaf safe:
+    //   1. `delta` is read from this program's own out_vault PDA (post-CPI
+    //      reload + saturating_sub of the snapshot). Adapter cannot forge it.
+    //   2. `pi.expected_out_value` and `pi.out_spending_pub` are bound to
+    //      the verified Groth16 proof — see circuit constraints
+    //      `outSum === expectedOutValue` and
+    //      `outSpendingPubA === outSpendingPub[0]` in adapt.circom.
+    //   3. `random_b = Poseidon(commitment_a, TAG_EXCESS)` is deterministic
+    //      from a public, proof-bound value plus a fixed tag. The SDK
+    //      derives the same value off-chain so it can spend the leaf later.
+    //   4. `commitment_b` mirrors the SDK's `commitmentHash` exactly:
+    //      Poseidon(TAG_COMMIT, outMintFr, valueFr, randomB, spendingPub)
+    //      with `Endianness::LittleEndian` (same convention as every other
+    //      Poseidon call in this program — see PHASE-9 spike notes §5).
     {
         let mut tree = ctx.accounts.tree_state.load_mut()?;
         for (i, commitment) in pi.commitment_out.iter().enumerate() {
@@ -557,6 +582,70 @@ pub fn handler<'info>(
                 viewing_tag: vt,
                 tree_root_after: new_root,
                 slot: clock.slot,
+            });
+        }
+
+        // Phase 9 dual-note: mint the excess delta into a second leaf. The
+        // canonical OUT note slot is index 0 (slot 1 is the dummy in the
+        // current swap shape — outIsDummy[1]=1 in the witness). The excess
+        // note is bound to the same spending_pub as the main note via the
+        // Poseidon commitment, so only the holder of `spending_priv` can
+        // ever spend it.
+        let excess: u64 = delta
+            .checked_sub(pi.expected_out_value)
+            .ok_or(error!(PoolError::ArithmeticUnderflow))?;
+        if excess > 0 {
+            let out_mint_fr = util::reduce_le_mod_p(&out_mint.to_bytes());
+            let commitment_a = pi.commitment_out[0];
+
+            // random_b = Poseidon(commitment_a, TAG_EXCESS) LE.
+            // Deterministic + collision-resistant + opaque on-chain. SDK
+            // mirrors this in packages/sdk/src/excess.ts::deriveExcessRandom.
+            let random_b = hashv(
+                Parameters::Bn254X5,
+                Endianness::LittleEndian,
+                &[&commitment_a[..], &TAG_EXCESS[..]],
+            )
+            .map_err(|_| error!(PoolError::ProofVerificationFailed))?
+            .to_bytes();
+
+            // commitment_b matches packages/sdk/src/poseidon.ts::commitmentHash:
+            //   Poseidon([TAG_COMMIT, outMintFr, valueFr, random, spendingPub])
+            // The SDK passes inputs in this exact order (see commitmentHash in
+            // poseidon.ts:32-39). Any reordering breaks parity silently.
+            let value_fr = u64_to_fr_le(excess);
+            let commitment_b = hashv(
+                Parameters::Bn254X5,
+                Endianness::LittleEndian,
+                &[
+                    &TAG_COMMIT[..],
+                    &out_mint_fr[..],
+                    &value_fr[..],
+                    &random_b[..],
+                    &pi.out_spending_pub[..],
+                ],
+            )
+            .map_err(|_| error!(PoolError::ProofVerificationFailed))?
+            .to_bytes();
+
+            let excess_leaf_index = tree.leaf_count;
+            let new_root = util::tree_append(&mut tree, commitment_b)?;
+            // Excess leaf: we don't publish a ciphertext for it. The SDK
+            // reconstructs the note locally from on-chain inputs. Pass
+            // zero-padding for the encrypted-note fields so off-chain
+            // indexers see a consistent shape across both leaves.
+            emit!(CommitmentAppended {
+                leaf_index: excess_leaf_index,
+                commitment: commitment_b,
+                ciphertext: [0u8; 89],
+                ephemeral_pub: [0u8; 32],
+                viewing_tag: [0u8; 2],
+                tree_root_after: new_root,
+                slot: clock.slot,
+            });
+            emit!(ExcessNoteMinted {
+                leaf_index: excess_leaf_index,
+                excess,
             });
         }
     }
@@ -587,6 +676,7 @@ fn build_public_inputs_for_adapt(
     in_mint: &Pubkey,
     out_mint: &Pubkey,
     adapter_program: &Pubkey,
+    action_hash: &[u8; 32],
 ) -> Vec<[u8; 32]> {
     let mut v: Vec<[u8; 32]> = Vec::with_capacity(verifier_cpi::PUBLIC_INPUT_COUNT_ADAPT);
     // First 18 — identical layout to transact.
@@ -610,14 +700,168 @@ fn build_public_inputs_for_adapt(
     v.push(TAG_SPEND_KEY_PUB);
     v.push(TAG_FEE_BIND);
     v.push(TAG_RECIPIENT_BIND);
-    // Adapt-specific — 5 more.
+    // Adapt-specific — 5 entries.
     // adapter_id: pool reconstructs from adapter_program account.
     let adapter_id_digest = anchor_lang::solana_program::keccak::hash(adapter_program.as_ref()).0;
     v.push(util::reduce_le_mod_p(&adapter_id_digest));
-    v.push(pi.action_hash);
+    // action_hash: pool reconstructs (Phase 9 trim — see handler).
+    v.push(*action_hash);
     v.push(u64_to_fr_le(pi.expected_out_value));
     // expected_out_mint: derived from token_config_out, same circuit binding.
     v.push(util::reduce_le_mod_p(&out_mint.to_bytes()));
     v.push(TAG_ADAPT_BIND);
+    // Phase 9 dual-note (verifier index 23): outSpendingPub[0]. Forwarded
+    // straight from the wire — the verifier rejects any value that wasn't
+    // the prover's real outSpendingPub[0] because the circuit constrains
+    // outSpendingPubA === outSpendingPub[0].
+    v.push(pi.out_spending_pub);
     v
+}
+
+#[cfg(test)]
+mod excess_parity_tests {
+    //! Phase 9 dual-note minting — Rust ↔ TS parity.
+    //!
+    //! Frozen fixture matches `tests/v2/integration/dual_note_vector.test.ts`.
+    //! Both files must agree on `EXPECTED_COMMITMENT_B_HEX` after the first
+    //! run; if they diverge, the SDK and pool will mint commitments that
+    //! the user's wallet cannot recompute → the excess leaf becomes
+    //! unspendable. Treat any drift as a P0 bug.
+    use super::*;
+    use crate::constants::{TAG_COMMIT, TAG_EXCESS};
+    use anchor_lang::solana_program::poseidon::{hashv, Endianness, Parameters};
+    use std::convert::TryInto;
+    fn hex_to_le32(hex: &str) -> [u8; 32] {
+        // Decode without pulling in a hex crate dependency. 64-char input.
+        assert_eq!(hex.len(), 64, "expected 32-byte hex");
+        let mut out = [0u8; 32];
+        for i in 0..32 {
+            let byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap();
+            out[i] = byte;
+        }
+        out
+    }
+    fn bigint_le32(hi: u64, b: u64, c: u64, lo: u64) -> [u8; 32] {
+        // Pack four u64 limbs (BIG-endian conceptually: hi is the most
+        // significant) into a 32-byte little-endian buffer. The TS fixture
+        // uses 0x_aabbccdd... literals which big-int interpretation builds
+        // most-significant-first; we mirror that here.
+        let mut out = [0u8; 32];
+        out[0..8].copy_from_slice(&lo.to_le_bytes());
+        out[8..16].copy_from_slice(&c.to_le_bytes());
+        out[16..24].copy_from_slice(&b.to_le_bytes());
+        out[24..32].copy_from_slice(&hi.to_le_bytes());
+        out
+    }
+    /// Frozen fixture — keep in lockstep with `dual_note_vector.test.ts`.
+    /// All four bigints fit < BN254 Fr modulus (top byte ≤ 0x2A).
+    fn fixture() -> ([u8; 32], [u8; 32], [u8; 32], u64) {
+        // commitmentA = 0x1122334455667788_99aabbccddeeff00_1122334455667788_99aabbccddeeff00
+        let commitment_a = bigint_le32(
+            0x1122_3344_5566_7788,
+            0x99aa_bbcc_ddee_ff00,
+            0x1122_3344_5566_7788,
+            0x99aa_bbcc_ddee_ff00,
+        );
+        // outMintFr = 0x0102030405060708_090a0b0c0d0e0f10_1112131415161718_191a1b1c1d1e1f20
+        let out_mint_fr = bigint_le32(
+            0x0102_0304_0506_0708,
+            0x090a_0b0c_0d0e_0f10,
+            0x1112_1314_1516_1718,
+            0x191a_1b1c_1d1e_1f20,
+        );
+        // spendingPub = 0x2a2b2c2d2e2f3031_3233343536373839_3a3b3c3d3e3f4041_4243444546474849
+        let spending_pub = bigint_le32(
+            0x2a2b_2c2d_2e2f_3031,
+            0x3233_3435_3637_3839,
+            0x3a3b_3c3d_3e3f_4041,
+            0x4243_4445_4647_4849,
+        );
+        let excess: u64 = 1_234_567;
+        (commitment_a, out_mint_fr, spending_pub, excess)
+    }
+    fn compute_random_b(commitment_a: &[u8; 32]) -> [u8; 32] {
+        hashv(
+            Parameters::Bn254X5,
+            Endianness::LittleEndian,
+            &[&commitment_a[..], &TAG_EXCESS[..]],
+        )
+        .unwrap()
+        .to_bytes()
+    }
+    fn compute_commitment_b(
+        out_mint_fr: &[u8; 32],
+        excess: u64,
+        random_b: &[u8; 32],
+        spending_pub: &[u8; 32],
+    ) -> [u8; 32] {
+        let value_fr = u64_to_fr_le(excess);
+        hashv(
+            Parameters::Bn254X5,
+            Endianness::LittleEndian,
+            &[
+                &TAG_COMMIT[..],
+                &out_mint_fr[..],
+                &value_fr[..],
+                &random_b[..],
+                &spending_pub[..],
+            ],
+        )
+        .unwrap()
+        .to_bytes()
+    }
+    /// Pinned LE-hex commitment_b for the frozen fixture. Empty until first
+    /// run; matches the TS fixture's placeholder. Update both at the same
+    /// time, never one without the other.
+    const EXPECTED_COMMITMENT_B_HEX: &str = "";
+    #[test]
+    fn commitment_b_is_deterministic() {
+        let (commitment_a, out_mint_fr, spending_pub, excess) = fixture();
+        let r1 = compute_random_b(&commitment_a);
+        let r2 = compute_random_b(&commitment_a);
+        assert_eq!(r1, r2);
+        let c1 = compute_commitment_b(&out_mint_fr, excess, &r1, &spending_pub);
+        let c2 = compute_commitment_b(&out_mint_fr, excess, &r2, &spending_pub);
+        assert_eq!(c1, c2);
+    }
+    #[test]
+    fn commitment_b_matches_pinned_vector() {
+        let (commitment_a, out_mint_fr, spending_pub, excess) = fixture();
+        let random_b = compute_random_b(&commitment_a);
+        let commitment_b =
+            compute_commitment_b(&out_mint_fr, excess, &random_b, &spending_pub);
+        let actual_hex = commitment_b
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>();
+        if EXPECTED_COMMITMENT_B_HEX.is_empty() {
+            panic!(
+                "EXPECTED_COMMITMENT_B_HEX not yet pinned. Set it (here AND \
+                 in tests/v2/integration/dual_note_vector.test.ts) to: \"{}\"",
+                actual_hex
+            );
+        }
+        let expected: [u8; 32] = hex_to_le32(EXPECTED_COMMITMENT_B_HEX);
+        assert_eq!(
+            commitment_b, expected,
+            "Rust commitment_b drifted from pinned TS value. Hex: {}",
+            actual_hex
+        );
+    }
+    #[test]
+    fn random_b_changes_with_commitment_a() {
+        let (mut commitment_a, _, _, _) = fixture();
+        let r_orig = compute_random_b(&commitment_a);
+        // Flip one bit in commitment_a.
+        commitment_a[0] ^= 0x01;
+        let r_perturbed = compute_random_b(&commitment_a);
+        assert_ne!(r_orig, r_perturbed);
+    }
+    /// Make sure `try_into` is reachable in this scope (avoids dead-code lint
+    /// when the helpers above are inlined).
+    #[test]
+    fn _smoke_imports() {
+        let arr: [u8; 4] = [1, 2, 3, 4];
+        let _: [u8; 4] = arr.as_slice().try_into().unwrap();
+    }
 }

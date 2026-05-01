@@ -4,6 +4,15 @@
 //!
 //! Format is groth16-solana's `Groth16Verifyingkey`.
 //! VK hash is recorded in tests; any regeneration must update the pinned hash.
+//!
+//! TODO(phase-9): regenerate this VK after the Phase 9 trusted setup. The
+//! current bytes were produced for a 23-public-input adapt circuit; the
+//! Phase 9 circuit has 24 public inputs (added `outSpendingPubA`). Until
+//! this file is regenerated, the verifier program rejects every proof
+//! produced by the post-Phase-9 prover. Steps in `docs/prds/PHASE-9-HANDOFF-FINAL.md`
+//! §"Trusted setup" — re-run `circuits/scripts/throwaway-ceremony-adapt.sh`
+//! against the new R1CS, then `circuits/scripts/vk-to-rust.mjs` to refresh
+//! this file. `VK_IC` length grows from 24 → 25 (= public_input_count + 1).
 
 use groth16_solana::groth16::Groth16Verifyingkey;
 

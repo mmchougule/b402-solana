@@ -63,6 +63,7 @@ import {
 import { instructionDiscriminator, concat, u16Le, u32Le, u64Le, vecU8 } from './programs/anchor.js';
 import { buildZeroCache, proveMostRecentLeaf } from './merkle.js';
 import { commitmentHash, feeBindHash, nullifierHash, poseidonTagged } from './poseidon.js';
+import { computeExcessCommitment, deriveExcessRandom } from './excess.js';
 import { encryptNote } from './note-encryption.js';
 import { B402Error, B402ErrorCode } from './errors.js';
 import {
@@ -187,10 +188,65 @@ export interface PrivateSwapRequest {
 
 export interface PrivateSwapResult {
   signature: string;
-  /** New shielded note in `outMint`. */
+  /** New shielded note in `outMint`. Bound to the proof's expected_out_value. */
   outNote: SpendableNote;
   /** Out-vault delta observed on-chain post-swap. */
   outAmount: bigint;
+  /**
+   * Phase 9 dual-note minting: when the adapter delivered MORE than the
+   * proof-bound floor (`actualOut > expectedOut`), the pool appended a
+   * second leaf for the difference and the SDK reconstructed the matching
+   * SpendableNote. Present iff `outAmount > expectedOut`. The two notes
+   * sum to exactly `outAmount` — no slippage dust leaks into the vault.
+   */
+  excessNote?: SpendableNote;
+}
+
+export interface B402Status {
+  user: string;
+  cluster: 'mainnet' | 'devnet' | 'localnet';
+  public: {
+    sol: { lamports: string; ui: string };
+    tokens: Array<{
+      mint: string;
+      symbol?: string;
+      amount: string;
+      uiAmount: string;
+      decimals: number;
+      tokenAccount: string;
+    }>;
+  };
+  private: {
+    totalDeposits: number;
+    balances: Array<{
+      mint: string;
+      symbol?: string;
+      amount: string;
+      depositCount: number;
+    }>;
+  };
+  links: {
+    userOnSolscan: string;
+    poolOnSolscan: string;
+  };
+}
+
+/** Common SPL mint → symbol map for display. Phantom-style. */
+const KNOWN_SYMBOLS: Record<string, string> = {
+  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v': 'USDC',
+  'So11111111111111111111111111111111111111112': 'wSOL',
+  'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB': 'USDT',
+  'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN': 'JUP',
+  'jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL': 'JTO',
+  'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263': 'BONK',
+  'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm': 'WIF',
+  'HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3': 'PYTH',
+  '4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R': 'RAY',
+  'orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE': 'ORCA',
+  '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU': 'USDC',
+};
+function symbolFor(mint: string): string | undefined {
+  return KNOWN_SYMBOLS[mint];
 }
 
 export interface UnshieldRequest {
@@ -483,10 +539,14 @@ export class B402Solana {
           `no private deposit in mint ${req.mint.toBase58().slice(0, 8)}…`,
         );
       }
-      // Pick the most-recently-added (last in insertion order). For a
-      // multi-deposit wallet, callers can pass `note` explicitly to
-      // pick a specific one.
-      note = candidates[candidates.length - 1];
+      // Pick the rightmost leaf (highest leafIndex). proveMostRecentLeaf
+      // only validates for the rightmost; older leaves strand until the
+      // indexer-backed real-Merkle-path resolver lands. Multi-deposit
+      // callers can pass `note` explicitly to override.
+      const sortedDesc = [...candidates].sort((a, b) =>
+        Number(BigInt(b.leafIndex) - BigInt(a.leafIndex)),
+      );
+      note = sortedDesc[0];
       mint = req.mint;
     } else {
       note = this._lastShield?.result.note;
@@ -553,11 +613,47 @@ export class B402Solana {
       ...(this._relayerHttp ? { relayerHttp: this._relayerHttp.client } : {}),
     });
 
-    // The IN note was spent — mark its commitment so it stops appearing in
-    // balance/holdings, and the persistence layer records the spend.
-    this._notes!.markSpent(note.commitment);
+    // The IN note was spent — but ONLY mark it spent locally if the on-chain
+    // tx actually landed cleanly. The action's submit path may return a sig
+    // before final confirmation (e.g., HTTP relayer), and a tx that errors
+    // post-submit must NOT corrupt the cache (would strand the note).
+    await this._confirmAndMarkSpent(result.signature, note.commitment);
 
     return result;
+  }
+
+  /**
+   * Verify the tx landed without an `err`, then mark the spent commitment.
+   * Throws if confirmation reports failure — caller's caller treats that
+   * as a swap/unshield failure (note remains spendable for retry).
+   */
+  private async _confirmAndMarkSpent(signature: string, commitment: bigint): Promise<void> {
+    // Single-shot status check. If the action's submit already awaited
+    // `confirmTransaction`, this resolves instantly. If not, we re-confirm.
+    let attempts = 0;
+    while (attempts < 4) {
+      const r = await this.connection.getSignatureStatus(signature, { searchTransactionHistory: false });
+      const v = r.value;
+      if (v && (v.confirmationStatus === 'confirmed' || v.confirmationStatus === 'finalized')) {
+        if (v.err) {
+          throw new B402Error(
+            B402ErrorCode.RpcError,
+            `tx ${signature} landed with err ${JSON.stringify(v.err)} — note NOT marked spent`,
+          );
+        }
+        this._notes!.markSpent(commitment);
+        return;
+      }
+      attempts += 1;
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    // Couldn't confirm within ~6s. Don't markSpent — better to risk a retry
+    // attempt against an actually-spent leaf (which would fail closed via
+    // Light's nullifier check) than to strand a note that wasn't really spent.
+    throw new B402Error(
+      B402ErrorCode.RpcError,
+      `tx ${signature} could not be confirmed within 6s — note NOT marked spent (retry safe)`,
+    );
   }
 
   /**
@@ -606,9 +702,15 @@ export class B402Solana {
           `no private deposit in mint ${req.inMint.toBase58().slice(0, 8)}…`,
         );
       }
-      // Exact-value match required. If a deposit of exactly req.amount
-      // exists, use it; otherwise enumerate available sizes for the user.
-      note = candidates.find((n) => n.value === req.amount);
+      // Exact-value match required. Among matches, pick the rightmost leaf
+      // (highest leafIndex) — `proveMostRecentLeaf` only validates for the
+      // rightmost; older leaves with newer leaves to their right strand
+      // until we ship the indexer-backed real-Merkle-path resolver.
+      const matches = candidates.filter((n) => n.value === req.amount);
+      const sortedDesc = [...matches].sort((a, b) =>
+        Number(BigInt(b.leafIndex) - BigInt(a.leafIndex)),
+      );
+      note = sortedDesc[0];
       if (!note) {
         const sizes = candidates.map((n) => n.value.toString()).join(', ');
         throw new B402Error(
@@ -699,6 +801,10 @@ export class B402Solana {
       expectedOutValue: expectedOut,
       expectedOutMint: outMintFr,
       adaptBindTag: domainTagFr('b402/v1/adapt-bind'),
+      // Phase 9 dual-note: public alias for outSpendingPub[0]. The circuit
+      // constraint `outSpendingPubA === outSpendingPub[0]` enforces equality;
+      // we just have to populate it consistently or the proof rejects.
+      outSpendingPubA: this._wallet!.spendingPub,
       inTokenMint: [inMintFr, 0n],
       inValue: [note.value, 0n],
       inRandom: [note.random, 0n],
@@ -774,8 +880,22 @@ export class B402Solana {
       proof.publicInputsLeBytes[11], // recipient_bind
       // Phase 7B trim: adapter_id is no longer on the wire — pool reconstructs
       // from the adapter_program account on-chain. -32 bytes per adapt_execute.
-      proof.publicInputsLeBytes[19], // action_hash
+      // Phase 9 trim: action_hash also dropped from the wire — pool already
+      // reconstructs Poseidon_3(adaptBindTag, keccak(action_payload) mod p,
+      // out_mint Fr) for its binding check; same value goes to the verifier.
+      // -32 bytes per adapt_execute, offsetting the +32B from out_spending_pub
+      // so net wire stays at the Phase 7B size.
       u64Le(expectedOut),
+      // Phase 9 dual-note: out_spending_pub. Carried on the wire as a 32B
+      // LE Fr — same encoding used by every other Fr public input. The
+      // pool forwards it to the verifier at index 23, and uses it to
+      // recompute the excess-output commitment when delta > expected.
+      // MUST match the prover's witness `outSpendingPubA` (see line ~798).
+      // NOTE: `proof.publicInputsLeBytes[23]` carries the same value
+      // (the prover put it there per the new `public[]` list); we use the
+      // proof-output bytes here so a single source of truth (the prover)
+      // governs both the verifier vector and the wire copy.
+      proof.publicInputsLeBytes[23], // out_spending_pub
       u32Le(0), // encrypted_notes vec len = 0 (omit on-chain to save bytes)
       new Uint8Array([0b10]), // in_dummy_mask (slot 0 real, slot 1 dummy)
       new Uint8Array([0b10]), // out_dummy_mask
@@ -949,16 +1069,61 @@ export class B402Solana {
       viewingTag: encryptedOut.viewingTag,
     };
 
+    // Confirm tx landed without err on-chain BEFORE mutating local cache.
+    // If confirmation fails, both the spent flag and the new outNote are
+    // skipped — caller can retry without cache corruption.
+    await this._confirmAndMarkSpent(signature, note.commitment);
     // Fast-path: SDK knows the OUT note's plaintext (we built it). Insert
     // directly so the next balance/holdings reflects it without RPC.
-    // Mark the IN commitment spent so getSpendable() filters it out without
-    // needing an on-chain nullifier scan.
     this._notes!.insertNote(outNote);
-    this._notes!.markSpent(note.commitment);
+
+    // Phase 9 dual-note: if the adapter delivered MORE than the proof-bound
+    // floor, the pool appended a second leaf at `tree.leafCount + 1`. Mirror
+    // the pool's deterministic excess-leaf derivation locally so the SDK
+    // can spend it later without indexer assistance.
+    //
+    // Determinism contract (must stay in sync with
+    // `programs/b402-pool/src/instructions/adapt_execute.rs`):
+    //   random_b      = Poseidon(commitment_a, TAG_EXCESS) LE
+    //   commitment_b  = Poseidon(TAG_COMMIT, outMintFr, excess, random_b, spendingPub) LE
+    let excessNote: SpendableNote | undefined;
+    const excess = outAmount - expectedOut;
+    if (excess > 0n) {
+      const randomB = await deriveExcessRandom(outCommitment);
+      const commitmentB = await computeExcessCommitment(
+        outMintFr,
+        excess,
+        randomB,
+        this._wallet!.spendingPub,
+      );
+      excessNote = {
+        tokenMint: outMintFr,
+        value: excess,
+        random: randomB,
+        spendingPub: this._wallet!.spendingPub,
+        spendingPriv: this._wallet!.spendingPriv,
+        commitment: commitmentB,
+        // Main note went to leaf `tree.leafCount`; the excess immediately
+        // follows. The pool's `tree_append` increments `leaf_count` exactly
+        // once per non-dummy `commitment_out[i]` in the loop above the
+        // excess block, then once more for the excess leaf.
+        leafIndex: tree.leafCount + 1n,
+        // No on-chain ciphertext for the excess leaf — pool emitted zero
+        // padding (see ExcessNoteMinted block in adapt_execute.rs). The
+        // SDK reconstructs the plaintext locally; off-chain backfill of
+        // this note from a fresh device requires the same on-chain data
+        // the pool used (commitment_a + tag) plus the wallet's keys.
+        encryptedBytes: new Uint8Array(0),
+        ephemeralPub: new Uint8Array(0),
+        viewingTag: new Uint8Array(0),
+      };
+      this._notes!.insertNote(excessNote);
+    }
+
     this.learnMint(req.inMint);
     this.learnMint(req.outMint);
 
-    return { signature, outNote, outAmount };
+    return { signature, outNote, outAmount, excessNote };
   }
 
   /** Coming soon. Use `examples/kamino-adapter-fork-deposit.ts` for the underlying flow today. */
@@ -984,29 +1149,8 @@ export class B402Solana {
     return this._notes;
   }
 
-  async status(): Promise<{
-    cluster: string;
-    walletPubkey: string;
-    balances: Array<{ mint: string; amount: string; depositCount: number }>;
-  }> {
-    await this.ready();
-    const agg = new Map<bigint, { amount: bigint; count: number }>();
-    for (const note of (this._notes as NoteStore).getAllSpendable()) {
-      const cur = agg.get(note.tokenMint) ?? { amount: 0n, count: 0 };
-      cur.amount += note.value;
-      cur.count += 1;
-      agg.set(note.tokenMint, cur);
-    }
-    return {
-      cluster: this.cluster,
-      walletPubkey: this.keypair.publicKey.toBase58(),
-      balances: Array.from(agg.entries()).map(([fr, v]) => ({
-        mint: mintLabel(fr, this.resolveMint(fr)),
-        amount: v.amount.toString(),
-        depositCount: v.count,
-      })),
-    };
-  }
+  // (status() moved earlier in file — combined public + private snapshot.
+  //  See `B402Status` interface and the implementation above.)
 
   /**
    * Per-deposit holdings owned by this client. Each entry is one private
@@ -1044,6 +1188,66 @@ export class B402Solana {
    * returned as opaque short labels (`unknown:<12hex>`) so agents have a
    * stable key to compare across calls.
    */
+  /**
+   * Combined public + private snapshot. Single call that returns everything
+   * a UI typically needs: caller's public SPL token balances (Phantom-visible)
+   * alongside the private/shielded balances aggregated from the local note
+   * store. Wallet explorers can't see the private side; that's the whole point.
+   *
+   * Pass `refresh: true` to re-scan on-chain commitment events before
+   * computing private aggregates.
+   */
+  async status(opts: { refresh?: boolean } = {}): Promise<B402Status> {
+    await this.ready();
+    if (opts.refresh === true) await this._notes!.backfill({ limit: 30 });
+    const [publicSide, privateSide] = await Promise.all([
+      this.walletBalance(),
+      Promise.resolve().then(() => {
+        const agg = new Map<bigint, { amount: bigint; count: number }>();
+        for (const n of this._notes!.getAllSpendable()) {
+          const cur = agg.get(n.tokenMint) ?? { amount: 0n, count: 0 };
+          cur.amount += n.value;
+          cur.count += 1;
+          agg.set(n.tokenMint, cur);
+        }
+        return Array.from(agg.entries()).map(([fr, v]) => {
+          const mint = this.resolveMint(fr);
+          return {
+            mint: mint?.toBase58() ?? mintLabel(fr, undefined),
+            symbol: mint ? symbolFor(mint.toBase58()) : undefined,
+            amount: v.amount.toString(),
+            depositCount: v.count,
+          };
+        });
+      }),
+    ]);
+    const explorer = (kind: 'account', addr: string) =>
+      `https://solscan.io/${kind}/${addr}${this.cluster === 'devnet' ? '?cluster=devnet' : ''}`;
+    return {
+      user: this.keypair.publicKey.toBase58(),
+      cluster: this.cluster,
+      public: {
+        sol: { lamports: publicSide.sol.amount, ui: (Number(publicSide.sol.amount) / 1e9).toFixed(6) },
+        tokens: publicSide.tokens.map((t) => ({
+          mint: t.mint,
+          symbol: symbolFor(t.mint),
+          amount: t.amount,
+          uiAmount: (Number(t.amount) / 10 ** t.decimals).toString(),
+          decimals: t.decimals,
+          tokenAccount: t.tokenAccount,
+        })),
+      },
+      private: {
+        totalDeposits: privateSide.reduce((a, b) => a + b.depositCount, 0),
+        balances: privateSide,
+      },
+      links: {
+        userOnSolscan: explorer('account', this.keypair.publicKey.toBase58()),
+        poolOnSolscan: explorer('account', this.programIds.b402Pool.toString()),
+      },
+    };
+  }
+
   async balance(opts: { mint?: PublicKey; refresh?: boolean } = {}): Promise<{
     balances: Array<{ mint: string; amount: string; depositCount: number }>;
   }> {

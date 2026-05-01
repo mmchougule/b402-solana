@@ -85,3 +85,13 @@ pub struct AdaptExecuted {
     pub relayer_fee: u64,
     pub slot: u64,
 }
+
+/// Phase 9 dual-note minting: emitted when an `adapt_execute` produces
+/// `actual_out > expected_out_value`, after the pool appends the second
+/// (excess) commitment leaf. SDK indexers use `leaf_index` to recover
+/// the merkle path to the excess note when spending it later.
+#[event]
+pub struct ExcessNoteMinted {
+    pub leaf_index: u64,
+    pub excess: u64,
+}

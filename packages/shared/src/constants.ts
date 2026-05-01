@@ -25,6 +25,10 @@ export const DomainTags = {
   adaptBind:      'b402/v1/adapt-bind',
   disclose:       'b402/v1/disclose',
   recipientBind:  'b402/v1/recipient-bind',
+  // Phase 9 dual-note: domain-separates the deterministic random_b
+  // derivation `Poseidon(commitment_a, TAG_EXCESS)`. Used by SDK +
+  // pool program to mirror each other exactly.
+  excess:         'b402/v1/excess',
 } as const;
 
 export type DomainTagName = keyof typeof DomainTags;

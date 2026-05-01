@@ -73,6 +73,8 @@ pub enum PoolError {
     ValueOverflow = 1702,
     #[msg("slippage exceeded")]
     SlippageExceeded = 1703,
+    #[msg("arithmetic underflow")]
+    ArithmeticUnderflow = 1704,
 
     #[msg("adapter not registered")]
     AdapterNotRegistered = 1800,

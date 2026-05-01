@@ -15,7 +15,12 @@ use anchor_lang::solana_program::program::invoke;
 use crate::error::PoolError;
 
 pub const PUBLIC_INPUT_COUNT: usize = 18;
-pub const PUBLIC_INPUT_COUNT_ADAPT: usize = 23;
+/// Phase 9 dual-note minting bumped this from 23 → 24. Index 23 is the new
+/// `outSpendingPub[0]` alias (see circuits/adapt.circom and
+/// `AdaptPublicInputs::out_spending_pub`). Old proofs (23 inputs) are NOT
+/// backward-compatible — the verifier program must be redeployed with a
+/// matching VK from the Phase 9 trusted setup before this constant ships.
+pub const PUBLIC_INPUT_COUNT_ADAPT: usize = 24;
 
 /// sha256("global:verify")[0..8]. Pre-computed to avoid hashing at runtime.
 /// Must match the Anchor-generated discriminator for `pub fn verify(...)` in
