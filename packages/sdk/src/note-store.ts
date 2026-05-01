@@ -27,11 +27,10 @@ export interface NoteStoreOptions {
   persist?: { dir: string };
 }
 
-interface PersistedSnapshot {
-  /** Schema version — bump if the on-disk shape changes. */
+interface PersistedSnapshotV1 {
   v: 1;
   notes: Array<{
-    tokenMint: string;     // bigint as decimal
+    tokenMint: string;
     value: string;
     random: string;
     spendingPub: string;
@@ -45,6 +44,18 @@ interface PersistedSnapshot {
   spentNullifiers: string[];
 }
 
+interface PersistedSnapshotV2 extends Omit<PersistedSnapshotV1, 'v'> {
+  v: 2;
+  /** Newest signature seen by `backfill` for this pool program. Used as the
+   *  `until:` floor on the next call so we only fetch sigs strictly newer
+   *  than this — turning a 30-tx full re-scan into a 0-2-tx delta scan and
+   *  cutting status from 48s on throttled RPC to <500ms typical. Null on
+   *  first run. */
+  backfillCursor: string | null;
+}
+
+type PersistedSnapshot = PersistedSnapshotV1 | PersistedSnapshotV2;
+
 export class NoteStore {
   private readonly opts: NoteStoreOptions;
   private readonly notesByCommitment = new Map<string, SpendableNote>();
@@ -52,6 +63,9 @@ export class NoteStore {
   private _logsSubId: number | null = null;
   private _lastScannedSlot = 0n;
   private _persistPath: string | null = null;
+  /** Newest pool signature processed by backfill — used as the `until:`
+   *  cursor on the next call. null = first run, scan latest window. */
+  private _backfillCursor: string | null = null;
 
   constructor(opts: NoteStoreOptions) {
     this.opts = opts;
@@ -136,73 +150,144 @@ export class NoteStore {
   }
 
   /**
-   * Backfill spendable notes from on-chain history. Fetches recent signatures
-   * for the pool program, parses CommitmentAppended events from each tx's
-   * logs, and attempts to claim each commitment via ingestCommitment.
+   * Backfill spendable notes from on-chain history. Cursor-driven: each call
+   * only fetches signatures strictly newer than the persisted cursor, so the
+   * common path is O(0–2 tx) instead of a full re-scan of the latest window.
    *
-   * Idempotent — commitments already in the in-memory store are skipped
-   * cheaply, and the on-chain leaf index in the event is authoritative.
+   * First call (no cursor): scans the latest `limit` signatures.
+   * Subsequent calls: fetches everything newer than the cursor, paginating
+   *   in `limit`-sized pages if a long offline gap accumulated more than
+   *   `limit` txs. After processing, advances the cursor to the newest sig
+   *   seen so the next call is again incremental.
    *
-   * Default limit 30 (down from 100). getTransaction calls run in parallel
-   * batches of 5 with per-call retry on rate-limit. Public devnet RPC
-   * frequently throttles 100-deep sequential fans — this shape is friendlier.
+   * Why cursor matters: the previous shape made 1 + 30 RPC calls every
+   * status() invocation. On throttled public RPC (~40 RPS shared) this hit
+   * 429s + backoff and produced 48s status calls. With a cursor the typical
+   * post-boot `refresh:true` is a single getSignaturesForAddress that returns
+   * 0–2 entries.
+   *
+   * Idempotent — commitments already in the store are skipped cheaply.
+   * Live `onLogs` subscription continues to ingest real-time arrivals
+   * independently; backfill is purely for catching up across MCP restarts.
+   *
+   * Force a full re-scan (recovery path) by passing `from: 'genesis'`,
+   * which resets the cursor and walks the latest `limit` window.
    *
    * Does NOT maintain the client-side merkle tree. The Scanner does that
    * for live events; for arbitrary historical unshields, callers need a
    * full-tree backfill which is out of scope for v0.
    */
-  async backfill(opts: { limit?: number; before?: string } = {}): Promise<{
+  async backfill(opts: {
+    limit?: number;
+    before?: string;
+    from?: 'cursor' | 'genesis';
+  } = {}): Promise<{
     txsScanned: number;
     eventsSeen: number;
     notesIngested: number;
+    cursorAdvanced: boolean;
+    /** True if pagination hit MAX_PAGES before reaching the prior cursor.
+     *  Callers should re-invoke `backfill` to keep walking the tail. */
+    truncated: boolean;
   }> {
     const limit = opts.limit ?? 30;
-    const sigs = await this.opts.connection.getSignaturesForAddress(
-      this.opts.poolProgramId,
-      { limit, before: opts.before },
-      'confirmed',
-    );
+    const fromMode = opts.from ?? 'cursor';
 
+    // Reset path: caller wants a forced re-scan of the latest window. Drops
+    // the cursor and behaves like first-run.
+    if (fromMode === 'genesis') {
+      this._backfillCursor = null;
+    }
+
+    const cursor = this._backfillCursor;
+    let txsScanned = 0;
     let eventsSeen = 0;
     let notesIngested = 0;
-    const BATCH = 5;
-    for (let i = 0; i < sigs.length; i += BATCH) {
-      const batch = sigs.slice(i, i + BATCH);
-      const txs = await Promise.allSettled(
-        batch.map((sig) =>
-          sig.err
-            ? Promise.resolve(null)
-            : this.opts.connection.getTransaction(sig.signature, {
-                maxSupportedTransactionVersion: 0,
-                commitment: 'confirmed',
-              }),
-        ),
+    let newestSig: string | null = null;
+    let truncated = false;
+
+    // Page through (newest → cursor]. Stop when the page comes back empty
+    // or shorter than `limit` (last page).
+    let before: string | undefined = opts.before;
+    // Bound iterations defensively — at limit=30 this caps the worst-case
+    // catch-up at 300 tx, which is far past any reasonable offline window.
+    // If the user does manage to exceed it we MUST NOT advance the cursor —
+    // otherwise we'd permanently skip whatever sits between the oldest sig
+    // we processed and the original cursor.
+    const MAX_PAGES = 10;
+    for (let page = 0; page < MAX_PAGES; page += 1) {
+      const sigs = await this.opts.connection.getSignaturesForAddress(
+        this.opts.poolProgramId,
+        { limit, before, until: cursor ?? undefined },
+        'confirmed',
       );
-      for (const result of txs) {
-        if (result.status !== 'fulfilled') continue;
-        const tx = result.value;
-        const logs = tx?.meta?.logMessages;
-        if (!logs) continue;
-        for (const line of logs) {
-          const ev = parseProgramDataLog(line);
-          if (!ev) continue;
-          eventsSeen += 1;
-          const commitmentBigint = leToBigint(ev.commitment);
-          if (this.notesByCommitment.has(String(commitmentBigint))) continue;
-          const ok = await this.ingestCommitment({
-            commitment: commitmentBigint,
-            leafIndex: ev.leafIndex,
-            encrypted: {
-              ciphertext: ev.ciphertext,
-              ephemeralPub: ev.ephemeralPub,
-              viewingTag: ev.viewingTag,
-            },
-          });
-          if (ok) notesIngested += 1;
+      if (sigs.length === 0) break;
+      txsScanned += sigs.length;
+      // RPC returns newest-first. Capture the newest from the very first
+      // page only — that's the cursor we'll persist after processing.
+      if (page === 0) newestSig = sigs[0].signature;
+
+      const BATCH = 5;
+      for (let i = 0; i < sigs.length; i += BATCH) {
+        const batch = sigs.slice(i, i + BATCH);
+        const txs = await Promise.allSettled(
+          batch.map((sig) =>
+            sig.err
+              ? Promise.resolve(null)
+              : this.opts.connection.getTransaction(sig.signature, {
+                  maxSupportedTransactionVersion: 0,
+                  commitment: 'confirmed',
+                }),
+          ),
+        );
+        for (const result of txs) {
+          if (result.status !== 'fulfilled') continue;
+          const tx = result.value;
+          const logs = tx?.meta?.logMessages;
+          if (!logs) continue;
+          for (const line of logs) {
+            const ev = parseProgramDataLog(line);
+            if (!ev) continue;
+            eventsSeen += 1;
+            const commitmentBigint = leToBigint(ev.commitment);
+            if (this.notesByCommitment.has(String(commitmentBigint))) continue;
+            const ok = await this.ingestCommitment({
+              commitment: commitmentBigint,
+              leafIndex: ev.leafIndex,
+              encrypted: {
+                ciphertext: ev.ciphertext,
+                ephemeralPub: ev.ephemeralPub,
+                viewingTag: ev.viewingTag,
+              },
+            });
+            if (ok) notesIngested += 1;
+          }
         }
       }
+
+      // No more pages? Either fewer than limit returned or we've reached
+      // the cursor. Otherwise prepare to fetch the next older page using
+      // the OLDEST sig from this page as the `before` cursor.
+      if (sigs.length < limit) break;
+      before = sigs[sigs.length - 1].signature;
+      // If we're about to exit on the page-cap, flag truncation so we
+      // know NOT to advance the cursor below.
+      if (page === MAX_PAGES - 1) truncated = true;
     }
-    return { txsScanned: sigs.length, eventsSeen, notesIngested };
+
+    // Only advance the cursor when we actually walked the entire range
+    // back to the prior cursor (or past it on first run, when cursor was
+    // null and we exhausted the available history). On truncation, the
+    // tail between `before` and the prior cursor is unprocessed — leaving
+    // the cursor where it was means the next call resumes that work.
+    let cursorAdvanced = false;
+    if (newestSig && !truncated && newestSig !== this._backfillCursor) {
+      this._backfillCursor = newestSig;
+      cursorAdvanced = true;
+      this._persist();
+    }
+
+    return { txsScanned, eventsSeen, notesIngested, cursorAdvanced, truncated };
   }
 
   private async handleLogs(_logs: Logs): Promise<void> {
@@ -267,8 +352,8 @@ export class NoteStore {
     if (!this._persistPath) return;
     try {
       fs.mkdirSync(path.dirname(this._persistPath), { recursive: true });
-      const snapshot: PersistedSnapshot = {
-        v: 1,
+      const snapshot: PersistedSnapshotV2 = {
+        v: 2,
         notes: Array.from(this.notesByCommitment.values()).map((n) => ({
           tokenMint: n.tokenMint.toString(),
           value: n.value.toString(),
@@ -282,6 +367,7 @@ export class NoteStore {
           viewingTagHex: bytesToHex(n.viewingTag),
         })),
         spentNullifiers: Array.from(this.spentNullifiers),
+        backfillCursor: this._backfillCursor,
       };
       const tmp = `${this._persistPath}.tmp`;
       fs.writeFileSync(tmp, JSON.stringify(snapshot), { mode: 0o600 });
@@ -300,8 +386,8 @@ export class NoteStore {
     try {
       const raw = fs.readFileSync(this._persistPath, 'utf8');
       const snap = JSON.parse(raw) as PersistedSnapshot;
-      if (snap.v !== 1) {
-        console.warn(`note-store: hydrate skipped — unknown schema v=${snap.v}`);
+      if (snap.v !== 1 && snap.v !== 2) {
+        console.warn(`note-store: hydrate skipped — unknown schema v=${(snap as { v: unknown }).v}`);
         return;
       }
       for (const n of snap.notes) {
@@ -320,6 +406,11 @@ export class NoteStore {
         this.notesByCommitment.set(n.commitment, restored);
       }
       for (const s of snap.spentNullifiers) this.spentNullifiers.add(s);
+      // v=1 has no cursor → leave null; first backfill scans the latest
+      // window once and writes the upgraded v=2 snapshot.
+      if (snap.v === 2) {
+        this._backfillCursor = snap.backfillCursor ?? null;
+      }
     } catch (e) {
       // eslint-disable-next-line no-console
       console.warn(`note-store: hydrate failed (${this._persistPath}):`, e instanceof Error ? e.message : String(e));

@@ -51,7 +51,7 @@ fn tag_from_name(name: &str) -> DomainTag {
         "adapt-bind" => DomainTag::AdaptBind,
         "view-tag" => DomainTag::ViewTag,
         other => {
-            eprintln!("unknown tag: {}", other);
+            eprintln!("unknown tag: {other}");
             exit(1);
         }
     }
@@ -103,7 +103,7 @@ fn main() {
             println!("{}", fr_to_decimal(tree.root));
         }
         other => {
-            eprintln!("unknown cmd: {}", other);
+            eprintln!("unknown cmd: {other}");
             exit(2);
         }
     }

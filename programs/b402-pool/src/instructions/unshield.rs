@@ -4,12 +4,12 @@ use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 use anchor_lang::solana_program::poseidon::{hashv, Endianness, Parameters};
 
 use crate::constants::{
-    SEED_CONFIG, SEED_NULL, SEED_TOKEN, SEED_TREE, SEED_VAULT, TAG_COMMIT, TAG_FEE_BIND,
+    SEED_CONFIG, SEED_TOKEN, SEED_TREE, SEED_VAULT, TAG_COMMIT, TAG_FEE_BIND,
     TAG_MK_NODE, TAG_NULLIFIER, TAG_RECIPIENT_BIND, TAG_SPEND_KEY_PUB, VERSION_PREFIX,
 };
 use crate::error::PoolError;
 use crate::events::{CommitmentAppended, NullifierSpent, UnshieldExecuted};
-use crate::state::{NullifierShard, PoolConfig, TokenConfig, TreeState};
+use crate::state::{PoolConfig, TokenConfig, TreeState};
 use crate::util;
 
 use super::shield::{EncryptedNote, TransactPublicInputs};
@@ -22,8 +22,22 @@ pub struct UnshieldArgs {
     pub encrypted_notes: Vec<EncryptedNote>, // must be 2 entries
     pub in_dummy_mask: u8,
     pub out_dummy_mask: u8,
-    pub nullifier_shard_prefix: [u16; 2],
     pub relayer_fee_recipient: Pubkey,
+    /// Phase 7 (`inline_cpi_nullifier`) ONLY: per-non-dummy-nullifier
+    /// validity-proof + address-tree-info bytes. Each entry is exactly 134
+    /// bytes:
+    ///   [proof Borsh 129][PackedAddressTreeInfo 4][output_state_tree_index 1].
+    /// Encoded length matches what `b402_nullifier::create_nullifier` expects
+    /// after its 8 B Anchor discriminator and before the 32 B `id`.
+    ///
+    /// Field is feature-gated, so the v2.1 mainnet build (sibling-ix) does
+    /// NOT carry it on the wire — preserving the on-chain ABI of the
+    /// already-deployed program. The SDK gates the same way (omit when not
+    /// in inline mode, append when targeting an inline-mode pool). Pool +
+    /// SDK MUST be upgraded together; the deploy script in
+    /// `docs/prds/PHASE-7-HANDOFF.md` walks through the order.
+    #[cfg(feature = "inline_cpi_nullifier")]
+    pub nullifier_cpi_payloads: Vec<[u8; 134]>,
 }
 
 #[derive(Accounts)]
@@ -75,30 +89,22 @@ pub struct Unshield<'info> {
     /// CHECK: verified against pool_config.verifier_transact.
     pub verifier_program: AccountInfo<'info>,
 
-    #[account(
-        init_if_needed,
-        payer = relayer,
-        space = NullifierShard::LEN,
-        seeds = [VERSION_PREFIX, SEED_NULL, &args.nullifier_shard_prefix[0].to_le_bytes()],
-        bump,
-    )]
-    pub nullifier_shard_0: AccountLoader<'info, NullifierShard>,
-
-    #[account(
-        init_if_needed,
-        payer = relayer,
-        space = NullifierShard::LEN,
-        seeds = [VERSION_PREFIX, SEED_NULL, &args.nullifier_shard_prefix[1].to_le_bytes()],
-        bump,
-    )]
-    pub nullifier_shard_1: AccountLoader<'info, NullifierShard>,
+    /// v2: pool no longer writes nullifier shard PDAs. The same tx must
+    /// contain a `b402_nullifier::create_nullifier` ix per non-dummy
+    /// nullifier (which lands the nullifier in Light's address tree).
+    /// CHECK: address constraint enforces the canonical sysvar pubkey.
+    #[account(address = anchor_lang::solana_program::sysvar::instructions::ID)]
+    pub instructions_sysvar: AccountInfo<'info>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
 }
 
 #[inline(never)]
-pub fn handler(ctx: Context<Unshield>, args: UnshieldArgs) -> Result<()> {
+pub fn handler<'info>(
+    ctx: Context<'_, '_, '_, 'info, Unshield<'info>>,
+    args: UnshieldArgs,
+) -> Result<()> {
     require!(args.proof.len() == 256, PoolError::InvalidInstructionData);
     require!(
         args.encrypted_notes.len() <= 2,
@@ -145,11 +151,6 @@ pub fn handler(ctx: Context<Unshield>, args: UnshieldArgs) -> Result<()> {
             );
             continue;
         }
-        let actual_prefix = util::shard_prefix(&pi.nullifier[i]);
-        require!(
-            actual_prefix == args.nullifier_shard_prefix[i],
-            PoolError::NullifierShardMismatch
-        );
     }
 
     // Verify relayer fee recipient ATA matches relayer_fee_recipient pubkey.
@@ -204,37 +205,98 @@ pub fn handler(ctx: Context<Unshield>, args: UnshieldArgs) -> Result<()> {
 
     let clock = Clock::get()?;
 
-    if (args.in_dummy_mask & 0b01) == 0 {
-        let mut shard = load_or_init_shard(
-            &ctx.accounts.nullifier_shard_0,
-            args.nullifier_shard_prefix[0],
-        )?;
-        require!(
-            shard.prefix == args.nullifier_shard_prefix[0],
-            PoolError::NullifierShardMismatch
-        );
-        util::nullifier_insert(&mut shard, pi.nullifier[0])?;
-        emit!(NullifierSpent {
-            nullifier: pi.nullifier[0],
-            shard: shard.prefix,
-            slot: clock.slot
-        });
+    // Nullifier insert into Light's address tree V2.
+    //
+    // v2.1 default (sibling-ix): walk the instructions sysvar; for each
+    // non-dummy nullifier, find the matching b402_nullifier::create_nullifier
+    // ix in the same atomic tx and assert its `id` arg matches. Light's
+    // verifier does the actual double-spend rejection.
+    //
+    // Phase 7 (`inline_cpi_nullifier`): pool CPIs into b402_nullifier
+    // directly, ~150 wire-bytes cheaper. The 9 nullifier accounts ride on
+    // `remaining_accounts`; per-nullifier proof + tree info bytes ride in
+    // `args.nullifier_cpi_payloads`. The first remaining_accounts slot must
+    // be the b402_nullifier program account itself.
+    #[cfg(not(feature = "inline_cpi_nullifier"))]
+    {
+        use anchor_lang::solana_program::sysvar::instructions::load_current_index_checked;
+        let ix_sysvar = &ctx.accounts.instructions_sysvar;
+        let current_ix_index = load_current_index_checked(ix_sysvar)? as usize;
+        let mut search_from = current_ix_index + 1;
+        for i in 0..2 {
+            let is_dummy = (args.in_dummy_mask >> i) & 1 == 1;
+            if is_dummy {
+                continue;
+            }
+            let found_at = util::verify_nullifier_ix_in_tx(
+                ix_sysvar,
+                &super::transact::B402_NULLIFIER_PROGRAM_ID,
+                &pi.nullifier[i],
+                search_from,
+            )?;
+            search_from = found_at + 1;
+            emit!(NullifierSpent {
+                nullifier: pi.nullifier[i],
+                shard: 0,
+                slot: clock.slot
+            });
+        }
     }
-    if (args.in_dummy_mask & 0b10) == 0 {
-        let mut shard = load_or_init_shard(
-            &ctx.accounts.nullifier_shard_1,
-            args.nullifier_shard_prefix[1],
-        )?;
+    #[cfg(feature = "inline_cpi_nullifier")]
+    {
+        use super::nullifier_cpi::{invoke_create_nullifier, B402_NULLIFIER_PROGRAM_ID};
+
+        // Slice layout in `remaining_accounts` (built by the SDK):
+        //   [0]                 = b402_nullifier program AccountInfo
+        //   [1 .. 1+ACCT]       = nullifier accounts for slot 0 (if real)
+        //   [1+ACCT .. 1+2*ACCT] = nullifier accounts for slot 1 (if real)
+        // ACCT = 9 (matches buildCreateNullifierIx's account count).
+        // 1 payer + 1 ix sysvar + 8 Light accounts = 10 per nullifier insert
+        // when callee is `b402_nullifier --features cpi-only`.
+        const ACCT_PER_NULL: usize = 10;
+        let remaining = ctx.remaining_accounts;
+        require!(!remaining.is_empty(), PoolError::NullifierIxMalformed);
+        let nullifier_program = &remaining[0];
         require!(
-            shard.prefix == args.nullifier_shard_prefix[1],
-            PoolError::NullifierShardMismatch
+            nullifier_program.key == &B402_NULLIFIER_PROGRAM_ID,
+            PoolError::NullifierIxMalformed
         );
-        util::nullifier_insert(&mut shard, pi.nullifier[1])?;
-        emit!(NullifierSpent {
-            nullifier: pi.nullifier[1],
-            shard: shard.prefix,
-            slot: clock.slot
-        });
+
+        let real_count = (0..2)
+            .filter(|i| (args.in_dummy_mask >> i) & 1 == 0)
+            .count();
+        require!(
+            args.nullifier_cpi_payloads.len() == real_count,
+            PoolError::NullifierIxMalformed
+        );
+        require!(
+            remaining.len() >= 1 + real_count * ACCT_PER_NULL,
+            PoolError::NullifierIxMalformed
+        );
+
+        let mut payload_idx = 0usize;
+        let mut acct_cursor = 1usize;
+        for i in 0..2 {
+            let is_dummy = (args.in_dummy_mask >> i) & 1 == 1;
+            if is_dummy {
+                continue;
+            }
+            let payload = &args.nullifier_cpi_payloads[payload_idx];
+            payload_idx += 1;
+            let null_accts = &remaining[acct_cursor..acct_cursor + ACCT_PER_NULL];
+            acct_cursor += ACCT_PER_NULL;
+            invoke_create_nullifier(
+                nullifier_program,
+                null_accts,
+                payload,
+                &pi.nullifier[i],
+            )?;
+            emit!(NullifierSpent {
+                nullifier: pi.nullifier[i],
+                shard: 0,
+                slot: clock.slot
+            });
+        }
     }
 
     // Append change commitments.
@@ -322,21 +384,6 @@ fn u64_to_fr_le(v: u64) -> [u8; 32] {
     let mut out = [0u8; 32];
     out[..8].copy_from_slice(&v.to_le_bytes());
     out
-}
-
-fn load_or_init_shard<'a, 'info>(
-    loader: &'a AccountLoader<'info, NullifierShard>,
-    expected_prefix: u16,
-) -> Result<std::cell::RefMut<'a, NullifierShard>> {
-    if let Ok(mut shard) = loader.load_mut() {
-        if shard.count == 0 && shard.prefix == 0 {
-            shard.prefix = expected_prefix;
-        }
-        return Ok(shard);
-    }
-    let mut shard = loader.load_init()?;
-    shard.prefix = expected_prefix;
-    Ok(shard)
 }
 
 #[inline(never)]

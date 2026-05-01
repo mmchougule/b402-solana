@@ -53,11 +53,17 @@ pub mod b402_pool {
         instructions::shield::handler(ctx, args)
     }
 
-    pub fn transact(ctx: Context<Transact>, args: TransactArgs) -> Result<()> {
+    pub fn transact<'info>(
+        ctx: Context<'_, '_, '_, 'info, Transact<'info>>,
+        args: TransactArgs,
+    ) -> Result<()> {
         instructions::transact::handler(ctx, args)
     }
 
-    pub fn unshield(ctx: Context<Unshield>, args: UnshieldArgs) -> Result<()> {
+    pub fn unshield<'info>(
+        ctx: Context<'_, '_, '_, 'info, Unshield<'info>>,
+        args: UnshieldArgs,
+    ) -> Result<()> {
         instructions::unshield::handler(ctx, args)
     }
 

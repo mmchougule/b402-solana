@@ -53,6 +53,17 @@ const Base64String = z
   .max(2_000_000) // hard ceiling so a giant body can't exhaust memory before length checks
   .regex(/^[A-Za-z0-9+/]+={0,2}$/, 'must be base64');
 
+/** A single additional instruction to append after the main pool ix.
+ *  Used for v2 paths that need a sibling b402_nullifier::create_nullifier
+ *  ix in the same atomic tx. The relayer doesn't inspect or interpret the
+ *  ix data — caller is responsible for binding it correctly to the proof
+ *  via the pool's instructions-sysvar verification. */
+export const AdditionalIxSchema = z.object({
+  programId: z.string().min(32).max(44),
+  ixData: Base64String,
+  accountKeys: z.array(AccountMetaSchema).min(1).max(32),
+});
+
 export const RelayRequestSchema = z.object({
   ixData: Base64String,
   accountKeys: z.array(AccountMetaSchema).min(1).max(64),
@@ -61,6 +72,9 @@ export const RelayRequestSchema = z.object({
   /** Optional second signer (rare — most ops use relayer-only). */
   userSignature: Base64String.optional(),
   userPubkey: z.string().min(32).max(44).optional(),
+  /** v2: sibling instructions appended after the main pool ix.
+   *  e.g. b402_nullifier::create_nullifier for unshield/adapt_execute. */
+  additionalIxs: z.array(AdditionalIxSchema).max(4).optional(),
 });
 
 export type RelayRequest = z.infer<typeof RelayRequestSchema>;

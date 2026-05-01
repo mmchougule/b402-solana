@@ -144,6 +144,59 @@ describe('RpcSubmitter', () => {
     })).rejects.toBeInstanceOf(RelayerError);
   });
 
+  it('appends additionalIxs after the main pool ix and remaps signer slots to relayer', async () => {
+    const relayer = Keypair.generate();
+    let captured: Uint8Array | null = null;
+    const conn = fakeConnection({
+      sendRawTransaction: async (wire: Uint8Array) => {
+        captured = wire;
+        return 'sig-multi-ix';
+      },
+    });
+
+    const submitter = new RpcSubmitter({
+      connection: conn,
+      relayer,
+      maxTxSize: 1232,
+      jitoBundleUrl: null,
+    });
+
+    const nullifierProgramId = new PublicKey('SysvarRent111111111111111111111111111111111');
+    const result = await submitter.submit({
+      programId: new PublicKey('11111111111111111111111111111111'),
+      ixData: new Uint8Array(64),
+      accountKeys: [
+        { pubkey: '11111111111111111111111111111111', isSigner: true, isWritable: true },
+      ],
+      altAddresses: [],
+      computeUnitLimit: 200_000,
+      additionalIxs: [
+        {
+          programId: nullifierProgramId,
+          ixData: new Uint8Array([1, 2, 3, 4]),
+          accountKeys: [
+            // Sibling-ix signer slot — should be remapped to relayer pubkey.
+            { pubkey: '11111111111111111111111111111111', isSigner: true, isWritable: true },
+            // Non-signer should pass through unchanged.
+            { pubkey: 'SysvarRent111111111111111111111111111111111', isSigner: false, isWritable: false },
+          ],
+        },
+      ],
+    });
+
+    expect(result.signature).toBe('sig-multi-ix');
+    const vtx = VersionedTransaction.deserialize(captured!);
+    // [cuIx, mainIx, nullifierIx] → 3 compiled instructions.
+    expect(vtx.message.compiledInstructions.length).toBe(3);
+    // Fee payer is the relayer.
+    expect(vtx.message.staticAccountKeys[0]!.toBase58()).toBe(relayer.publicKey.toBase58());
+    // Sibling ix's signer slot got remapped (the relayer is the only signing
+    // pubkey present, so the account index for that slot must point at it).
+    const siblingIx = vtx.message.compiledInstructions[2]!;
+    const siblingFirstAccount = vtx.message.staticAccountKeys[siblingIx.accountKeyIndexes[0]!]!;
+    expect(siblingFirstAccount.toBase58()).toBe(relayer.publicKey.toBase58());
+  });
+
   it('uses Jito bundle endpoint when configured', async () => {
     const fetchSpy = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => {
       return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: 'bundle-id-1' }), {

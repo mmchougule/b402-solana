@@ -8,3 +8,4 @@ packages:
   - 'apps/playground'
   - 'circuits'
   - 'examples'
+  - 'tests/v2'

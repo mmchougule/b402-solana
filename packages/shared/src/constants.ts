@@ -25,6 +25,10 @@ export const DomainTags = {
   adaptBind:      'b402/v1/adapt-bind',
   disclose:       'b402/v1/disclose',
   recipientBind:  'b402/v1/recipient-bind',
+  // Phase 9 dual-note: domain-separates the deterministic random_b
+  // derivation `Poseidon(commitment_a, TAG_EXCESS)`. Used by SDK +
+  // pool program to mirror each other exactly.
+  excess:         'b402/v1/excess',
 } as const;
 
 export type DomainTagName = keyof typeof DomainTags;
@@ -53,7 +57,7 @@ export const JUPITER_V6_PROGRAM_ID = 'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV
  * Regenerate with `pnpm --filter=@b402ai/solana-examples alt create`.
  */
 export const B402_ALT_DEVNET = '9FPYufa1KDkrn1VgfjkR7R667hbnTA7CNtmy38QcsuNj';
-export const B402_ALT_MAINNET = '' as const; // populated at mainnet launch
+export const B402_ALT_MAINNET = '3TSPLsa8aM5Xg9n8EHMuV5SK85RuMP96veFjv4BVrK9f' as const;
 
 /** Known mainnet mints we ship support for in v1. */
 export const MAINNET_MINTS = {

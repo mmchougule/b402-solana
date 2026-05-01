@@ -1,9 +1,10 @@
 /**
  * AdaptProver — Groth16 proof generation for the b402 adapt circuit.
  *
- * Sibling of TransactProver, different witness shape + VK. Output has 23
+ * Sibling of TransactProver, different witness shape + VK. Output has 24
  * public inputs (18 transact-layout + 5 adapt-specific: adapterId,
- * actionHash, expectedOutValue, expectedOutMint, adaptBindTag).
+ * actionHash, expectedOutValue, expectedOutMint, adaptBindTag — and as of
+ * Phase 9 dual-note minting, outSpendingPubA at index 23).
  */
 
 // @ts-expect-error — snarkjs lacks types
@@ -16,8 +17,8 @@ import {
   decToBeBytes32,
 } from './g1g2.js';
 
-/** Adapt circuit has 23 public inputs per circuits/adapt.circom. */
-export const ADAPT_PUBLIC_INPUT_COUNT = 23;
+/** Adapt circuit has 24 public inputs per circuits/adapt.circom (Phase 9: +outSpendingPubA). */
+export const ADAPT_PUBLIC_INPUT_COUNT = 24;
 
 export interface AdaptWitness {
   // First 18 — identical to transact layout.
@@ -45,6 +46,12 @@ export interface AdaptWitness {
   expectedOutValue: bigint;
   expectedOutMint: bigint;         // OUT mint as Fr
   adaptBindTag: bigint;
+
+  // Phase 9 dual-note: public alias for outSpendingPub[0]. The prover MUST
+  // set this equal to outSpendingPub[0] or the circuit's equality constraint
+  // fails. Pool reads this at public-input index 23 to recompute the
+  // excess-output commitment.
+  outSpendingPubA: bigint;
 
   // Private inputs.
   inTokenMint: [bigint, bigint];
@@ -80,7 +87,7 @@ export interface ProverArtifacts {
 export interface AdaptProof {
   /** 256 bytes: proofA(64, y-negated) || proofB(128) || proofC(64). */
   proofBytes: Uint8Array;
-  /** 23 × 32 bytes LE. */
+  /** 24 × 32 bytes LE. Phase 9 added index 23 = outSpendingPubA. */
   publicInputsLeBytes: Uint8Array[];
   /** Decimal strings. */
   publicSignals: string[];
@@ -159,6 +166,7 @@ function witnessToSnarkjsInput(w: AdaptWitness): Record<string, unknown> {
     expectedOutValue: tostr(w.expectedOutValue),
     expectedOutMint: tostr(w.expectedOutMint),
     adaptBindTag: tostr(w.adaptBindTag),
+    outSpendingPubA: tostr(w.outSpendingPubA),
     inTokenMint: w.inTokenMint.map(tostr),
     inValue: w.inValue.map(tostr),
     inRandom: w.inRandom.map(tostr),

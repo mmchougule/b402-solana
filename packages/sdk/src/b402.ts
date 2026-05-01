@@ -63,8 +63,20 @@ import {
 import { instructionDiscriminator, concat, u16Le, u32Le, u64Le, vecU8 } from './programs/anchor.js';
 import { buildZeroCache, proveMostRecentLeaf } from './merkle.js';
 import { commitmentHash, feeBindHash, nullifierHash, poseidonTagged } from './poseidon.js';
+// Phase 9 helpers (deriveExcessRandom, computeExcessCommitment) are exposed
+// via ./index.ts for downstream code; b402.ts itself doesn't call them in
+// the Phase 7B (default-deployed) wire shape.
 import { encryptNote } from './note-encryption.js';
 import { B402Error, B402ErrorCode } from './errors.js';
+import {
+  B402_NULLIFIER_PROGRAM_ID,
+  buildCreateNullifierIx,
+  buildNullifierCpiAccounts,
+  buildNullifierCpiPayload,
+  getValidityProofForNullifier,
+} from './light-nullifier.js';
+
+const SYSVAR_INSTRUCTIONS = new PublicKey('Sysvar1nstructions1111111111111111111111111');
 
 export interface B402SolanaConfig {
   cluster: 'mainnet' | 'devnet' | 'localnet';
@@ -96,6 +108,19 @@ export interface B402SolanaConfig {
   relayerHttpUrl?: string;
   /** Optional API key forwarded as `Authorization: Bearer <key>` to the relayer. */
   relayerApiKey?: string;
+  /**
+   * Phase 7: when **true**, build unshield/privateSwap/transact txs with
+   * pool→b402_nullifier as a CPI instead of a sibling ix. Cuts ~150 wire
+   * bytes per nullifier. ONLY safe when both deployed programs were built
+   * with the matching feature flag (`b402_pool --features inline_cpi_nullifier`
+   * + `b402_nullifier --features cpi-only`). Default **false** preserves
+   * the v2.1 wire format that today's mainnet build expects.
+   *
+   * Per-call override: `UnshieldRequest.inlineCpiNullifier` and
+   * `PrivateSwapRequest.inlineCpiNullifier` win over this class-level
+   * default when set.
+   */
+  inlineCpiNullifier?: boolean;
 }
 
 export interface ShieldRequest {
@@ -127,6 +152,11 @@ export interface PrivateSwapRequest {
    *  the v0 tx under Solana's 1,232 B cap. Defaults to the b402 ALT for the
    *  configured cluster — supply your own for tests with fresh mints. */
   alt?: PublicKey;
+  /** Additional ALTs to include alongside `alt`. Solana allows up to 4 ALTs
+   *  per tx. Use this for adapters whose route already references a public
+   *  ALT (Jupiter publishes one per quote in
+   *  `swap.addressLookupTableAddresses`). */
+  alts?: PublicKey[];
   /** Expected output amount, in smallest units of `outMint`. Bound into the proof.
    *  Defaults to `amount` × 2 for the mock adapter (constant 2x). For real
    *  adapters the caller should pass a quote-based number. */
@@ -139,14 +169,86 @@ export interface PrivateSwapRequest {
   actionPayload?: Uint8Array;
   /** Optional override for which note to spend. Defaults to the most-recently-shielded note in `inMint`. */
   note?: SpendableNote;
+  /**
+   * v2 nullifier-set: stateless.js Rpc client wired to Photon. Required.
+   * SDK uses it to fetch a non-inclusion proof for the nullifier value
+   * before sending the tx.
+   */
+  photonRpc?: unknown;
+  /**
+   * Adapter-specific remaining accounts. Forwarded by the pool to the
+   * adapter CPI verbatim (in order), as `ctx.remaining_accounts`. Mock
+   * adapter doesn't need any. Kamino's `ra_deposit` layout requires 19;
+   * Jupiter's route accounts vary per quote. Caller must include all
+   * relevant entries in the ALT for the tx to fit under the 1232-byte cap.
+   */
+  remainingAccounts?: Array<{ pubkey: PublicKey; isSigner: boolean; isWritable: boolean }>;
+  /** Phase 7 per-call override of `B402SolanaConfig.inlineCpiNullifier`.
+   *  See its docs. */
+  inlineCpiNullifier?: boolean;
 }
 
 export interface PrivateSwapResult {
   signature: string;
-  /** New shielded note in `outMint`. */
+  /** New shielded note in `outMint`. Bound to the proof's expected_out_value. */
   outNote: SpendableNote;
   /** Out-vault delta observed on-chain post-swap. */
   outAmount: bigint;
+  /**
+   * Phase 9 dual-note minting: when the adapter delivered MORE than the
+   * proof-bound floor (`actualOut > expectedOut`), the pool appended a
+   * second leaf for the difference and the SDK reconstructed the matching
+   * SpendableNote. Present iff `outAmount > expectedOut`. The two notes
+   * sum to exactly `outAmount` — no slippage dust leaks into the vault.
+   */
+  excessNote?: SpendableNote;
+}
+
+export interface B402Status {
+  user: string;
+  cluster: 'mainnet' | 'devnet' | 'localnet';
+  public: {
+    sol: { lamports: string; ui: string };
+    tokens: Array<{
+      mint: string;
+      symbol?: string;
+      amount: string;
+      uiAmount: string;
+      decimals: number;
+      tokenAccount: string;
+    }>;
+  };
+  private: {
+    totalDeposits: number;
+    balances: Array<{
+      mint: string;
+      symbol?: string;
+      amount: string;
+      depositCount: number;
+    }>;
+  };
+  links: {
+    userOnSolscan: string;
+    poolOnSolscan: string;
+  };
+}
+
+/** Common SPL mint → symbol map for display. Phantom-style. */
+const KNOWN_SYMBOLS: Record<string, string> = {
+  'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v': 'USDC',
+  'So11111111111111111111111111111111111111112': 'wSOL',
+  'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB': 'USDT',
+  'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN': 'JUP',
+  'jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL': 'JTO',
+  'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263': 'BONK',
+  'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm': 'WIF',
+  'HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3': 'PYTH',
+  '4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R': 'RAY',
+  'orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE': 'ORCA',
+  '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU': 'USDC',
+};
+function symbolFor(mint: string): string | undefined {
+  return KNOWN_SYMBOLS[mint];
 }
 
 export interface UnshieldRequest {
@@ -161,6 +263,17 @@ export interface UnshieldRequest {
   note?: SpendableNote;
   /** Mint of the note. Required if `note` is supplied; otherwise inferred from last shield. */
   mint?: PublicKey;
+  /**
+   * v2 nullifier-set: stateless.js Rpc client wired to Photon. Required.
+   * SDK uses it to fetch a non-inclusion proof for the nullifier value
+   * before sending the tx.
+   */
+  photonRpc?: unknown;
+  /** v2 ALT: required to fit the unshield + b402_nullifier sibling ixs
+   *  under Solana's 1232 B v0-tx cap. See PRD-30. */
+  alt?: PublicKey;
+  /** Phase 7 per-call override of `B402SolanaConfig.inlineCpiNullifier`. */
+  inlineCpiNullifier?: boolean;
 }
 
 export class B402Solana {
@@ -172,6 +285,7 @@ export class B402Solana {
   readonly notesPersistDir: string | undefined;
   readonly relayerHttpUrl: string | undefined;
   readonly relayerApiKey: string | undefined;
+  readonly inlineCpiNullifier: boolean;
   private _relayerHttp: { client: import('./relayer-http.js').RelayerHttpClient } | null = null;
 
   private _wallet: Wallet | null = null;
@@ -197,6 +311,7 @@ export class B402Solana {
     this.notesPersistDir = config.notesPersistDir;
     this.relayerHttpUrl = config.relayerHttpUrl;
     this.relayerApiKey = config.relayerApiKey;
+    this.inlineCpiNullifier = config.inlineCpiNullifier ?? false;
 
     if (config.prover) {
       this._prover = config.prover;
@@ -426,10 +541,14 @@ export class B402Solana {
           `no private deposit in mint ${req.mint.toBase58().slice(0, 8)}…`,
         );
       }
-      // Pick the most-recently-added (last in insertion order). For a
-      // multi-deposit wallet, callers can pass `note` explicitly to
-      // pick a specific one.
-      note = candidates[candidates.length - 1];
+      // Pick the rightmost leaf (highest leafIndex). proveMostRecentLeaf
+      // only validates for the rightmost; older leaves strand until the
+      // indexer-backed real-Merkle-path resolver lands. Multi-deposit
+      // callers can pass `note` explicitly to override.
+      const sortedDesc = [...candidates].sort((a, b) =>
+        Number(BigInt(b.leafIndex) - BigInt(a.leafIndex)),
+      );
+      note = sortedDesc[0];
       mint = req.mint;
     } else {
       note = this._lastShield?.result.note;
@@ -490,14 +609,53 @@ export class B402Solana {
       recipientTokenAccount: recipientAta,
       recipientOwner: req.to,
       relayer: this.relayer,
+      photonRpc: req.photonRpc,
+      alt: req.alt,
+      inlineNullifierCpi: req.inlineCpiNullifier ?? this.inlineCpiNullifier,
       ...(this._relayerHttp ? { relayerHttp: this._relayerHttp.client } : {}),
     });
 
-    // The IN note was spent — mark its commitment so it stops appearing in
-    // balance/holdings, and the persistence layer records the spend.
-    this._notes!.markSpent(note.commitment);
+    // The IN note was spent — but ONLY mark it spent locally if the on-chain
+    // tx actually landed cleanly. The action's submit path may return a sig
+    // before final confirmation (e.g., HTTP relayer), and a tx that errors
+    // post-submit must NOT corrupt the cache (would strand the note).
+    await this._confirmAndMarkSpent(result.signature, note.commitment);
 
     return result;
+  }
+
+  /**
+   * Verify the tx landed without an `err`, then mark the spent commitment.
+   * Throws if confirmation reports failure — caller's caller treats that
+   * as a swap/unshield failure (note remains spendable for retry).
+   */
+  private async _confirmAndMarkSpent(signature: string, commitment: bigint): Promise<void> {
+    // Single-shot status check. If the action's submit already awaited
+    // `confirmTransaction`, this resolves instantly. If not, we re-confirm.
+    let attempts = 0;
+    while (attempts < 4) {
+      const r = await this.connection.getSignatureStatus(signature, { searchTransactionHistory: false });
+      const v = r.value;
+      if (v && (v.confirmationStatus === 'confirmed' || v.confirmationStatus === 'finalized')) {
+        if (v.err) {
+          throw new B402Error(
+            B402ErrorCode.RpcError,
+            `tx ${signature} landed with err ${JSON.stringify(v.err)} — note NOT marked spent`,
+          );
+        }
+        this._notes!.markSpent(commitment);
+        return;
+      }
+      attempts += 1;
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+    // Couldn't confirm within ~6s. Don't markSpent — better to risk a retry
+    // attempt against an actually-spent leaf (which would fail closed via
+    // Light's nullifier check) than to strand a note that wasn't really spent.
+    throw new B402Error(
+      B402ErrorCode.RpcError,
+      `tx ${signature} could not be confirmed within 6s — note NOT marked spent (retry safe)`,
+    );
   }
 
   /**
@@ -546,9 +704,15 @@ export class B402Solana {
           `no private deposit in mint ${req.inMint.toBase58().slice(0, 8)}…`,
         );
       }
-      // Exact-value match required. If a deposit of exactly req.amount
-      // exists, use it; otherwise enumerate available sizes for the user.
-      note = candidates.find((n) => n.value === req.amount);
+      // Exact-value match required. Among matches, pick the rightmost leaf
+      // (highest leafIndex) — `proveMostRecentLeaf` only validates for the
+      // rightmost; older leaves with newer leaves to their right strand
+      // until we ship the indexer-backed real-Merkle-path resolver.
+      const matches = candidates.filter((n) => n.value === req.amount);
+      const sortedDesc = [...matches].sort((a, b) =>
+        Number(BigInt(b.leafIndex) - BigInt(a.leafIndex)),
+      );
+      note = sortedDesc[0];
       if (!note) {
         const sizes = candidates.map((n) => n.value.toString()).join(', ');
         throw new B402Error(
@@ -608,11 +772,11 @@ export class B402Solana {
       tree.leafCount,
     );
 
-    // 4. Nullifier + shard prefixes.
+    // 4. Nullifier. v2: shard prefixes are gone; the nullifier value goes
+    //    directly into Light Protocol's address tree via a sibling
+    //    b402_nullifier::create_nullifier ix (built below).
     const nullifierVal = await nullifierHash(this._wallet!.spendingPriv, note.leafIndex);
     const nullifierLe = bigintToLe32(nullifierVal);
-    const nullPrefix = shardPrefix(nullifierLe);
-    const dummyPrefix = (nullPrefix + 1) & 0xffff;
 
     // 5. Witness.
     const feeBind = await feeBindHash(0n, 0n);
@@ -639,6 +803,10 @@ export class B402Solana {
       expectedOutValue: expectedOut,
       expectedOutMint: outMintFr,
       adaptBindTag: domainTagFr('b402/v1/adapt-bind'),
+      // Phase 9 dual-note: public alias for outSpendingPub[0]. The circuit
+      // constraint `outSpendingPubA === outSpendingPub[0]` enforces equality;
+      // we just have to populate it consistently or the proof rejects.
+      outSpendingPubA: this._wallet!.spendingPub,
       inTokenMint: [inMintFr, 0n],
       inValue: [note.value, 0n],
       inRandom: [note.random, 0n],
@@ -677,8 +845,28 @@ export class B402Solana {
     )[0];
     const feeAtaSentinel = await getAssociatedTokenAddress(req.inMint, relayerPubkey);
 
-    // 9. Pool ix data — adapt_execute layout.
-    const poolIxData = concat(
+    // Resolve effective inline-CPI mode (per-call > class > default false).
+    const inlineNullifierCpi = req.inlineCpiNullifier ?? this.inlineCpiNullifier;
+
+    // 9. Fetch validity proof first — it's needed by both the sibling ix
+    //    (legacy mainnet path) and the inline-CPI payload (Phase 7 path).
+    if (!req.photonRpc) {
+      throw new B402Error(
+        B402ErrorCode.InvalidConfig,
+        'privateSwap: v2 requires `photonRpc` (stateless.js Rpc client). See PRD-30 §3.6.',
+      );
+    }
+    const validityProof = await getValidityProofForNullifier(req.photonRpc, nullifierLe);
+
+    // 9a. Pool ix data — adapt_execute layout (v2.1 wire-slim).
+    //    Dropped fields (still in the proof, derived on-chain from accounts):
+    //      - public_token_mint  → token_config_in.mint
+    //      - expected_out_mint  → token_config_out.mint
+    //    Saves 64 wire bytes; lets v0+ALT swap/lend tx fit under 1232 B.
+    //    Phase 7 (`inlineNullifierCpi`): appends `nullifier_cpi_payloads:
+    //    Vec<Vec<u8>>` after `action_payload`. mask 0b10 → 1 real nullifier
+    //    slot → outer vec len = 1, single 134 B inner payload.
+    const poolIxParts: Uint8Array[] = [
       instructionDiscriminator('adapt_execute'),
       vecU8(proof.proofBytes),
       proof.publicInputsLeBytes[0], // merkle_root
@@ -688,27 +876,48 @@ export class B402Solana {
       proof.publicInputsLeBytes[4], // commitment_out[1]
       u64Le(req.amount),
       u64Le(0n),
-      req.inMint.toBytes(),
       u64Le(0n), // relayer_fee
       proof.publicInputsLeBytes[9], // relayer_fee_bind
       proof.publicInputsLeBytes[10], // root_bind
       proof.publicInputsLeBytes[11], // recipient_bind
-      proof.publicInputsLeBytes[18], // adapter_id
-      proof.publicInputsLeBytes[19], // action_hash
+      // Phase 7B trim: adapter_id is no longer on the wire — pool reconstructs
+      // from the adapter_program account on-chain. -32 bytes per adapt_execute.
+      // Phase 9 trim: action_hash also dropped from the wire — pool already
+      // reconstructs Poseidon_3(adaptBindTag, keccak(action_payload) mod p,
+      // out_mint Fr) for its binding check; same value goes to the verifier.
+      // -32 bytes per adapt_execute, offsetting the +32B from out_spending_pub
+      // so net wire stays at the Phase 7B size.
       u64Le(expectedOut),
-      req.outMint.toBytes(),
+      // Phase 9 dual-note out_spending_pub byte goes here when the
+      // matching pool/verifier feature lands post-ceremony. Pool's default
+      // build (Phase 7B) does not consume this byte — adding it now would
+      // make the wire deserialize 32 bytes off.
       u32Le(0), // encrypted_notes vec len = 0 (omit on-chain to save bytes)
       new Uint8Array([0b10]), // in_dummy_mask (slot 0 real, slot 1 dummy)
       new Uint8Array([0b10]), // out_dummy_mask
-      u16Le(nullPrefix),
-      u16Le(dummyPrefix),
       relayerPubkey.toBytes(),
       vecU8(adapterIxData),
       vecU8(actionPayload),
-    );
+    ];
+    if (inlineNullifierCpi) {
+      // Vec<[u8; 134]>: outer u32 len, then 134 raw bytes per entry (no inner
+      // length varint — Phase 7B trim, saves 4 wire bytes per nullifier).
+      poolIxParts.push(u32Le(1));
+      poolIxParts.push(buildNullifierCpiPayload(validityProof));
+    }
+    const poolIxData = concat(...poolIxParts);
 
-    const shardPda0 = nullifierShardPda(poolProgramId, nullPrefix);
-    const shardPda1 = nullifierShardPda(poolProgramId, dummyPrefix);
+    // Inline-mode prefix that goes into `remaining_accounts` BEFORE the
+    // adapter-specific accounts. Pool's adapt_execute slices off
+    // `1 + 10 * real_nullifier_count` from the front for the b402_nullifier
+    // CPIs, then forwards the tail to the adapter CPI verbatim. Order MUST
+    // match `programs/b402-pool/src/instructions/adapt_execute.rs` slicing.
+    const inlineNullifierPrefix = inlineNullifierCpi
+      ? [
+          { pubkey: B402_NULLIFIER_PROGRAM_ID, isSigner: false, isWritable: false },
+          ...buildNullifierCpiAccounts(relayerPubkey, validityProof),
+        ]
+      : [];
 
     const poolIxKeys = [
       { pubkey: relayerPubkey, isSigner: true, isWritable: true },
@@ -725,10 +934,16 @@ export class B402Solana {
       { pubkey: req.adapterInTa, isSigner: false, isWritable: true },
       { pubkey: req.adapterOutTa, isSigner: false, isWritable: true },
       { pubkey: feeAtaSentinel, isSigner: false, isWritable: true },
-      { pubkey: shardPda0, isSigner: false, isWritable: true },
-      { pubkey: shardPda1, isSigner: false, isWritable: true },
+      { pubkey: SYSVAR_INSTRUCTIONS, isSigner: false, isWritable: false },
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      // remaining_accounts: inline nullifier block (Phase 7 only) then
+      // adapter-specific entries. Pool's adapt_execute handler forwards
+      // the adapter section verbatim to the adapter CPI as
+      // `ctx.remaining_accounts` (see programs/b402-pool/src/instructions/
+      // adapt_execute.rs:421-438).
+      ...inlineNullifierPrefix,
+      ...(req.remainingAccounts ?? []),
     ];
     const poolIx = new TransactionInstruction({
       programId: poolProgramId,
@@ -736,6 +951,14 @@ export class B402Solana {
       data: Buffer.from(poolIxData),
     });
     const cuIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 });
+
+    // 9b. Build the sibling create_nullifier ix in legacy mode. In inline
+    //     mode the pool builds + invokes the inner ix itself, so no sibling
+    //     is appended to the tx — the tx contains exactly one outer ix
+    //     (apart from ComputeBudget).
+    const nullifierIx = inlineNullifierCpi
+      ? null
+      : buildCreateNullifierIx(relayerPubkey, nullifierLe, validityProof);
 
     // 10. Resolve ALT (caller-supplied or cluster default).
     const altPubkey = req.alt;
@@ -749,7 +972,13 @@ export class B402Solana {
     if (!altInfo.value) {
       throw new B402Error(B402ErrorCode.InvalidConfig, `ALT ${altPubkey.toBase58()} not found`);
     }
-    const lookupTable: AddressLookupTableAccount = altInfo.value;
+    const lookupTables: AddressLookupTableAccount[] = [altInfo.value];
+    // Fetch additional ALTs (e.g. Jupiter's published ALT per quote).
+    for (const extra of req.alts ?? []) {
+      const r = await this.connection.getAddressLookupTable(extra);
+      if (!r.value) throw new B402Error(B402ErrorCode.InvalidConfig, `ALT ${extra.toBase58()} not found`);
+      lookupTables.push(r.value);
+    }
 
     // 11. Pre-swap out-vault snapshot for outAmount calc.
     const outVaultPda = vaultPda(poolProgramId, req.outMint);
@@ -760,22 +989,52 @@ export class B402Solana {
     // never appears as fee payer. Local path: this.relayer signs locally.
     let signature: string;
     if (this._relayerHttp) {
+      // Sibling-ix path (v2.1): pool ix + b402_nullifier sibling go in one
+      // atomic tx via `additionalIxs`. Inline-CPI path (Phase 7): no
+      // sibling — pool CPIs into b402_nullifier itself.
       const r = await this._relayerHttp.client.submit({
         label: 'adapt',
         ix: poolIx,
-        altAddresses: [altPubkey],
+        altAddresses: [altPubkey, ...(req.alts ?? [])],
         computeUnitLimit: 1_400_000,
+        additionalIxs: nullifierIx ? [nullifierIx] : [],
       });
       signature = r.signature;
     } else {
       const blockhash = (await this.connection.getLatestBlockhash('confirmed')).blockhash;
+      const localIxs: TransactionInstruction[] = [cuIx, poolIx];
+      if (nullifierIx) localIxs.push(nullifierIx);
       const msg = new TransactionMessage({
         payerKey: this.relayer.publicKey,
         recentBlockhash: blockhash,
-        instructions: [cuIx, poolIx],
-      }).compileToV0Message([lookupTable]);
+        instructions: localIxs,
+      }).compileToV0Message(lookupTables);
+      // PHASE-7 DEBUG: log size BEFORE sign so we see compiled message stats
+      // even when serialize() throws during vtx.sign().
+      if (process.env.B402_DEBUG_TX === '1') {
+        // eslint-disable-next-line no-console
+        console.log(`[b402 privateSwap] compiled: staticKeys=${msg.staticAccountKeys.length}, alts=${msg.addressTableLookups.length}`);
+        for (const k of msg.staticAccountKeys) console.log(`  static: ${k.toBase58()}`);
+        for (const a of msg.addressTableLookups) console.log(`  alt ${a.accountKey.toBase58()}: writable=${a.writableIndexes.length}, readonly=${a.readonlyIndexes.length}`);
+        try { console.log('  message bytes:', msg.serialize().length); } catch (e) { console.log('  message serialize threw:', (e as Error).message); }
+      }
       const vtx = new VersionedTransaction(msg);
       vtx.sign([this.relayer]);
+
+      // PHASE-7 DEBUG: tx-size breakdown so we can see what's not ALT-compressed.
+      if (process.env.B402_DEBUG_TX === '1') {
+        const ser = vtx.serialize();
+        // eslint-disable-next-line no-console
+        console.log(`[b402 privateSwap] serialized=${ser.length} B, staticKeys=${msg.staticAccountKeys.length}, alts=${msg.addressTableLookups.length}`);
+        for (const k of msg.staticAccountKeys) {
+          // eslint-disable-next-line no-console
+          console.log(`  static: ${k.toBase58()}`);
+        }
+        for (const a of msg.addressTableLookups) {
+          // eslint-disable-next-line no-console
+          console.log(`  alt ${a.accountKey.toBase58()}: writable=${a.writableIndexes.length}, readonly=${a.readonlyIndexes.length}`);
+        }
+      }
 
       signature = await this.connection.sendRawTransaction(vtx.serialize(), {
         skipPreflight: true,
@@ -806,16 +1065,27 @@ export class B402Solana {
       viewingTag: encryptedOut.viewingTag,
     };
 
+    // Confirm tx landed without err on-chain BEFORE mutating local cache.
+    // If confirmation fails, both the spent flag and the new outNote are
+    // skipped — caller can retry without cache corruption.
+    await this._confirmAndMarkSpent(signature, note.commitment);
     // Fast-path: SDK knows the OUT note's plaintext (we built it). Insert
     // directly so the next balance/holdings reflects it without RPC.
-    // Mark the IN commitment spent so getSpendable() filters it out without
-    // needing an on-chain nullifier scan.
     this._notes!.insertNote(outNote);
-    this._notes!.markSpent(note.commitment);
+
+    // Phase 9 dual-note local-mirror block lives here when the on-chain
+    // feature ships. The deterministic-derivation helpers
+    // (`deriveExcessRandom`, `computeExcessCommitment`) are exported from
+    // ./excess.js so the integration is mechanical — read commitment_a +
+    // TAG_EXCESS, derive random_b + commitment_b, insertNote at leafCount+1.
+    // Until then, excess delta stays in the shared vault (Phase 7B
+    // behaviour, what's currently deployed on mainnet).
+    const excessNote: SpendableNote | undefined = undefined;
+
     this.learnMint(req.inMint);
     this.learnMint(req.outMint);
 
-    return { signature, outNote, outAmount };
+    return { signature, outNote, outAmount, excessNote };
   }
 
   /** Coming soon. Use `examples/kamino-adapter-fork-deposit.ts` for the underlying flow today. */
@@ -841,29 +1111,8 @@ export class B402Solana {
     return this._notes;
   }
 
-  async status(): Promise<{
-    cluster: string;
-    walletPubkey: string;
-    balances: Array<{ mint: string; amount: string; depositCount: number }>;
-  }> {
-    await this.ready();
-    const agg = new Map<bigint, { amount: bigint; count: number }>();
-    for (const note of (this._notes as NoteStore).getAllSpendable()) {
-      const cur = agg.get(note.tokenMint) ?? { amount: 0n, count: 0 };
-      cur.amount += note.value;
-      cur.count += 1;
-      agg.set(note.tokenMint, cur);
-    }
-    return {
-      cluster: this.cluster,
-      walletPubkey: this.keypair.publicKey.toBase58(),
-      balances: Array.from(agg.entries()).map(([fr, v]) => ({
-        mint: mintLabel(fr, this.resolveMint(fr)),
-        amount: v.amount.toString(),
-        depositCount: v.count,
-      })),
-    };
-  }
+  // (status() moved earlier in file — combined public + private snapshot.
+  //  See `B402Status` interface and the implementation above.)
 
   /**
    * Per-deposit holdings owned by this client. Each entry is one private
@@ -901,6 +1150,66 @@ export class B402Solana {
    * returned as opaque short labels (`unknown:<12hex>`) so agents have a
    * stable key to compare across calls.
    */
+  /**
+   * Combined public + private snapshot. Single call that returns everything
+   * a UI typically needs: caller's public SPL token balances (Phantom-visible)
+   * alongside the private/shielded balances aggregated from the local note
+   * store. Wallet explorers can't see the private side; that's the whole point.
+   *
+   * Pass `refresh: true` to re-scan on-chain commitment events before
+   * computing private aggregates.
+   */
+  async status(opts: { refresh?: boolean } = {}): Promise<B402Status> {
+    await this.ready();
+    if (opts.refresh === true) await this._notes!.backfill({ limit: 30 });
+    const [publicSide, privateSide] = await Promise.all([
+      this.walletBalance(),
+      Promise.resolve().then(() => {
+        const agg = new Map<bigint, { amount: bigint; count: number }>();
+        for (const n of this._notes!.getAllSpendable()) {
+          const cur = agg.get(n.tokenMint) ?? { amount: 0n, count: 0 };
+          cur.amount += n.value;
+          cur.count += 1;
+          agg.set(n.tokenMint, cur);
+        }
+        return Array.from(agg.entries()).map(([fr, v]) => {
+          const mint = this.resolveMint(fr);
+          return {
+            mint: mint?.toBase58() ?? mintLabel(fr, undefined),
+            symbol: mint ? symbolFor(mint.toBase58()) : undefined,
+            amount: v.amount.toString(),
+            depositCount: v.count,
+          };
+        });
+      }),
+    ]);
+    const explorer = (kind: 'account', addr: string) =>
+      `https://solscan.io/${kind}/${addr}${this.cluster === 'devnet' ? '?cluster=devnet' : ''}`;
+    return {
+      user: this.keypair.publicKey.toBase58(),
+      cluster: this.cluster,
+      public: {
+        sol: { lamports: publicSide.sol.amount, ui: (Number(publicSide.sol.amount) / 1e9).toFixed(6) },
+        tokens: publicSide.tokens.map((t) => ({
+          mint: t.mint,
+          symbol: symbolFor(t.mint),
+          amount: t.amount,
+          uiAmount: (Number(t.amount) / 10 ** t.decimals).toString(),
+          decimals: t.decimals,
+          tokenAccount: t.tokenAccount,
+        })),
+      },
+      private: {
+        totalDeposits: privateSide.reduce((a, b) => a + b.depositCount, 0),
+        balances: privateSide,
+      },
+      links: {
+        userOnSolscan: explorer('account', this.keypair.publicKey.toBase58()),
+        poolOnSolscan: explorer('account', this.programIds.b402Pool.toString()),
+      },
+    };
+  }
+
   async balance(opts: { mint?: PublicKey; refresh?: boolean } = {}): Promise<{
     balances: Array<{ mint: string; amount: string; depositCount: number }>;
   }> {

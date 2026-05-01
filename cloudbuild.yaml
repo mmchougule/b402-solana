@@ -1,0 +1,19 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - packages/relayer/Dockerfile
+      - -t
+      - us-central1-docker.pkg.dev/$PROJECT_ID/b402-solana-relayer/relayer:$_TAG
+      - -t
+      - us-central1-docker.pkg.dev/$PROJECT_ID/b402-solana-relayer/relayer:latest
+      - .
+images:
+  - us-central1-docker.pkg.dev/$PROJECT_ID/b402-solana-relayer/relayer:$_TAG
+  - us-central1-docker.pkg.dev/$PROJECT_ID/b402-solana-relayer/relayer:latest
+options:
+  machineType: E2_HIGHCPU_8
+timeout: 1800s
+substitutions:
+  _TAG: '0.0.4'

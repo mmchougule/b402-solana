@@ -53,6 +53,45 @@ describe('RelayRequestSchema', () => {
     const r = RelayRequestSchema.safeParse(body);
     expect(r.success).toBe(false);
   });
+
+  it('accepts additionalIxs (v2 sibling ix)', () => {
+    const body = {
+      ixData: Buffer.from(new Uint8Array(500)).toString('base64'),
+      accountKeys: [
+        { pubkey: '11111111111111111111111111111111', isSigner: true, isWritable: true },
+      ],
+      additionalIxs: [
+        {
+          programId: 'SysvarRent111111111111111111111111111111111',
+          ixData: Buffer.from(new Uint8Array(64)).toString('base64'),
+          accountKeys: [
+            { pubkey: '11111111111111111111111111111111', isSigner: true, isWritable: true },
+            { pubkey: 'SysvarRent111111111111111111111111111111111', isSigner: false, isWritable: false },
+          ],
+        },
+      ],
+    };
+    const r = RelayRequestSchema.safeParse(body);
+    expect(r.success).toBe(true);
+  });
+
+  it('caps additionalIxs at 4', () => {
+    const body = {
+      ixData: Buffer.from(new Uint8Array(500)).toString('base64'),
+      accountKeys: [
+        { pubkey: '11111111111111111111111111111111', isSigner: true, isWritable: true },
+      ],
+      additionalIxs: Array.from({ length: 5 }, () => ({
+        programId: 'SysvarRent111111111111111111111111111111111',
+        ixData: Buffer.from(new Uint8Array(8)).toString('base64'),
+        accountKeys: [
+          { pubkey: '11111111111111111111111111111111', isSigner: true, isWritable: true },
+        ],
+      })),
+    };
+    const r = RelayRequestSchema.safeParse(body);
+    expect(r.success).toBe(false);
+  });
 });
 
 describe('readU64Le', () => {

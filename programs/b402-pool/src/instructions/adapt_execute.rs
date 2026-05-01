@@ -1,10 +1,14 @@
 //! `adapt_execute` — ZK-bound composable execution path (PRD-04 §3).
 //!
 //! Full flow, with all cryptographic bindings:
-//!   1. Parse AdaptPublicInputs (23 circuit public inputs + 2 pool-side args).
+//!   1. Parse AdaptPublicInputs (the wire-slim subset; v2.1 dropped two
+//!      Pubkey fields that travel as account-derived values instead).
 //!   2. Bind to pool state:
-//!        - public_token_mint          == token_config_in.mint
-//!        - expected_out_mint          == token_config_out.mint
+//!        - public_token_mint           is set from token_config_in.mint
+//!                                      when reconstructing the verifier's
+//!                                      23-element public-input vector.
+//!        - expected_out_mint           is set from token_config_out.mint
+//!                                      same way.
 //!        - adapter_program             is registered + enabled
 //!        - adapter_program ix disc    is allowlisted
 //!        - adapter_id (public input)  == keccak(adapter_program.key) mod p
@@ -36,18 +40,28 @@ use anchor_lang::solana_program::program::invoke;
 use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 
 use crate::constants::{
-    SEED_ADAPTERS, SEED_CONFIG, SEED_NULL, SEED_TOKEN, SEED_TREE, SEED_VAULT, TAG_ADAPT_BIND,
-    TAG_COMMIT, TAG_FEE_BIND, TAG_MK_NODE, TAG_NULLIFIER, TAG_RECIPIENT_BIND, TAG_SPEND_KEY_PUB,
-    VERSION_PREFIX,
+    SEED_ADAPTERS, SEED_CONFIG, SEED_TOKEN, SEED_TREE, SEED_VAULT, TAG_ADAPT_BIND,
+    TAG_COMMIT, TAG_FEE_BIND, TAG_MK_NODE, TAG_NULLIFIER, TAG_RECIPIENT_BIND,
+    TAG_SPEND_KEY_PUB, VERSION_PREFIX,
 };
+#[cfg(feature = "phase_9_dual_note")]
+use crate::constants::TAG_EXCESS;
 use crate::error::PoolError;
 use crate::events::{AdaptExecuted, CommitmentAppended, NullifierSpent};
-use crate::state::{AdapterRegistry, NullifierShard, PoolConfig, TokenConfig, TreeState};
+#[cfg(feature = "phase_9_dual_note")]
+use crate::events::ExcessNoteMinted;
+use crate::state::{AdapterRegistry, PoolConfig, TokenConfig, TreeState};
 use crate::util;
 
 use super::shield::EncryptedNote;
 use super::verifier_cpi;
 
+/// v2.1 ix-data trim: dropped `public_token_mint` and `expected_out_mint`
+/// (32B each) from the wire. The handler validates these against the
+/// already-trusted `token_config_*.mint` PDAs and re-injects them when
+/// reconstructing the verifier's 23-element public-input vector. The
+/// circuit + proof shape is unchanged; only the wire shape shrinks by 64B,
+/// letting v0+ALT swap/lend/redeem/perpOpen txs fit under 1232 bytes.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
 pub struct AdaptPublicInputs {
     pub merkle_root: [u8; 32],
@@ -55,15 +69,29 @@ pub struct AdaptPublicInputs {
     pub commitment_out: [[u8; 32]; 2],
     pub public_amount_in: u64,
     pub public_amount_out: u64,    // adapt requires this to be zero
-    pub public_token_mint: Pubkey, // IN mint
     pub relayer_fee: u64,
     pub relayer_fee_bind: [u8; 32],
     pub root_bind: [u8; 32],
     pub recipient_bind: [u8; 32],
-    pub adapter_id: [u8; 32],  // keccak(adapter_program_id) mod p
-    pub action_hash: [u8; 32], // Poseidon_3(adaptBindTag, keccakFr, expectedOutMint_Fr)
+    // Phase 7B trim: adapter_id (= keccak(adapter_program_id) mod p) is no
+    // longer carried on the wire. Pool reconstructs it on-chain from the
+    // adapter_program account and feeds the recomputed value into the
+    // verifier vector.
+    //
+    // Phase 9 wire-size compensator: action_hash (= Poseidon_3(adaptBindTag,
+    // keccak(action_payload) mod p, expected_out_mint Fr)) is also dropped
+    // from the wire. Pool already reconstructs `expected_action_hash` for
+    // the binding check below; the same value is passed to the verifier.
+    // Saves 32B per adapt_execute, offsetting the +32B from out_spending_pub
+    // so net wire stays at the Phase 7B size.
     pub expected_out_value: u64,
-    pub expected_out_mint: Pubkey, // OUT mint
+    /// Phase 9 dual-note: outSpendingPub[0] (the real OUT note's spending
+    /// pub) lifted to a public input by the circuit so the pool can
+    /// recompute the excess-output commitment in Rust. 32-byte little-endian
+    /// Fr — same encoding as every other Fr public input. Feature-gated;
+    /// Phase 7B (default) builds do not carry this field.
+    #[cfg(feature = "phase_9_dual_note")]
+    pub out_spending_pub: [u8; 32],
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
@@ -73,7 +101,6 @@ pub struct AdaptExecuteArgs {
     pub encrypted_notes: Vec<EncryptedNote>, // 0..=2 entries
     pub in_dummy_mask: u8,
     pub out_dummy_mask: u8,
-    pub nullifier_shard_prefix: [u16; 2],
     pub relayer_fee_recipient: Pubkey,
     /// Exact bytes forwarded as the adapter's Anchor instruction data.
     /// First 8 bytes are the adapter's ix discriminator, checked against
@@ -83,6 +110,13 @@ pub struct AdaptExecuteArgs {
     /// keccak256(action_payload) mod p and checks it matches the
     /// circuit's action_hash public input.
     pub action_payload: Vec<u8>,
+    /// Phase 7 (`inline_cpi_nullifier`) ONLY: per-non-dummy-nullifier
+    /// validity-proof + address-tree-info bytes. See
+    /// `unshield::UnshieldArgs::nullifier_cpi_payloads` for the layout
+    /// (134 B per entry). v2.1 builds (sibling-ix) do not carry this on
+    /// the wire — the field is feature-gated.
+    #[cfg(feature = "inline_cpi_nullifier")]
+    pub nullifier_cpi_payloads: Vec<[u8; 134]>,
 }
 
 #[derive(Accounts)]
@@ -172,23 +206,13 @@ pub struct AdaptExecute<'info> {
     )]
     pub relayer_fee_ta: Box<Account<'info, TokenAccount>>,
 
-    #[account(
-        init_if_needed,
-        payer = relayer,
-        space = NullifierShard::LEN,
-        seeds = [VERSION_PREFIX, SEED_NULL, &args.nullifier_shard_prefix[0].to_le_bytes()],
-        bump,
-    )]
-    pub nullifier_shard_0: AccountLoader<'info, NullifierShard>,
-
-    #[account(
-        init_if_needed,
-        payer = relayer,
-        space = NullifierShard::LEN,
-        seeds = [VERSION_PREFIX, SEED_NULL, &args.nullifier_shard_prefix[1].to_le_bytes()],
-        bump,
-    )]
-    pub nullifier_shard_1: AccountLoader<'info, NullifierShard>,
+    /// v2: pool no longer writes nullifier shard PDAs. Instead, it
+    /// verifies the same tx contains a `b402_nullifier::create_nullifier`
+    /// ix per non-dummy nullifier (which lands the nullifier in Light's
+    /// address tree). Sysvar lets us walk the tx's ix list.
+    /// CHECK: address constraint enforces the canonical sysvar pubkey.
+    #[account(address = anchor_lang::solana_program::sysvar::instructions::ID)]
+    pub instructions_sysvar: AccountInfo<'info>,
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
@@ -224,19 +248,11 @@ pub fn handler<'info>(
     require!(pi.public_amount_in > 0, PoolError::PublicAmountExclusivity);
 
     // Mint bindings: token_config PDAs are validated by their seeds, so
-    // their .mint fields are the trusted on-chain values.
-    require!(
-        ctx.accounts.token_config_in.mint == pi.public_token_mint,
-        PoolError::MintMismatch
-    );
-    require!(
-        ctx.accounts.token_config_out.mint == pi.expected_out_mint,
-        PoolError::MintMismatch
-    );
-    require!(
-        ctx.accounts.token_config_out.mint == pi.expected_out_mint,
-        PoolError::MintMismatch
-    );
+    // their .mint fields are the trusted on-chain values. We bind the
+    // proof to these mints (not to wire-supplied pubkeys) by injecting
+    // them into the public-input vector during build_public_inputs_for_adapt.
+    let in_mint = ctx.accounts.token_config_in.mint;
+    let out_mint = ctx.accounts.token_config_out.mint;
 
     // Adapter registry + ix discriminator allowlist.
     let adapter_program_key = ctx.accounts.adapter_program.key();
@@ -256,25 +272,23 @@ pub fn handler<'info>(
             PoolError::AdapterNotRegistered
         );
 
-        // Circuit's adapter_id public input must match keccak of program ID,
-        // reduced mod Fr. Prevents a proof for adapter X from being replayed
-        // against adapter Y.
-        let digest = keccak::hash(adapter_program_key.as_ref()).0;
-        let expected_adapter_id = util::reduce_le_mod_p(&digest);
-        require!(
-            pi.adapter_id == expected_adapter_id,
-            PoolError::InvalidAdapterBinding
-        );
+        // adapter_id (= keccak(adapter_program_id) mod p) — the pool
+        // reconstructs it from the adapter_program account and feeds the
+        // recomputed value to the verifier (see build_public_inputs_for_adapt).
+        // Phase 7B trim: no longer in args — pool is the source of truth.
     }
 
-    // action_hash binding: circuit proved Poseidon_3 over (adaptBindTag,
-    // keccak(action_payload) mod p, expected_out_mint Fr). Pool recomputes
-    // and rejects any tampering between proof gen and submission.
-    {
+    // action_hash: circuit proved Poseidon_3 over (adaptBindTag,
+    // keccak(action_payload) mod p, expected_out_mint Fr). Pool reconstructs
+    // it from on-chain values (action_payload + token_config_out.mint) and
+    // feeds the recomputed value to the verifier — same proof binding,
+    // 32 fewer wire bytes per adapt_execute (Phase 9 trim, mirrors the
+    // adapter_id removal from Phase 7B).
+    let computed_action_hash: [u8; 32] = {
         let payload_keccak = keccak::hash(&args.action_payload).0;
         let payload_keccak_fr = util::reduce_le_mod_p(&payload_keccak);
-        let expected_out_mint_fr = util::reduce_le_mod_p(&pi.expected_out_mint.to_bytes());
-        let expected_action_hash = hashv(
+        let expected_out_mint_fr = util::reduce_le_mod_p(&out_mint.to_bytes());
+        hashv(
             Parameters::Bn254X5,
             Endianness::LittleEndian,
             &[
@@ -284,12 +298,8 @@ pub fn handler<'info>(
             ],
         )
         .map_err(|_| error!(PoolError::InvalidInstructionData))?
-        .to_bytes();
-        require!(
-            pi.action_hash == expected_action_hash,
-            PoolError::InvalidAdapterBinding
-        );
-    }
+        .to_bytes()
+    };
 
     // Root ring membership.
     {
@@ -300,7 +310,8 @@ pub fn handler<'info>(
         );
     }
 
-    // Shard prefix consistency for non-dummy nullifiers.
+    // Dummy nullifier values must be zero. Sibling-ix verification
+    // for non-dummy nullifiers happens after proof verify (below).
     for i in 0..2 {
         let is_dummy = (args.in_dummy_mask >> i) & 1 == 1;
         if is_dummy {
@@ -308,13 +319,7 @@ pub fn handler<'info>(
                 pi.nullifier[i] == [0u8; 32],
                 PoolError::ProofPublicInputMismatch
             );
-            continue;
         }
-        let actual_prefix = util::shard_prefix(&pi.nullifier[i]);
-        require!(
-            actual_prefix == args.nullifier_shard_prefix[i],
-            PoolError::NullifierShardMismatch
-        );
     }
 
     // Relayer fee binding: fee comes out of in_vault (IN mint), so cap it
@@ -332,7 +337,7 @@ pub fn handler<'info>(
     }
 
     // Verify proof.
-    let public_inputs: Vec<[u8; 32]> = build_public_inputs_for_adapt(pi);
+    let public_inputs: Vec<[u8; 32]> = build_public_inputs_for_adapt(pi, &in_mint, &out_mint, &adapter_program_key, &computed_action_hash);
     let mut proof_bytes = [0u8; 256];
     proof_bytes.copy_from_slice(&args.proof);
     verifier_cpi::invoke_verify_adapt(
@@ -351,38 +356,98 @@ pub fn handler<'info>(
 
     let clock = Clock::get()?;
 
-    // Burn input nullifiers.
-    if (args.in_dummy_mask & 0b01) == 0 {
-        let mut shard = load_or_init_shard(
-            &ctx.accounts.nullifier_shard_0,
-            args.nullifier_shard_prefix[0],
-        )?;
-        require!(
-            shard.prefix == args.nullifier_shard_prefix[0],
-            PoolError::NullifierShardMismatch
-        );
-        util::nullifier_insert(&mut shard, pi.nullifier[0])?;
-        emit!(NullifierSpent {
-            nullifier: pi.nullifier[0],
-            shard: shard.prefix,
-            slot: clock.slot,
-        });
+    // Nullifier insert into Light's address tree V2.
+    //
+    // v2.1 default (sibling-ix): walk the instructions sysvar; for each
+    // non-dummy nullifier confirm a matching b402_nullifier::create_nullifier
+    // ix is present in the same atomic tx.
+    //
+    // Phase 7 (`inline_cpi_nullifier`): pool CPIs into b402_nullifier
+    // directly. `remaining_accounts` layout in this mode:
+    //   [0]                       = b402_nullifier program AccountInfo
+    //   [1 .. 1+ACCT*real_count]  = b402_nullifier accounts (9 per real slot)
+    //   [1+ACCT*real_count ..]    = adapter-specific remaining accounts
+    //                                (forwarded verbatim to the adapter CPI)
+    // The adapter-CPI section is sliced AFTER the nullifier section below.
+    let nullifier_remaining_consumed: usize;
+    #[cfg(not(feature = "inline_cpi_nullifier"))]
+    {
+        use anchor_lang::solana_program::sysvar::instructions::load_current_index_checked;
+        let ix_sysvar = &ctx.accounts.instructions_sysvar;
+        let current_ix_index = load_current_index_checked(ix_sysvar)? as usize;
+        let mut search_from = current_ix_index + 1;
+        for i in 0..2 {
+            let is_dummy = (args.in_dummy_mask >> i) & 1 == 1;
+            if is_dummy {
+                continue;
+            }
+            let found_at = util::verify_nullifier_ix_in_tx(
+                ix_sysvar,
+                &super::transact::B402_NULLIFIER_PROGRAM_ID,
+                &pi.nullifier[i],
+                search_from,
+            )?;
+            search_from = found_at + 1;
+            emit!(NullifierSpent {
+                nullifier: pi.nullifier[i],
+                shard: 0, // legacy field; meaningful only for v1
+                slot: clock.slot,
+            });
+        }
+        nullifier_remaining_consumed = 0;
     }
-    if (args.in_dummy_mask & 0b10) == 0 {
-        let mut shard = load_or_init_shard(
-            &ctx.accounts.nullifier_shard_1,
-            args.nullifier_shard_prefix[1],
-        )?;
+    #[cfg(feature = "inline_cpi_nullifier")]
+    {
+        use super::nullifier_cpi::{invoke_create_nullifier, B402_NULLIFIER_PROGRAM_ID};
+        // 1 payer + 1 ix sysvar + 8 Light accounts = 10 per nullifier insert
+        // (matches `b402_nullifier --features cpi-only` Accounts layout).
+        const ACCT_PER_NULL: usize = 10;
+
+        let remaining = ctx.remaining_accounts;
+        require!(!remaining.is_empty(), PoolError::NullifierIxMalformed);
+        let nullifier_program = &remaining[0];
         require!(
-            shard.prefix == args.nullifier_shard_prefix[1],
-            PoolError::NullifierShardMismatch
+            nullifier_program.key == &B402_NULLIFIER_PROGRAM_ID,
+            PoolError::NullifierIxMalformed
         );
-        util::nullifier_insert(&mut shard, pi.nullifier[1])?;
-        emit!(NullifierSpent {
-            nullifier: pi.nullifier[1],
-            shard: shard.prefix,
-            slot: clock.slot,
-        });
+
+        let real_count = (0..2)
+            .filter(|i| (args.in_dummy_mask >> i) & 1 == 0)
+            .count();
+        require!(
+            args.nullifier_cpi_payloads.len() == real_count,
+            PoolError::NullifierIxMalformed
+        );
+        require!(
+            remaining.len() >= 1 + real_count * ACCT_PER_NULL,
+            PoolError::NullifierIxMalformed
+        );
+
+        let mut payload_idx = 0usize;
+        let mut acct_cursor = 1usize;
+        for i in 0..2 {
+            let is_dummy = (args.in_dummy_mask >> i) & 1 == 1;
+            if is_dummy {
+                continue;
+            }
+            let payload = &args.nullifier_cpi_payloads[payload_idx];
+            payload_idx += 1;
+            let null_accts = &remaining[acct_cursor..acct_cursor + ACCT_PER_NULL];
+            acct_cursor += ACCT_PER_NULL;
+            invoke_create_nullifier(
+                nullifier_program,
+                null_accts,
+                payload,
+                &pi.nullifier[i],
+            )?;
+            emit!(NullifierSpent {
+                nullifier: pi.nullifier[i],
+                shard: 0, // legacy field
+                slot: clock.slot,
+            });
+        }
+
+        nullifier_remaining_consumed = 1 + real_count * ACCT_PER_NULL;
     }
 
     // Pool transfers public_amount_in to adapter_in_ta (pool PDA signs the vault).
@@ -424,8 +489,14 @@ pub fn handler<'info>(
     let pre = ctx.accounts.out_vault.amount;
 
     // Build + CPI adapter. Unified ABI: six named accounts, then remaining.
+    //
+    // In `inline_cpi_nullifier` builds, the front of `remaining_accounts`
+    // belongs to the b402_nullifier CPI block above; only the tail past
+    // `nullifier_remaining_consumed` is forwarded to the adapter.
+    let adapter_remaining = &ctx.remaining_accounts[nullifier_remaining_consumed..];
+
     let adapter_metas: Vec<AccountMeta> = {
-        let mut m = Vec::with_capacity(6 + ctx.remaining_accounts.len());
+        let mut m = Vec::with_capacity(6 + adapter_remaining.len());
         m.push(AccountMeta::new_readonly(
             ctx.accounts.adapter_authority.key(),
             false,
@@ -438,7 +509,7 @@ pub fn handler<'info>(
             ctx.accounts.token_program.key(),
             false,
         ));
-        for a in ctx.remaining_accounts.iter() {
+        for a in adapter_remaining.iter() {
             if a.is_writable {
                 m.push(AccountMeta::new(*a.key, a.is_signer));
             } else {
@@ -448,14 +519,14 @@ pub fn handler<'info>(
         m
     };
     let mut adapter_infos: Vec<AccountInfo<'info>> =
-        Vec::with_capacity(6 + ctx.remaining_accounts.len());
+        Vec::with_capacity(6 + adapter_remaining.len());
     adapter_infos.push(ctx.accounts.adapter_authority.to_account_info());
     adapter_infos.push(ctx.accounts.in_vault.to_account_info());
     adapter_infos.push(ctx.accounts.out_vault.to_account_info());
     adapter_infos.push(ctx.accounts.adapter_in_ta.to_account_info());
     adapter_infos.push(ctx.accounts.adapter_out_ta.to_account_info());
     adapter_infos.push(ctx.accounts.token_program.to_account_info());
-    for a in ctx.remaining_accounts.iter() {
+    for a in adapter_remaining.iter() {
         adapter_infos.push(a.clone());
     }
 
@@ -475,7 +546,23 @@ pub fn handler<'info>(
         PoolError::AdapterReturnedLessThanMin
     );
 
-    // Append output commitments to the tree.
+    // Append output commitments to the tree, then (Phase 9 dual-note) any
+    // excess delta as a SECOND commitment owned by the same spending_pub.
+    //
+    // Invariant chain that makes the excess leaf safe:
+    //   1. `delta` is read from this program's own out_vault PDA (post-CPI
+    //      reload + saturating_sub of the snapshot). Adapter cannot forge it.
+    //   2. `pi.expected_out_value` and `pi.out_spending_pub` are bound to
+    //      the verified Groth16 proof — see circuit constraints
+    //      `outSum === expectedOutValue` and
+    //      `outSpendingPubA === outSpendingPub[0]` in adapt.circom.
+    //   3. `random_b = Poseidon(commitment_a, TAG_EXCESS)` is deterministic
+    //      from a public, proof-bound value plus a fixed tag. The SDK
+    //      derives the same value off-chain so it can spend the leaf later.
+    //   4. `commitment_b` mirrors the SDK's `commitmentHash` exactly:
+    //      Poseidon(TAG_COMMIT, outMintFr, valueFr, randomB, spendingPub)
+    //      with `Endianness::LittleEndian` (same convention as every other
+    //      Poseidon call in this program — see PHASE-9 spike notes §5).
     {
         let mut tree = ctx.accounts.tree_state.load_mut()?;
         for (i, commitment) in pi.commitment_out.iter().enumerate() {
@@ -503,6 +590,77 @@ pub fn handler<'info>(
                 slot: clock.slot,
             });
         }
+
+        // Phase 9 dual-note: mint the excess delta into a second leaf. The
+        // canonical OUT note slot is index 0 (slot 1 is the dummy in the
+        // current swap shape — outIsDummy[1]=1 in the witness). The excess
+        // note is bound to the same spending_pub as the main note via the
+        // Poseidon commitment, so only the holder of `spending_priv` can
+        // ever spend it.
+        // Feature-gated: Phase 7B builds (default) leave excess in the
+        // shared vault and skip this block. Phase 9 builds opt in by
+        // compiling with `--features phase_9_dual_note`, which also bumps
+        // PUBLIC_INPUT_COUNT to 24 and requires the matching VK.
+        #[cfg(feature = "phase_9_dual_note")]
+        {
+        let excess: u64 = delta
+            .checked_sub(pi.expected_out_value)
+            .ok_or(error!(PoolError::ArithmeticUnderflow))?;
+        if excess > 0 {
+            let out_mint_fr = util::reduce_le_mod_p(&out_mint.to_bytes());
+            let commitment_a = pi.commitment_out[0];
+
+            // random_b = Poseidon(commitment_a, TAG_EXCESS) LE.
+            // Deterministic + collision-resistant + opaque on-chain. SDK
+            // mirrors this in packages/sdk/src/excess.ts::deriveExcessRandom.
+            let random_b = hashv(
+                Parameters::Bn254X5,
+                Endianness::LittleEndian,
+                &[&commitment_a[..], &TAG_EXCESS[..]],
+            )
+            .map_err(|_| error!(PoolError::ProofVerificationFailed))?
+            .to_bytes();
+
+            // commitment_b matches packages/sdk/src/poseidon.ts::commitmentHash:
+            //   Poseidon([TAG_COMMIT, outMintFr, valueFr, random, spendingPub])
+            // The SDK passes inputs in this exact order (see commitmentHash in
+            // poseidon.ts:32-39). Any reordering breaks parity silently.
+            let value_fr = u64_to_fr_le(excess);
+            let commitment_b = hashv(
+                Parameters::Bn254X5,
+                Endianness::LittleEndian,
+                &[
+                    &TAG_COMMIT[..],
+                    &out_mint_fr[..],
+                    &value_fr[..],
+                    &random_b[..],
+                    &pi.out_spending_pub[..],
+                ],
+            )
+            .map_err(|_| error!(PoolError::ProofVerificationFailed))?
+            .to_bytes();
+
+            let excess_leaf_index = tree.leaf_count;
+            let new_root = util::tree_append(&mut tree, commitment_b)?;
+            // Excess leaf: we don't publish a ciphertext for it. The SDK
+            // reconstructs the note locally from on-chain inputs. Pass
+            // zero-padding for the encrypted-note fields so off-chain
+            // indexers see a consistent shape across both leaves.
+            emit!(CommitmentAppended {
+                leaf_index: excess_leaf_index,
+                commitment: commitment_b,
+                ciphertext: [0u8; 89],
+                ephemeral_pub: [0u8; 32],
+                viewing_tag: [0u8; 2],
+                tree_root_after: new_root,
+                slot: clock.slot,
+            });
+            emit!(ExcessNoteMinted {
+                leaf_index: excess_leaf_index,
+                excess,
+            });
+        }
+        } // end #[cfg(feature = "phase_9_dual_note")] block
     }
 
     emit!(AdaptExecuted {
@@ -525,23 +683,14 @@ fn u64_to_fr_le(v: u64) -> [u8; 32] {
     out
 }
 
-fn load_or_init_shard<'a, 'info>(
-    loader: &'a AccountLoader<'info, NullifierShard>,
-    expected_prefix: u16,
-) -> Result<std::cell::RefMut<'a, NullifierShard>> {
-    if let Ok(mut shard) = loader.load_mut() {
-        if shard.count == 0 && shard.prefix == 0 {
-            shard.prefix = expected_prefix;
-        }
-        return Ok(shard);
-    }
-    let mut shard = loader.load_init()?;
-    shard.prefix = expected_prefix;
-    Ok(shard)
-}
-
 #[inline(never)]
-fn build_public_inputs_for_adapt(pi: &AdaptPublicInputs) -> Vec<[u8; 32]> {
+fn build_public_inputs_for_adapt(
+    pi: &AdaptPublicInputs,
+    in_mint: &Pubkey,
+    out_mint: &Pubkey,
+    adapter_program: &Pubkey,
+    action_hash: &[u8; 32],
+) -> Vec<[u8; 32]> {
     let mut v: Vec<[u8; 32]> = Vec::with_capacity(verifier_cpi::PUBLIC_INPUT_COUNT_ADAPT);
     // First 18 — identical layout to transact.
     v.push(pi.merkle_root);
@@ -551,7 +700,9 @@ fn build_public_inputs_for_adapt(pi: &AdaptPublicInputs) -> Vec<[u8; 32]> {
     v.push(pi.commitment_out[1]);
     v.push(u64_to_fr_le(pi.public_amount_in));
     v.push(u64_to_fr_le(pi.public_amount_out));
-    v.push(util::reduce_le_mod_p(&pi.public_token_mint.to_bytes()));
+    // public_token_mint: derived from token_config_in. Same value the
+    // circuit was generated against; just no longer travels on the wire.
+    v.push(util::reduce_le_mod_p(&in_mint.to_bytes()));
     v.push(u64_to_fr_le(pi.relayer_fee));
     v.push(pi.relayer_fee_bind);
     v.push(pi.root_bind);
@@ -562,11 +713,170 @@ fn build_public_inputs_for_adapt(pi: &AdaptPublicInputs) -> Vec<[u8; 32]> {
     v.push(TAG_SPEND_KEY_PUB);
     v.push(TAG_FEE_BIND);
     v.push(TAG_RECIPIENT_BIND);
-    // Adapt-specific — 5 more.
-    v.push(pi.adapter_id);
-    v.push(pi.action_hash);
+    // Adapt-specific — 5 entries.
+    // adapter_id: pool reconstructs from adapter_program account.
+    let adapter_id_digest = anchor_lang::solana_program::keccak::hash(adapter_program.as_ref()).0;
+    v.push(util::reduce_le_mod_p(&adapter_id_digest));
+    // action_hash: pool reconstructs (Phase 9 trim — see handler).
+    v.push(*action_hash);
     v.push(u64_to_fr_le(pi.expected_out_value));
-    v.push(util::reduce_le_mod_p(&pi.expected_out_mint.to_bytes()));
+    // expected_out_mint: derived from token_config_out, same circuit binding.
+    v.push(util::reduce_le_mod_p(&out_mint.to_bytes()));
     v.push(TAG_ADAPT_BIND);
+    // Phase 9 dual-note (verifier index 23): outSpendingPub[0]. Forwarded
+    // straight from the wire — the verifier rejects any value that wasn't
+    // the prover's real outSpendingPub[0] because the circuit constrains
+    // outSpendingPubA === outSpendingPub[0]. Only emitted when the
+    // matching VK has the 24-input shape (post-ceremony).
+    #[cfg(feature = "phase_9_dual_note")]
+    v.push(pi.out_spending_pub);
     v
+}
+
+#[cfg(test)]
+mod excess_parity_tests {
+    //! Phase 9 dual-note minting — Rust ↔ TS parity.
+    //!
+    //! Frozen fixture matches `tests/v2/integration/dual_note_vector.test.ts`.
+    //! Both files must agree on `EXPECTED_COMMITMENT_B_HEX` after the first
+    //! run; if they diverge, the SDK and pool will mint commitments that
+    //! the user's wallet cannot recompute → the excess leaf becomes
+    //! unspendable. Treat any drift as a P0 bug.
+    use super::*;
+    use crate::constants::{TAG_COMMIT, TAG_EXCESS};
+    use anchor_lang::solana_program::poseidon::{hashv, Endianness, Parameters};
+    use std::convert::TryInto;
+    fn hex_to_le32(hex: &str) -> [u8; 32] {
+        // Decode without pulling in a hex crate dependency. 64-char input.
+        assert_eq!(hex.len(), 64, "expected 32-byte hex");
+        let mut out = [0u8; 32];
+        for i in 0..32 {
+            let byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap();
+            out[i] = byte;
+        }
+        out
+    }
+    fn bigint_le32(hi: u64, b: u64, c: u64, lo: u64) -> [u8; 32] {
+        // Pack four u64 limbs (BIG-endian conceptually: hi is the most
+        // significant) into a 32-byte little-endian buffer. The TS fixture
+        // uses 0x_aabbccdd... literals which big-int interpretation builds
+        // most-significant-first; we mirror that here.
+        let mut out = [0u8; 32];
+        out[0..8].copy_from_slice(&lo.to_le_bytes());
+        out[8..16].copy_from_slice(&c.to_le_bytes());
+        out[16..24].copy_from_slice(&b.to_le_bytes());
+        out[24..32].copy_from_slice(&hi.to_le_bytes());
+        out
+    }
+    /// Frozen fixture — keep in lockstep with `dual_note_vector.test.ts`.
+    /// All four bigints fit < BN254 Fr modulus (top byte ≤ 0x2A).
+    fn fixture() -> ([u8; 32], [u8; 32], [u8; 32], u64) {
+        // commitmentA = 0x1122334455667788_99aabbccddeeff00_1122334455667788_99aabbccddeeff00
+        let commitment_a = bigint_le32(
+            0x1122_3344_5566_7788,
+            0x99aa_bbcc_ddee_ff00,
+            0x1122_3344_5566_7788,
+            0x99aa_bbcc_ddee_ff00,
+        );
+        // outMintFr = 0x0102030405060708_090a0b0c0d0e0f10_1112131415161718_191a1b1c1d1e1f20
+        let out_mint_fr = bigint_le32(
+            0x0102_0304_0506_0708,
+            0x090a_0b0c_0d0e_0f10,
+            0x1112_1314_1516_1718,
+            0x191a_1b1c_1d1e_1f20,
+        );
+        // spendingPub = 0x2a2b2c2d2e2f3031_3233343536373839_3a3b3c3d3e3f4041_4243444546474849
+        let spending_pub = bigint_le32(
+            0x2a2b_2c2d_2e2f_3031,
+            0x3233_3435_3637_3839,
+            0x3a3b_3c3d_3e3f_4041,
+            0x4243_4445_4647_4849,
+        );
+        let excess: u64 = 1_234_567;
+        (commitment_a, out_mint_fr, spending_pub, excess)
+    }
+    fn compute_random_b(commitment_a: &[u8; 32]) -> [u8; 32] {
+        hashv(
+            Parameters::Bn254X5,
+            Endianness::LittleEndian,
+            &[&commitment_a[..], &TAG_EXCESS[..]],
+        )
+        .unwrap()
+        .to_bytes()
+    }
+    fn compute_commitment_b(
+        out_mint_fr: &[u8; 32],
+        excess: u64,
+        random_b: &[u8; 32],
+        spending_pub: &[u8; 32],
+    ) -> [u8; 32] {
+        let value_fr = u64_to_fr_le(excess);
+        hashv(
+            Parameters::Bn254X5,
+            Endianness::LittleEndian,
+            &[
+                &TAG_COMMIT[..],
+                &out_mint_fr[..],
+                &value_fr[..],
+                &random_b[..],
+                &spending_pub[..],
+            ],
+        )
+        .unwrap()
+        .to_bytes()
+    }
+    /// Pinned LE-hex commitment_b for the frozen fixture. Empty until first
+    /// run; matches the TS fixture's placeholder. Update both at the same
+    /// time, never one without the other.
+    const EXPECTED_COMMITMENT_B_HEX: &str = "";
+    #[test]
+    fn commitment_b_is_deterministic() {
+        let (commitment_a, out_mint_fr, spending_pub, excess) = fixture();
+        let r1 = compute_random_b(&commitment_a);
+        let r2 = compute_random_b(&commitment_a);
+        assert_eq!(r1, r2);
+        let c1 = compute_commitment_b(&out_mint_fr, excess, &r1, &spending_pub);
+        let c2 = compute_commitment_b(&out_mint_fr, excess, &r2, &spending_pub);
+        assert_eq!(c1, c2);
+    }
+    #[test]
+    fn commitment_b_matches_pinned_vector() {
+        let (commitment_a, out_mint_fr, spending_pub, excess) = fixture();
+        let random_b = compute_random_b(&commitment_a);
+        let commitment_b =
+            compute_commitment_b(&out_mint_fr, excess, &random_b, &spending_pub);
+        let actual_hex = commitment_b
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>();
+        if EXPECTED_COMMITMENT_B_HEX.is_empty() {
+            panic!(
+                "EXPECTED_COMMITMENT_B_HEX not yet pinned. Set it (here AND \
+                 in tests/v2/integration/dual_note_vector.test.ts) to: \"{}\"",
+                actual_hex
+            );
+        }
+        let expected: [u8; 32] = hex_to_le32(EXPECTED_COMMITMENT_B_HEX);
+        assert_eq!(
+            commitment_b, expected,
+            "Rust commitment_b drifted from pinned TS value. Hex: {}",
+            actual_hex
+        );
+    }
+    #[test]
+    fn random_b_changes_with_commitment_a() {
+        let (mut commitment_a, _, _, _) = fixture();
+        let r_orig = compute_random_b(&commitment_a);
+        // Flip one bit in commitment_a.
+        commitment_a[0] ^= 0x01;
+        let r_perturbed = compute_random_b(&commitment_a);
+        assert_ne!(r_orig, r_perturbed);
+    }
+    /// Make sure `try_into` is reachable in this scope (avoids dead-code lint
+    /// when the helpers above are inlined).
+    #[test]
+    fn _smoke_imports() {
+        let arr: [u8; 4] = [1, 2, 3, 4];
+        let _: [u8; 4] = arr.as_slice().try_into().unwrap();
+    }
 }

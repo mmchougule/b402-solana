@@ -38,6 +38,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 
 import { loadContext, type B402Context } from './context.js';
+import { parseInstallArgs, runInstall } from './install.js';
 import {
   shieldInput,
   unshieldInput,
@@ -113,7 +114,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'status',
       description:
-        'READ. Cheapest overview tool — call this first when unsure. Returns wallet pubkey + private balances grouped by mint. Costs 0 SOL. No args.',
+        'READ. Cheapest overview tool — call this first when unsure. Returns wallet pubkey + private balances grouped by mint. Sub-millisecond by default (reads the persistent NoteStore). Pass refresh:true only when you suspect deposits arrived from another machine — that path is cursor-driven so it stays sub-second even on throttled RPC. Costs 0 SOL.',
       inputSchema: zodToJsonSchema(statusInput),
     },
     {
@@ -203,7 +204,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         result = await handlePrivateSwap(ctx(), privateSwapInput.parse(args));
         break;
       case 'status':
-        result = await handleStatus(ctx());
+        result = await handleStatus(ctx(), statusInput.parse(args));
         break;
       case 'wallet_balance':
         result = await handleWalletBalance(ctx());
@@ -269,6 +270,34 @@ function classifyError(msg: string): string {
 }
 
 async function main(): Promise<void> {
+  // CLI-mode: `--install` writes the MCP config entry into known runtimes
+  // (Claude Code, Claude Desktop, Cursor) and exits. This is what
+  // `npx -y @b402ai/solana-mcp --install` runs.
+  const installOpts = parseInstallArgs(process.argv.slice(2));
+  if (installOpts) {
+    runInstall(installOpts);
+    return;
+  }
+
+  if (process.argv.includes('--help') || process.argv.includes('-h')) {
+    process.stdout.write([
+      'b402-solana MCP server',
+      '',
+      'Usage:',
+      '  b402-solana-mcp                 start MCP server on stdio (default)',
+      '  b402-solana-mcp --install       add to detected MCP runtimes (Claude Code, Claude Desktop, Cursor)',
+      '  b402-solana-mcp --install --force         overwrite existing entry',
+      '  b402-solana-mcp --install --only cursor   restrict to a single runtime',
+      '',
+      'Env (all optional, sane mainnet defaults):',
+      '  B402_RPC_URL          private RPC (Helius/Triton/QuickNode/Alchemy)',
+      '  B402_CLUSTER          mainnet | devnet | localnet (default mainnet)',
+      '  B402_KEYPAIR_PATH     Solana keypair (default ~/.config/solana/id.json)',
+      '',
+    ].join('\n'));
+    return;
+  }
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
   // stderr only — stdout is the MCP transport.

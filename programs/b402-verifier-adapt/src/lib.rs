@@ -15,8 +15,19 @@ use vk::ADAPT_VK;
 
 declare_id!("3Y2tyhNSaUiW5AcZcmFGRyTMdnroxHxc5GqFQPcMTZae");
 
-/// Adapt circuit has 23 public inputs (18 from transact + 5 adapt-specific).
+/// Adapt circuit public-input count.
+///   Phase 7B (default, current mainnet): 23 — 18 transact-layout + 5 adapt.
+///   Phase 9 (`phase_9_dual_note`):       24 — adds outSpendingPub[0] alias
+///                                             so the pool can recompute the
+///                                             excess commitment in Rust.
+/// The two shapes are NOT backward compatible — flipping requires
+/// redeploying both this verifier and the matching VK from the Phase 9
+/// trusted-setup ceremony. Default off so cargo builds produce the binary
+/// that matches the currently-deployed VK.
+#[cfg(not(feature = "phase_9_dual_note"))]
 pub const PUBLIC_INPUT_COUNT: usize = 23;
+#[cfg(feature = "phase_9_dual_note")]
+pub const PUBLIC_INPUT_COUNT: usize = 24;
 
 pub fn reverse_endianness(input: &[u8; 32]) -> [u8; 32] {
     let mut out = [0u8; 32];

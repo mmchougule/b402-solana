@@ -1,6 +1,6 @@
 {
   "name": "@b402ai/solana",
-  "version": "0.0.5",
+  "version": "0.0.11",
   "description": "Private DeFi on Solana — shielded pool + composable adapters + agent-callable surface",
   "license": "Apache-2.0",
   "type": "module",
@@ -50,7 +50,8 @@
     "@noble/hashes": "^1.5.0",
     "@noble/ciphers": "^1.0.0",
     "@noble/curves": "^1.6.0",
-    "circomlibjs": "^0.1.7"
+    "circomlibjs": "^0.1.7",
+    "@lightprotocol/stateless.js": "0.23.0-beta.5"
   },
   "devDependencies": {
     "typescript": "^5.6.3",

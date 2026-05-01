@@ -45,7 +45,7 @@ export const privateSwapInput = z
     inMint: Base58Pubkey.describe('Mint of the IN token (a private deposit in this mint must already exist for the caller)'),
     outMint: Base58Pubkey.describe('Mint of the OUT token'),
     amount: U64String.describe('Amount of inMint to swap, in smallest units'),
-    slippageBps: z.number().int().nonnegative().max(10000).optional().describe('Acceptable slippage in basis points. Default 50 (0.5%). Used on mainnet to derive expectedOut from a Jupiter quote.'),
+    slippageBps: z.number().int().nonnegative().max(10000).optional().describe('Slippage tolerance in basis points (1 bps = 0.01%). Default 30 (0.3%). Pool mints the output note at the slippage FLOOR (quote.outAmount × (1 − slippageBps/10000)); on-chain delivery may exceed the floor, with the difference held as shared vault dust until Phase 9 dual-note minting ships. So slippageBps == max per-swap cost the user pays. Lower = less cost but higher revert rate on volatile markets.'),
     adapterProgramId: Base58Pubkey.optional().describe('Override adapter program. Defaults to Jupiter (mainnet) or mock (devnet).'),
     adapterInTa: Base58Pubkey.optional().describe('Override adapter IN scratch ATA. Auto-derived from the adapter PDA + IN mint when omitted.'),
     adapterOutTa: Base58Pubkey.optional().describe('Override adapter OUT scratch ATA. Auto-derived from the adapter PDA + OUT mint when omitted.'),
@@ -54,7 +54,11 @@ export const privateSwapInput = z
   })
   .strict();
 
-export const statusInput = z.object({}).strict();
+export const statusInput = z
+  .object({
+    refresh: z.boolean().optional().describe('Re-sync from on-chain history before reading. Default false (cursor-driven fast path; the persistent NoteStore already mirrors every shield/unshield/swap this client made). Set true only when notes may have arrived from another machine — under that flag we still only fetch sigs newer than the persisted cursor.'),
+  })
+  .strict();
 
 export const walletBalanceInput = z.object({}).strict();
 
