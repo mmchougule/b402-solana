@@ -29,6 +29,11 @@ export const DomainTags = {
   // derivation `Poseidon(commitment_a, TAG_EXCESS)`. Used by SDK +
   // pool program to mirror each other exactly.
   excess:         'b402/v1/excess',
+  pqIntent:       'b402/v1/pq-intent',
+  pqIntentReq:    'b402/v1/pq-intent-req',
+  pqIntentRoute:  'b402/v1/pq-intent-route',
+  pqAuthKey:      'b402/v1/pq-auth-key',
+  pqIntentJson:   'b402/v1/pq-intent-json',
 } as const;
 
 export type DomainTagName = keyof typeof DomainTags;

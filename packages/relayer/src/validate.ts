@@ -72,9 +72,27 @@ export const RelayRequestSchema = z.object({
   /** Optional second signer (rare — most ops use relayer-only). */
   userSignature: Base64String.optional(),
   userPubkey: z.string().min(32).max(44).optional(),
+  falconPubkey: Base64String.optional(),
+  falconSignature: Base64String.optional(),
+  falconExpirySlot: z.string().regex(/^\d+$/, 'must be an unsigned decimal slot').optional(),
+  falconNonce: Base64String.optional(),
   /** v2: sibling instructions appended after the main pool ix.
    *  e.g. b402_nullifier::create_nullifier for unshield/adapt_execute. */
   additionalIxs: z.array(AdditionalIxSchema).max(4).optional(),
+}).superRefine((body, ctx) => {
+  const present = [
+    body.falconPubkey,
+    body.falconSignature,
+    body.falconExpirySlot,
+    body.falconNonce,
+  ].filter((v) => v !== undefined).length;
+  if (present !== 0 && present !== 4) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'falcon envelope must include pubkey, signature, expiry slot, and nonce together',
+      path: ['falconPubkey'],
+    });
+  }
 });
 
 export type RelayRequest = z.infer<typeof RelayRequestSchema>;

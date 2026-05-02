@@ -8,22 +8,26 @@
   },
   "scripts": {
     "build-deps": "pnpm --filter='@b402ai/solana-shared' --filter='@b402ai/solana-prover' --filter='@b402ai/solana' build",
+    "build-deps-relayer": "pnpm --filter='@b402ai/solana-shared' --filter='@b402ai/solana' --filter='@b402ai/solana-relayer' build",
     "e2e": "pnpm build-deps && tsx e2e.ts",
     "sdk-quick": "pnpm build-deps && tsx sdk-quick.ts",
     "sdk-quick-swap": "pnpm build-deps && tsx sdk-quick-swap.ts",
     "swap-e2e": "pnpm build-deps && tsx swap-e2e.ts",
     "swap-e2e-jupiter": "pnpm build-deps && tsx swap-e2e-jupiter.ts",
     "scanner-e2e": "pnpm build-deps && tsx scanner-e2e.ts",
+    "agent-delegated-private-swap": "pnpm build-deps-relayer && tsx agent-delegated-private-swap.ts",
     "alt": "pnpm build-deps && tsx ../ops/alt/create-alt.ts"
   },
   "dependencies": {
     "@b402ai/solana": "workspace:*",
     "@b402ai/solana-prover": "workspace:*",
+    "@b402ai/solana-relayer": "workspace:*",
     "@b402ai/solana-shared": "workspace:*",
     "@lightprotocol/stateless.js": "^0.23.0-beta.5",
     "@noble/hashes": "^1.5.0",
     "@solana/spl-token": "^0.4.9",
-    "@solana/web3.js": "^1.95.8"
+    "@solana/web3.js": "^1.95.8",
+    "rust-falcon": "^0.2.6"
   },
   "devDependencies": {
     "@types/node": "^22.9.0",

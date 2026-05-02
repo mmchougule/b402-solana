@@ -45,6 +45,7 @@ const EnvSchema = z.object({
   PORT: z.coerce.number().int().positive().max(65_535).default(8080),
   HOST: z.string().default('0.0.0.0'),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('info'),
+  CLUSTER_ID: z.enum(['mainnet', 'devnet', 'localnet']).default('devnet'),
 
   RPC_URL: z.string().url(),
   RELAYER_KEYPAIR: z.string().min(1),
@@ -77,6 +78,7 @@ export interface Config {
   port: number;
   host: string;
   logLevel: string;
+  clusterId: 'mainnet' | 'devnet' | 'localnet';
   rpcUrl: string;
   keypair: Keypair;
   poolProgramId: PublicKey;
@@ -144,6 +146,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     port: parsed.PORT,
     host: parsed.HOST,
     logLevel: parsed.LOG_LEVEL,
+    clusterId: parsed.CLUSTER_ID,
     rpcUrl: parsed.RPC_URL,
     keypair,
     poolProgramId: parsed.POOL_PROGRAM_ID,

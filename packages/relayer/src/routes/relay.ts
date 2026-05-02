@@ -21,6 +21,11 @@ import type { Authenticator } from '../auth.js';
 import type { Config } from '../config.js';
 import { Errors, RelayerError, sendProblem } from '../errors.js';
 import {
+  verifyFalconRelayRequest,
+  type FalconReplayStore,
+  type FalconSignatureVerifier,
+} from '../falcon-intent.js';
+import {
   RelayRequestSchema,
   decodeIxData,
   extractRelayerFee,
@@ -44,6 +49,9 @@ export interface RelayRouteDeps {
   cfg: Config;
   auth: Authenticator;
   submitter: Submitter;
+  currentSlot: () => Promise<bigint>;
+  falconVerifier: FalconSignatureVerifier;
+  falconReplayStore: FalconReplayStore;
 }
 
 export function registerRelayRoute(
@@ -90,6 +98,21 @@ export function registerRelayRoute(
       enforceTokenAllowlist(ixData, ctx.policy.tokenAllowlist);
 
       const altAddresses = (body.altAddresses ?? []).map((s) => new PublicKey(s));
+
+      if (opts.label === 'adapt' && body.falconPubkey) {
+        await verifyFalconRelayRequest(
+          body,
+          {
+            currentSlot: await deps.currentSlot(),
+            clusterId: deps.cfg.clusterId,
+            poolProgramId: deps.cfg.poolProgramId,
+            relayerPubkey: deps.cfg.keypair.publicKey,
+            computeUnitLimit: deps.cfg.computeUnitLimit,
+          },
+          deps.falconVerifier,
+          deps.falconReplayStore,
+        );
+      }
 
       let userSig: { signature: Uint8Array; pubkey: PublicKey } | undefined;
       if (body.userSignature && body.userPubkey) {

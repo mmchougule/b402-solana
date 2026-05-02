@@ -63,6 +63,7 @@ import {
 import { instructionDiscriminator, concat, u16Le, u32Le, u64Le, vecU8 } from './programs/anchor.js';
 import { buildZeroCache, proveMostRecentLeaf } from './merkle.js';
 import { commitmentHash, feeBindHash, nullifierHash, poseidonTagged } from './poseidon.js';
+import { createFalconIntentEnvelope, type FalconIntentSigner } from './falcon-intent.js';
 // Phase 9 helpers (deriveExcessRandom, computeExcessCommitment) are exposed
 // via ./index.ts for downstream code; b402.ts itself doesn't call them in
 // the Phase 7B (default-deployed) wire shape.
@@ -186,6 +187,12 @@ export interface PrivateSwapRequest {
   /** Phase 7 per-call override of `B402SolanaConfig.inlineCpiNullifier`.
    *  See its docs. */
   inlineCpiNullifier?: boolean;
+  /** Optional Falcon authorization for relayed private swaps. */
+  falconAuth?: {
+    signer: FalconIntentSigner;
+    expirySlot: bigint;
+    nonce?: Uint8Array;
+  };
 }
 
 export interface PrivateSwapResult {
@@ -989,6 +996,27 @@ export class B402Solana {
     // never appears as fee payer. Local path: this.relayer signs locally.
     let signature: string;
     if (this._relayerHttp) {
+      const falconIntent = req.falconAuth
+        ? await createFalconIntentEnvelope(
+            {
+              label: 'adapt',
+              clusterId: this.cluster === 'mainnet' ? 'mainnet' : this.cluster,
+              poolProgramId,
+              ixData: poolIxData,
+              accountKeys: poolIxKeys.map((k) => ({
+                pubkey: k.pubkey.toBase58(),
+                isSigner: k.isSigner,
+                isWritable: k.isWritable,
+              })),
+              altAddresses: [altPubkey, ...(req.alts ?? [])],
+              computeUnitLimit: 1_400_000,
+              relayerPubkey,
+              expirySlot: req.falconAuth.expirySlot,
+              nonce: req.falconAuth.nonce ?? new Uint8Array(nodeRandomBytes(32)),
+            },
+            req.falconAuth.signer,
+          )
+        : undefined;
       // Sibling-ix path (v2.1): pool ix + b402_nullifier sibling go in one
       // atomic tx via `additionalIxs`. Inline-CPI path (Phase 7): no
       // sibling — pool CPIs into b402_nullifier itself.
@@ -997,6 +1025,7 @@ export class B402Solana {
         ix: poolIx,
         altAddresses: [altPubkey, ...(req.alts ?? [])],
         computeUnitLimit: 1_400_000,
+        falconIntent,
         additionalIxs: nullifierIx ? [nullifierIx] : [],
       });
       signature = r.signature;

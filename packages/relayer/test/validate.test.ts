@@ -75,6 +75,35 @@ describe('RelayRequestSchema', () => {
     expect(r.success).toBe(true);
   });
 
+  it('accepts a request with a complete Falcon intent envelope', () => {
+    const body = {
+      ixData: Buffer.from(new Uint8Array(500)).toString('base64'),
+      accountKeys: [
+        { pubkey: '11111111111111111111111111111111', isSigner: true, isWritable: true },
+      ],
+      falconPubkey: Buffer.from(new Uint8Array(897).fill(7)).toString('base64'),
+      falconSignature: Buffer.from(new Uint8Array(666).fill(9)).toString('base64'),
+      falconExpirySlot: '123456789',
+      falconNonce: Buffer.from(new Uint8Array(32).fill(5)).toString('base64'),
+    };
+    const r = RelayRequestSchema.safeParse(body);
+    expect(r.success).toBe(true);
+  });
+
+  it('rejects partial Falcon intent envelope fields', () => {
+    const body = {
+      ixData: Buffer.from(new Uint8Array(500)).toString('base64'),
+      accountKeys: [
+        { pubkey: '11111111111111111111111111111111', isSigner: true, isWritable: true },
+      ],
+      falconPubkey: Buffer.from(new Uint8Array(897).fill(7)).toString('base64'),
+      falconSignature: Buffer.from(new Uint8Array(666).fill(9)).toString('base64'),
+      falconExpirySlot: '123456789',
+    };
+    const r = RelayRequestSchema.safeParse(body);
+    expect(r.success).toBe(false);
+  });
+
   it('caps additionalIxs at 4', () => {
     const body = {
       ixData: Buffer.from(new Uint8Array(500)).toString('base64'),

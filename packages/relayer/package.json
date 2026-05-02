@@ -9,6 +9,10 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./falcon-intent": {
+      "import": "./dist/falcon-intent.js",
+      "types": "./dist/falcon-intent.d.ts"
     }
   },
   "bin": {
@@ -28,6 +32,7 @@
     "@solana/spl-token": "^0.4.9",
     "fastify": "^5.1.0",
     "@fastify/rate-limit": "^10.2.1",
+    "rust-falcon": "^0.2.6",
     "zod": "^3.23.8",
     "pino": "^9.5.0"
   },

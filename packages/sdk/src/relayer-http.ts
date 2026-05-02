@@ -14,6 +14,7 @@
 
 import { PublicKey } from '@solana/web3.js';
 import type { TransactionInstruction } from '@solana/web3.js';
+import type { FalconIntentEnvelope } from './falcon-intent.js';
 
 export interface RelayerHttpClient {
   /** Pubkey of the remote relayer keypair (the on-chain fee payer). */
@@ -25,6 +26,7 @@ export interface RelayerHttpClient {
     altAddresses?: PublicKey[];
     computeUnitLimit?: number;
     userSignature?: { signature: Uint8Array; pubkey: PublicKey };
+    falconIntent?: FalconIntentEnvelope;
     /** v2 sibling ixs (e.g. b402_nullifier::create_nullifier). Appended
      *  after the main pool ix in the same atomic tx. The relayer doesn't
      *  inspect them — pool's instructions-sysvar walk is the trust
@@ -66,7 +68,7 @@ export function makeRelayerHttpClient(opts: {
   const base = trim(opts.url);
   return {
     pubkey: opts.pubkey,
-    async submit({ label, ix, altAddresses, computeUnitLimit, userSignature, additionalIxs }) {
+    async submit({ label, ix, altAddresses, computeUnitLimit, userSignature, falconIntent, additionalIxs }) {
       const accountKeys = ix.keys.map((k) => ({
         pubkey: k.pubkey.toBase58(),
         isSigner: k.isSigner,
@@ -89,6 +91,12 @@ export function makeRelayerHttpClient(opts: {
       if (userSignature) {
         body.userSignature = bytesToBase64(userSignature.signature);
         body.userPubkey = userSignature.pubkey.toBase58();
+      }
+      if (falconIntent) {
+        body.falconPubkey = falconIntent.falconPubkey;
+        body.falconSignature = falconIntent.falconSignature;
+        body.falconExpirySlot = falconIntent.falconExpirySlot;
+        body.falconNonce = falconIntent.falconNonce;
       }
       if (additionalIxs && additionalIxs.length > 0) {
         body.additionalIxs = additionalIxs.map((extra) => ({
