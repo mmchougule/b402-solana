@@ -61,7 +61,7 @@ import {
   vaultPda,
 } from './programs/pda.js';
 import { instructionDiscriminator, concat, u16Le, u32Le, u64Le, vecU8 } from './programs/anchor.js';
-import { buildZeroCache, proveMostRecentLeaf } from './merkle.js';
+import { buildZeroCache, proveMostRecentLeaf, type MerkleProof } from './merkle.js';
 import { commitmentHash, feeBindHash, nullifierHash, poseidonTagged } from './poseidon.js';
 import { computeExcessCommitment, deriveExcessRandom } from './excess.js';
 import { encryptNote } from './note-encryption.js';
@@ -119,6 +119,23 @@ export interface B402SolanaConfig {
    * default when set.
    */
   inlineCpiNullifier?: boolean;
+  /**
+   * Indexer URL. When set, unshield + privateSwap fetch Merkle proofs for
+   * any leaf via `/v1/proof?leafIndex=N` — closes the rightmost-only
+   * limitation of `proveMostRecentLeaf` and unblocks multi-deposit
+   * unshield in any order, cross-device note discovery, and double-spend
+   * pre-checks.
+   *
+   * The indexer is a CONVENIENCE oracle: SDK still verifies the indexer's
+   * claimed `root` against the on-chain TreeState before using any proof,
+   * so a tampered indexer can DoS but cannot trick the SDK into emitting
+   * a forgeable spend.
+   *
+   * Leave undefined to fall back to `proveMostRecentLeaf` (rightmost-only).
+   * Recommended in production: set to the team-operated b402 indexer URL
+   * and let the SDK auto-fall-back if it goes down.
+   */
+  indexerUrl?: string;
 }
 
 export interface ShieldRequest {
@@ -298,6 +315,10 @@ export class B402Solana {
   readonly relayerHttpUrl: string | undefined;
   readonly relayerApiKey: string | undefined;
   readonly inlineCpiNullifier: boolean;
+  /** Indexer client. Lazily created from `config.indexerUrl` if present.
+   *  Null when no indexerUrl was passed → SDK falls back to
+   *  proveMostRecentLeaf (rightmost-only). */
+  readonly indexer: import('./indexer.js').B402Indexer | null;
   private _relayerHttp: { client: import('./relayer-http.js').RelayerHttpClient } | null = null;
 
   private _wallet: Wallet | null = null;
@@ -324,6 +345,23 @@ export class B402Solana {
     this.relayerHttpUrl = config.relayerHttpUrl;
     this.relayerApiKey = config.relayerApiKey;
     this.inlineCpiNullifier = config.inlineCpiNullifier ?? false;
+    // Indexer is opt-in. When set, the SDK uses /v1/proof to support
+    // spend-any-leaf; on indexer error it logs and falls back to the
+    // rightmost-only proveMostRecentLeaf so a transient outage doesn't
+    // brick all spend flows.
+    if (config.indexerUrl) {
+      // Lazy require to avoid pulling indexer.ts into bundles that don't
+      // need it. Imported synchronously here because it has no async init.
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { B402Indexer } = require('./indexer.js') as typeof import('./indexer.js');
+      this.indexer = new B402Indexer({
+        url: config.indexerUrl,
+        connection: this.connection,
+        poolProgramId: new PublicKey(this.programIds.b402Pool),
+      });
+    } else {
+      this.indexer = null;
+    }
 
     if (config.prover) {
       this._prover = config.prover;
@@ -594,20 +632,7 @@ export class B402Solana {
     }
 
     const poolProgramId = new PublicKey(this.programIds.b402Pool);
-    const tree = await fetchTreeState(
-      this.connection,
-      treeStatePda(poolProgramId),
-    );
-    const zeroCache = await buildZeroCache();
-    const zeroCacheLe = zeroCache.map(bigintToLe32);
-    const rootBig = leToBigEndian(tree.currentRoot);
-    const merkleProof = proveMostRecentLeaf(
-      note.commitment,
-      note.leafIndex,
-      rootBig,
-      tree.frontier,
-      zeroCacheLe,
-    );
+    const merkleProof = await this._proveLeafForSpend(note);
 
     const result = await unshield({
       connection: this.connection,
@@ -667,6 +692,49 @@ export class B402Solana {
     throw new B402Error(
       B402ErrorCode.RpcError,
       `tx ${signature} could not be confirmed within 6s — note NOT marked spent (retry safe)`,
+    );
+  }
+
+  /**
+   * Resolve a Merkle proof for a leaf the SDK is about to spend.
+   *
+   * Two paths:
+   *   - Indexer configured AND healthy → use `/v1/proof?leafIndex=N`. Works
+   *     for ANY leaf, not just the rightmost. Closes the proveMostRecentLeaf
+   *     gap that breaks multi-deposit unshield in arbitrary order.
+   *   - Otherwise → `proveMostRecentLeaf` against the on-chain frontier.
+   *     Works only when `note.leafIndex == treeState.leafCount - 1`. The
+   *     caller must hold the most-recently-shielded note OR will hit
+   *     Transact_221 MerkleVerify failures inside the prover.
+   *
+   * On indexer error (network failure, stale state, root mismatch) we log
+   * via stderr and fall back to proveMostRecentLeaf so a transient outage
+   * doesn't brick the rightmost-only spend that always works.
+   */
+  private async _proveLeafForSpend(note: SpendableNote): Promise<MerkleProof> {
+    if (this.indexer) {
+      try {
+        return await this.indexer.proveLeaf(note.leafIndex);
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `b402: indexer proof for leaf ${note.leafIndex} failed (${
+            (e as Error).message
+          }) — falling back to proveMostRecentLeaf. Multi-deposit spend in arbitrary order will fail until indexer recovers.`,
+        );
+      }
+    }
+    const poolProgramId = new PublicKey(this.programIds.b402Pool);
+    const tree = await fetchTreeState(this.connection, treeStatePda(poolProgramId));
+    const zeroCache = await buildZeroCache();
+    const zeroCacheLe = zeroCache.map(bigintToLe32);
+    const rootBig = leToBigEndian(tree.currentRoot);
+    return proveMostRecentLeaf(
+      note.commitment,
+      note.leafIndex,
+      rootBig,
+      tree.frontier,
+      zeroCacheLe,
     );
   }
 
@@ -754,16 +822,7 @@ export class B402Solana {
     // 2. Tree state + merkle proof for the input note.
     const poolProgramId = new PublicKey(this.programIds.b402Pool);
     const tree = await fetchTreeState(this.connection, treeStatePda(poolProgramId));
-    const zeroCache = await buildZeroCache();
-    const zeroCacheLe = zeroCache.map(bigintToLe32);
-    const rootBig = leToBigEndian(tree.currentRoot);
-    const merkleProof = proveMostRecentLeaf(
-      note.commitment,
-      note.leafIndex,
-      rootBig,
-      tree.frontier,
-      zeroCacheLe,
-    );
+    const merkleProof = await this._proveLeafForSpend(note);
 
     // 3. Build output note (single non-dummy out commitment).
     const outRandom = leToFrReduced(new Uint8Array(nodeRandomBytes(32)));
@@ -790,11 +849,14 @@ export class B402Solana {
     const nullifierVal = await nullifierHash(this._wallet!.spendingPriv, note.leafIndex);
     const nullifierLe = bigintToLe32(nullifierVal);
 
-    // 5. Witness.
+    // 5. Witness. The merkleProof's `root` IS the on-chain root the prover
+    //    needs — comes from indexer (verified against TreeState) or from
+    //    proveMostRecentLeaf (which read tree.currentRoot directly).
     const feeBind = await feeBindHash(0n, 0n);
     const recipientBindVal = await poseidonTagged('recipientBind', 0n, 0n);
+    const zeroCacheBig = await buildZeroCache();
     const witness: AdaptWitness = {
-      merkleRoot: rootBig,
+      merkleRoot: merkleProof.root,
       nullifier: [nullifierVal, 0n],
       commitmentOut: [outCommitment, 0n],
       publicAmountIn: req.amount,
@@ -824,7 +886,7 @@ export class B402Solana {
       inRandom: [note.random, 0n],
       inSpendingPriv: [this._wallet!.spendingPriv, 1n],
       inLeafIndex: [note.leafIndex, 0n],
-      inSiblings: [merkleProof.siblings, zeroCache.slice(0, 26)],
+      inSiblings: [merkleProof.siblings, zeroCacheBig.slice(0, 26)],
       inPathBits: [merkleProof.pathBits, Array(26).fill(0)],
       inIsDummy: [0, 1],
       outValue: [expectedOut, 0n],

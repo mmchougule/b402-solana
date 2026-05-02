@@ -15,6 +15,13 @@ export * as noteEnc from './note-encryption.js';
 export { deriveExcessRandom, computeExcessCommitment } from './excess.js';
 export type { EncryptedNote } from './note-encryption.js';
 export { NoteStore } from './note-store.js';
+export { B402Indexer } from './indexer.js';
+export type {
+  B402IndexerConfig,
+  IndexerProofResponse,
+  IndexerSpentResponse,
+  IndexerStateResponse,
+} from './indexer.js';
 
 // Action builders + on-chain helpers
 export { shield, type ShieldParams, type ShieldResult } from './actions/shield.js';
