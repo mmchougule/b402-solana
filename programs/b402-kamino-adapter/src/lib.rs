@@ -393,6 +393,41 @@ pub mod b402_kamino_adapter {
 
         Ok(())
     }
+
+    /// Garbage-collect an empty per-user obligation (PRD-33 §5 mitigation 2).
+    ///
+    /// Closes the per-user UserMetadata + Obligation Kamino accounts when
+    /// they hold no positions, recovering rent to `rent_sink`. Admin-gated
+    /// (`admin == ctx.accounts.admin.signer`) for V1.0 — V1.5 surfaces a
+    /// shielded user-opt-in path so the rent recovery is initiated by the
+    /// owner rather than by the operator.
+    ///
+    /// Status: SCAFFOLD. The Kamino-side close ixs (`delete_user_metadata`,
+    /// `close_obligation` if/when it lands in klend) require their
+    /// discriminators + account layouts verified against klend mainnet
+    /// bytecode + an emptiness pre-check. Until then this ix returns
+    /// `NotYetImplemented` if invoked. Wiring it is part of PRD-33 Phase
+    /// 33.4 cleanup, NOT a Phase 33.2 deliverable. Follow-up checklist:
+    ///   - confirm `delete_user_metadata` discriminator vs klend master
+    ///   - add `close_obligation` discriminator (or skip if klend has none
+    ///     and we just leak the obligation's rent)
+    ///   - add `is_obligation_empty(&obligation_data)` check before invoke
+    ///   - integration test against cloned mainnet klend
+    ///
+    /// Always present in the IDL (Anchor #[program] expands every fn at
+    /// macro-resolution time, before #[cfg] gates), but the body returns
+    /// `NotYetImplemented` in default-feature builds and only the
+    /// per_user_obligation build accepts a meaningful viewing_pub_hash.
+    pub fn gc_obligation<'info>(
+        _ctx: Context<'_, '_, '_, 'info, GcObligation<'info>>,
+        _viewing_pub_hash: [u8; 32],
+    ) -> Result<()> {
+        // TODO(PRD-33 Phase 33.4): wire delete_user_metadata + close_obligation.
+        // Discriminators must come from klend source review, NOT guessed.
+        // See programs/b402-kamino-adapter/src/lib.rs:74-110 for the
+        // verified-against-klend disc constants pattern.
+        Err(error!(KaminoAdapterError::NotYetImplemented))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1236,6 +1271,36 @@ pub struct Execute<'info> {
     pub adapter_out_ta: Account<'info, TokenAccount>,
 
     pub token_program: Program<'info, Token>,
+}
+
+/// Per-user obligation garbage-collection accounts (PRD-33 §5).
+///
+/// Admin-gated for V1.0 (the adapter program's upgrade-authority is the
+/// only signer trusted to invoke this — V1.5 surfaces a user-opt-in
+/// shielded path). The Kamino-side close ixs need their own remaining
+/// accounts forwarded; the SDK builds those after consulting the
+/// per-user UserMetadata + Obligation account state.
+///
+/// Account layout is identical between feature variants — the gc body
+/// returns NotYetImplemented in default-feature builds (see fn doc).
+#[derive(Accounts)]
+pub struct GcObligation<'info> {
+    #[account(mut)]
+    pub admin: Signer<'info>,
+
+    /// CHECK: adapter PDA signer for Kamino-side close ixs. Same seeds
+    /// as Execute.
+    #[account(
+        mut,
+        seeds = [VERSION_PREFIX, SEED_ADAPTER],
+        bump,
+    )]
+    pub adapter_authority: UncheckedAccount<'info>,
+
+    /// CHECK: rent destination. Lamports recovered from closed Kamino
+    /// accounts land here.
+    #[account(mut)]
+    pub rent_sink: UncheckedAccount<'info>,
 }
 
 #[error_code]
