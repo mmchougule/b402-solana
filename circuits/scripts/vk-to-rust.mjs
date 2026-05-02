@@ -3,19 +3,33 @@
  * Convert snarkjs `verification_key.json` → Rust source compatible with
  * `groth16-solana`'s `Groth16Verifyingkey`.
  *
- * Output: programs/b402-verifier-transact/src/vk.rs
+ * Usage (all flags REQUIRED — no implicit defaults; the previous default
+ * silently clobbered programs/b402-verifier-transact/src/vk.rs whenever a
+ * caller forgot to specify the output path):
+ *
+ *   node vk-to-rust.mjs \
+ *     --in  circuits/build/ceremony/adapt_verification_key.json \
+ *     --out programs/b402-verifier-adapt/src/vk.rs \
+ *     --const ADAPT_VK \
+ *     [--force]
+ *
+ * Safety:
+ *   - Refuses to write if --in does not exist or fails JSON parse.
+ *   - Refuses to write if --in lacks the expected snarkjs VK fields.
+ *   - Refuses to overwrite an existing --out whose `Source:` header points
+ *     to a DIFFERENT input than the one currently being processed (likely
+ *     a wrong-target write). Override with --force.
+ *   - Atomic write: writes to <out>.tmp then renames, so a kill mid-write
+ *     doesn't leave a half-baked file.
  *
  * Format:
  *   - G1 points: 64 bytes = x_be_32 || y_be_32 (affine, big-endian)
- *   - G2 points: 128 bytes = (negated Y-major convention used by groth16-solana)
+ *   - G2 points: 128 bytes (negated Y-major convention used by groth16-solana)
  *     x = x.c1 || x.c0, y = y.c1 || y.c0, each 32B BE
  *   - IC: array of G1 points, one per public input + 1 for the constant term
  *
  * Source of truth for byte layout:
  *   https://github.com/Lightprotocol/groth16-solana
- *
- * The affine conversion uses ffjavascript (snarkjs dependency) so we don't
- * pull in an additional curve dep.
  */
 
 import fs from 'node:fs';
@@ -25,24 +39,103 @@ import { fileURLToPath } from 'node:url';
 import { utils, buildBn128 } from 'ffjavascript';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DEFAULT_IN = path.resolve(__dirname, '../build/ceremony/verification_key.json');
-const DEFAULT_OUT = path.resolve(__dirname, '../../programs/b402-verifier-transact/src/vk.rs');
 
-const inPath = process.argv[2] ?? DEFAULT_IN;
-const outPath = process.argv[3] ?? DEFAULT_OUT;
-// Name of the exported Groth16Verifyingkey const. Passed as arg[4] for
-// circuits beyond transact (e.g. `ADAPT_VK` for adapt.circom).
-const vkConstName = process.argv[4] ?? 'TRANSACT_VK';
-
-if (!fs.existsSync(inPath)) {
-  console.error(`missing VK: ${inPath}`);
+// ── arg parsing ──────────────────────────────────────────────────────
+function die(msg) {
+  console.error(`vk-to-rust: ${msg}`);
+  console.error(
+    'usage: vk-to-rust.mjs --in <vk.json> --out <vk.rs> --const <NAME> [--force]',
+  );
   process.exit(1);
 }
 
-const vk = JSON.parse(fs.readFileSync(inPath, 'utf8'));
+const args = process.argv.slice(2);
+let inPath = null;
+let outPath = null;
+let vkConstName = null;
+let force = false;
+
+for (let i = 0; i < args.length; i++) {
+  const a = args[i];
+  if (a === '--in')        { inPath      = args[++i]; }
+  else if (a === '--out')  { outPath     = args[++i]; }
+  else if (a === '--const'){ vkConstName = args[++i]; }
+  else if (a === '--force'){ force = true; }
+  else                     { die(`unknown arg: ${a}`); }
+}
+
+if (!inPath || !outPath || !vkConstName) {
+  die('all of --in, --out, --const are required');
+}
+
+inPath  = path.resolve(inPath);
+outPath = path.resolve(outPath);
+
+if (!/^[A-Z_][A-Z0-9_]*$/.test(vkConstName)) {
+  die(`--const must be SCREAMING_SNAKE_CASE; got "${vkConstName}"`);
+}
+
+if (!fs.existsSync(inPath)) {
+  die(`--in does not exist: ${inPath}`);
+}
+if (!fs.existsSync(path.dirname(outPath))) {
+  die(`--out parent directory does not exist: ${path.dirname(outPath)}`);
+}
+
+// ── parse + validate the input VK ────────────────────────────────────
+let vk;
+try {
+  vk = JSON.parse(fs.readFileSync(inPath, 'utf8'));
+} catch (e) {
+  die(`--in is not valid JSON: ${e.message}`);
+}
+
+const REQUIRED_VK_FIELDS = [
+  'protocol', 'curve', 'nPublic',
+  'vk_alpha_1', 'vk_beta_2', 'vk_gamma_2', 'vk_delta_2', 'IC',
+];
+for (const f of REQUIRED_VK_FIELDS) {
+  if (vk[f] === undefined) die(`--in missing required VK field: ${f}`);
+}
+if (vk.protocol !== 'groth16') {
+  die(`--in protocol must be groth16; got ${vk.protocol}`);
+}
+if (vk.curve !== 'bn128') {
+  die(`--in curve must be bn128; got ${vk.curve}`);
+}
+if (!Array.isArray(vk.IC) || vk.IC.length < 1) {
+  die(`--in IC must be a non-empty array`);
+}
+if (vk.IC.length !== vk.nPublic + 1) {
+  die(`--in inconsistent: nPublic=${vk.nPublic}, IC.length=${vk.IC.length} (expected nPublic+1)`);
+}
+
+// ── target-mismatch guard ────────────────────────────────────────────
+// If --out exists and its `Source:` header points to a different file,
+// require --force. This catches the original bug where vk-to-rust wrote
+// the new adapt VK into transact/vk.rs because the caller forgot --out.
+if (fs.existsSync(outPath) && !force) {
+  const existing = fs.readFileSync(outPath, 'utf8');
+  const m = existing.match(/^\/\/!\s*Source:\s*(\S+)/m);
+  if (m) {
+    const existingSource = m[1];
+    const proposedSource = path.relative(path.dirname(outPath), inPath);
+    if (existingSource !== proposedSource) {
+      die(
+        `refusing to overwrite ${outPath}\n` +
+        `  existing Source: ${existingSource}\n` +
+        `  proposed Source: ${proposedSource}\n` +
+        `  Pass --force if you really mean to retarget this file.`,
+      );
+    }
+  }
+}
+
+// ── transform ────────────────────────────────────────────────────────
 const bn128 = await buildBn128();
 const F1 = bn128.G1.F;
-const F2 = bn128.G2.F;
+// (F2 not used — keep for documentation symmetry)
+// const F2 = bn128.G2.F;
 
 function feBeBytes32(fe) {
   // fe is a Uint8Array in Montgomery form (ffjs internal) — convert to
@@ -50,16 +143,6 @@ function feBeBytes32(fe) {
   const std = F1.fromMontgomery(fe);
   const bi = utils.leBuff2int(std);
   return beBytes32(bi);
-}
-
-function f2BeBytesPair(fe2) {
-  // fe2 is [c0, c1] each in Montgomery form.
-  const c0Std = F1.fromMontgomery(fe2[0]);
-  const c1Std = F1.fromMontgomery(fe2[1]);
-  return {
-    c0: beBytes32(utils.leBuff2int(c0Std)),
-    c1: beBytes32(utils.leBuff2int(c1Std)),
-  };
 }
 
 function beBytes32(bi) {
@@ -81,12 +164,10 @@ function concatU8(arrays) {
   return out;
 }
 
-/** Build a 96-byte Jacobian G1 buffer from [x, y, z] decimal strings. */
 function strArrayToJacG1(arr) {
   return concatU8([F1.e(arr[0]), F1.e(arr[1]), F1.e(arr[2])]);
 }
 
-/** Build a 192-byte Jacobian G2 buffer from [[x0,x1],[y0,y1],[z0,z1]] decimal strings. */
 function strArrayToJacG2(arr) {
   return concatU8([
     F1.e(arr[0][0]), F1.e(arr[0][1]),
@@ -96,36 +177,25 @@ function strArrayToJacG2(arr) {
 }
 
 function g1ToBytes64(jacBuf) {
-  // toAffine returns 64 bytes (x || y), each 32B in Montgomery form.
   const affMont = bn128.G1.toAffine(jacBuf);
-  const xMont = affMont.slice(0, 32);
-  const yMont = affMont.slice(32, 64);
-  const x = feBeBytes32(xMont);
-  const y = feBeBytes32(yMont);
-  return [...x, ...y];
+  return [...feBeBytes32(affMont.slice(0, 32)), ...feBeBytes32(affMont.slice(32, 64))];
 }
 
 function g2ToBytes128(jacBuf) {
-  // G2.toAffine returns 128 bytes = (x.c0, x.c1, y.c0, y.c1), each 32B Montgomery.
   const affMont = bn128.G2.toAffine(jacBuf);
-  const xC0 = affMont.slice(0, 32);
-  const xC1 = affMont.slice(32, 64);
-  const yC0 = affMont.slice(64, 96);
-  const yC1 = affMont.slice(96, 128);
-  const xC0Be = feBeBytes32(xC0);
-  const xC1Be = feBeBytes32(xC1);
-  const yC0Be = feBeBytes32(yC0);
-  const yC1Be = feBeBytes32(yC1);
+  const xC0 = feBeBytes32(affMont.slice(0, 32));
+  const xC1 = feBeBytes32(affMont.slice(32, 64));
+  const yC0 = feBeBytes32(affMont.slice(64, 96));
+  const yC1 = feBeBytes32(affMont.slice(96, 128));
   // groth16-solana encoding: x.c1 || x.c0 || y.c1 || y.c0.
-  return [...xC1Be, ...xC0Be, ...yC1Be, ...yC0Be];
+  return [...xC1, ...xC0, ...yC1, ...yC0];
 }
 
 const alphaG1 = g1ToBytes64(strArrayToJacG1(vk.vk_alpha_1));
 const betaG2  = g2ToBytes128(strArrayToJacG2(vk.vk_beta_2));
 const gammaG2 = g2ToBytes128(strArrayToJacG2(vk.vk_gamma_2));
 const deltaG2 = g2ToBytes128(strArrayToJacG2(vk.vk_delta_2));
-
-const ic = vk.IC.map((p) => g1ToBytes64(strArrayToJacG1(p)));
+const ic      = vk.IC.map((p) => g1ToBytes64(strArrayToJacG1(p)));
 
 function bytesToLiteral(bytes) {
   return '[' + bytes.map((b) => `0x${b.toString(16).padStart(2, '0')}`).join(', ') + ']';
@@ -164,9 +234,26 @@ pub const ${vkConstName}: Groth16Verifyingkey = Groth16Verifyingkey {
 };
 `;
 
-fs.mkdirSync(path.dirname(outPath), { recursive: true });
-fs.writeFileSync(outPath, out);
+// ── atomic write ─────────────────────────────────────────────────────
+const tmpPath = `${outPath}.tmp.${process.pid}`;
+fs.writeFileSync(tmpPath, out);
+fs.renameSync(tmpPath, outPath);
+
+// ── verify written content matches expectations ──────────────────────
+const written = fs.readFileSync(outPath, 'utf8');
+const ok =
+  written.includes(`nr_pubinputs: ${ic.length - 1},`) &&
+  written.includes(`VK_IC: [[u8; 64]; ${ic.length}]`) &&
+  written.includes(`pub const ${vkConstName}:`);
+if (!ok) {
+  // Should never happen — we just wrote the file. But check is cheap.
+  die(`post-write verification failed: ${outPath} does not look right`);
+}
+
 console.log(`✓ wrote ${outPath}`);
-console.log(`  nr_pubinputs = ${ic.length - 1}`);
+console.log(`  nPublic       = ${vk.nPublic}`);
+console.log(`  nr_pubinputs  = ${ic.length - 1}`);
+console.log(`  VK_IC.length  = ${ic.length}`);
+console.log(`  const         = ${vkConstName}`);
 // ffjavascript keeps worker threads alive → force exit so scripts don't hang.
 process.exit(0);

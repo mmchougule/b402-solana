@@ -40,6 +40,10 @@ circuits/build/**/witness_calculator.js
 circuits/build/test_artifacts/
 circuits/build/ceremony/*_0000.zkey
 circuits/build/ceremony/*_0001.zkey
+# Per-ceremony backups created by phase9-ceremony.sh before overwriting
+# adapt_final.zkey / adapt_verification_key.json. Local recovery only,
+# never product artifacts.
+circuits/build/ceremony/archive-*/
 circuits/build/ceremony/*.zkey.tmp
 circuits/build/ceremony/*.ptau
 # adapt_v2 is on a feature branch; keep its build artifacts local-only.
