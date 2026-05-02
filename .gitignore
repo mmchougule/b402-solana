@@ -40,6 +40,10 @@ circuits/build/**/witness_calculator.js
 circuits/build/test_artifacts/
 circuits/build/ceremony/*_0000.zkey
 circuits/build/ceremony/*_0001.zkey
+
+# Runtime state from ops/phase9-*.sh — buffer pubkeys, deploy markers,
+# step recovery info. Specific to a single deploy attempt; never product.
+ops/state/
 # Per-ceremony backups created by phase9-ceremony.sh before overwriting
 # adapt_final.zkey / adapt_verification_key.json. Local recovery only,
 # never product artifacts.
