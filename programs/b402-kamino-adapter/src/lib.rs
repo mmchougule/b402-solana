@@ -116,6 +116,13 @@ pub const SEED_KAMINO_OBL: &[u8] = b"kamino-obl";
 pub const VERSION_PREFIX: &[u8] = b"b402/v1";
 /// PDA seed for adapter authority. Same scheme as every b402 adapter.
 pub const SEED_ADAPTER: &[u8] = b"adapter";
+/// PDA seed for per-user adapter-side obligation owner (PRD-33 §3.2).
+/// Combined with `viewing_pub_hash` (32 B from the Phase 9
+/// `outSpendingPub` public input) and the adapter `program_id`, this PDA
+/// signs as the Kamino obligation owner instead of `adapter_authority`.
+/// Each adapter is its own program → cross-protocol correlation by
+/// `owner_pda` alone is impossible (PRD-33 §3.2 property 1).
+pub const SEED_ADAPTER_OWNER: &[u8] = b"adapter-owner";
 
 // ---------------------------------------------------------------------------
 // remaining_accounts layout (from kamino-fork-deposit.ts — verified GREEN).
@@ -974,20 +981,45 @@ pub enum KaminoAdapterError {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: reserved per-user obligation PDA derivation. Reference for the
-// PRD-09 §7.2 upgrade. Currently unused at runtime — v0.1 uses
-// `adapter_authority` as the single shared obligation owner.
+// Per-user obligation helpers (PRD-33 §3.2).
+//
+// `viewing_pub_hash` = bytes_le(outSpendingPub[0]) from the Phase 9 adapt
+// proof's verifier-index-23 public input. The pool prepends this 32-B value
+// to the adapter's action_payload (when the adapter's registry entry has
+// `stateful_adapter = true`), so the adapter can recover it byte-equal to
+// what the prover bound. See PRD-33 §6.1 for the wire shape.
 // ---------------------------------------------------------------------------
 
-/// Derive the per-user owner PDA (PRD-09 §7.2 upgrade). The owner PDA
-/// becomes the obligation's "user" seed slot under klend, giving each
-/// shielded user a unique Vanilla obligation.
-#[allow(dead_code)]
-pub fn derive_owner_pda(viewing_pub_hash: &[u8; 32]) -> (Pubkey, u8) {
+/// Derive the per-user owner PDA (PRD-33 §3.2). The owner PDA becomes the
+/// obligation's "user" seed slot under klend, giving each shielded user a
+/// unique Vanilla obligation. Per-adapter scoping (each adapter is its
+/// own `program_id`) makes the same `viewing_pub_hash` resolve to a
+/// DIFFERENT `owner_pda` on Drift / Marginfi adapters — cross-protocol
+/// correlation by `owner_pda` alone is impossible.
+pub fn derive_owner_pda(adapter_program_id: &Pubkey, viewing_pub_hash: &[u8; 32]) -> (Pubkey, u8) {
     Pubkey::find_program_address(
-        &[VERSION_PREFIX, b"kamino-owner", viewing_pub_hash.as_ref()],
-        &crate::ID,
+        &[VERSION_PREFIX, SEED_ADAPTER_OWNER, viewing_pub_hash.as_ref()],
+        adapter_program_id,
     )
+}
+
+/// Decode the stateful-adapter action payload format (PRD-33 §6.1):
+///
+///   `[0..32]   = viewing_pub_hash` (= bytes_le(outSpendingPub[0]))
+///   `[32..]    = Borsh(KaminoAction)`
+///
+/// Returns the extracted hash + the decoded action. Errors on payloads
+/// shorter than 33 B (need at least 32 B prefix + 1 B Borsh enum tag).
+pub fn decode_per_user_payload(action_payload: &[u8]) -> Result<([u8; 32], KaminoAction)> {
+    require!(
+        action_payload.len() > 32,
+        KaminoAdapterError::InvalidActionPayload
+    );
+    let mut viewing_pub_hash = [0u8; 32];
+    viewing_pub_hash.copy_from_slice(&action_payload[..32]);
+    let inner = KaminoAction::try_from_slice(&action_payload[32..])
+        .map_err(|_| error!(KaminoAdapterError::InvalidActionPayload))?;
+    Ok((viewing_pub_hash, inner))
 }
 
 /// Derive the per-user Kamino Vanilla obligation PDA. Used by the SDK for
