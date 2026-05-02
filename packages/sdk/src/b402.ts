@@ -63,9 +63,7 @@ import {
 import { instructionDiscriminator, concat, u16Le, u32Le, u64Le, vecU8 } from './programs/anchor.js';
 import { buildZeroCache, proveMostRecentLeaf } from './merkle.js';
 import { commitmentHash, feeBindHash, nullifierHash, poseidonTagged } from './poseidon.js';
-// Phase 9 helpers (deriveExcessRandom, computeExcessCommitment) are exposed
-// via ./index.ts for downstream code; b402.ts itself doesn't call them in
-// the Phase 7B (default-deployed) wire shape.
+import { computeExcessCommitment, deriveExcessRandom } from './excess.js';
 import { encryptNote } from './note-encryption.js';
 import { B402Error, B402ErrorCode } from './errors.js';
 import {
@@ -186,6 +184,20 @@ export interface PrivateSwapRequest {
   /** Phase 7 per-call override of `B402SolanaConfig.inlineCpiNullifier`.
    *  See its docs. */
   inlineCpiNullifier?: boolean;
+  /**
+   * Phase 9 dual-note minting: when actual_out > expected_out, the pool
+   * mints a SECOND commitment for the excess and emits its leaf. The SDK
+   * mirrors that derivation locally and inserts the extra `SpendableNote`
+   * so the user can spend it without an indexer round-trip.
+   *
+   * Default **false** — produces the Phase 7B 23-public-input wire shape
+   * the deployed mainnet pool expects. Flip to **true** ONLY against a
+   * pool + verifier_adapt built with `--features phase_9_dual_note`,
+   * paired with the regenerated 24-input adapt VK from the trusted-setup
+   * ceremony. The two halves must ship together; mismatch produces
+   * verifier rejection at runtime.
+   */
+  phase9DualNote?: boolean;
 }
 
 export interface PrivateSwapResult {
@@ -847,6 +859,10 @@ export class B402Solana {
 
     // Resolve effective inline-CPI mode (per-call > class > default false).
     const inlineNullifierCpi = req.inlineCpiNullifier ?? this.inlineCpiNullifier;
+    // Phase 9 wire shape — opt-in. Default false matches deployed mainnet
+    // (23-input adapt VK). True requires the matching pool + verifier_adapt
+    // built with `--features phase_9_dual_note` (see PRD-31 §6 for deploy plan).
+    const phase9DualNote = req.phase9DualNote === true;
 
     // 9. Fetch validity proof first — it's needed by both the sibling ix
     //    (legacy mainnet path) and the inline-CPI payload (Phase 7 path).
@@ -888,10 +904,16 @@ export class B402Solana {
       // -32 bytes per adapt_execute, offsetting the +32B from out_spending_pub
       // so net wire stays at the Phase 7B size.
       u64Le(expectedOut),
-      // Phase 9 dual-note out_spending_pub byte goes here when the
-      // matching pool/verifier feature lands post-ceremony. Pool's default
-      // build (Phase 7B) does not consume this byte — adding it now would
-      // make the wire deserialize 32 bytes off.
+      // Phase 9 dual-note out_spending_pub byte. Conditionally appended:
+      // pool's default build (Phase 7B) does NOT consume it — including
+      // it shifts the borsh deserializer 32 bytes off the action_payload
+      // and produces an opaque "InvalidConfig" rejection. Phase 9 build
+      // (--features phase_9_dual_note) DOES consume it. The byte is read
+      // from the proof's public input slot 23 (the prover already lifts
+      // outSpendingPubA there). If the prover artifact is the older
+      // 23-input zkey, slot 23 is undefined — caller must pair phase9
+      // wire-shape with phase9 prover artifacts.
+      ...(phase9DualNote ? [proof.publicInputsLeBytes[23]] : []),
       u32Le(0), // encrypted_notes vec len = 0 (omit on-chain to save bytes)
       new Uint8Array([0b10]), // in_dummy_mask (slot 0 real, slot 1 dummy)
       new Uint8Array([0b10]), // out_dummy_mask
@@ -1073,14 +1095,47 @@ export class B402Solana {
     // directly so the next balance/holdings reflects it without RPC.
     this._notes!.insertNote(outNote);
 
-    // Phase 9 dual-note local-mirror block lives here when the on-chain
-    // feature ships. The deterministic-derivation helpers
-    // (`deriveExcessRandom`, `computeExcessCommitment`) are exported from
-    // ./excess.js so the integration is mechanical — read commitment_a +
-    // TAG_EXCESS, derive random_b + commitment_b, insertNote at leafCount+1.
-    // Until then, excess delta stays in the shared vault (Phase 7B
-    // behaviour, what's currently deployed on mainnet).
-    const excessNote: SpendableNote | undefined = undefined;
+    // Phase 9 dual-note local mirror. When the pool's `excess > 0` block
+    // fires, it appends a SECOND leaf at `tree.leafCount + 1` whose
+    // commitment is deterministically derived from values the SDK already
+    // knows. We rebuild the same SpendableNote here so the next
+    // balance/holdings call sees the excess without an indexer round-trip.
+    //
+    // Determinism contract (must stay byte-equal to
+    // programs/b402-pool/src/instructions/adapt_execute.rs):
+    //   random_b      = Poseidon(TAG_EXCESS, commitment_a) LE
+    //   commitment_b  = Poseidon(TAG_COMMIT, outMintFr, excess, random_b, spendingPub) LE
+    // Verified bit-equal by tests/v2/integration/dual_note_vector.test.ts.
+    let excessNote: SpendableNote | undefined;
+    if (phase9DualNote) {
+      const excess = outAmount - expectedOut;
+      if (excess > 0n) {
+        const randomB = await deriveExcessRandom(outCommitment);
+        const commitmentB = await computeExcessCommitment(
+          outMintFr,
+          excess,
+          randomB,
+          this._wallet!.spendingPub,
+        );
+        excessNote = {
+          tokenMint: outMintFr,
+          value: excess,
+          random: randomB,
+          spendingPub: this._wallet!.spendingPub,
+          spendingPriv: this._wallet!.spendingPriv,
+          commitment: commitmentB,
+          // Pool appends commitment_a at leafCount, commitment_b at +1.
+          leafIndex: tree.leafCount + 1n,
+          // No on-chain ciphertext for the excess leaf — pool emits zero
+          // padding. SDK reconstructs the plaintext locally; the keys we
+          // need to spend it are already on this device.
+          encryptedBytes: new Uint8Array(0),
+          ephemeralPub: new Uint8Array(0),
+          viewingTag: new Uint8Array(0),
+        };
+        this._notes!.insertNote(excessNote);
+      }
+    }
 
     this.learnMint(req.inMint);
     this.learnMint(req.outMint);
