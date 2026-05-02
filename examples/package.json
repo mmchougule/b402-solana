@@ -15,7 +15,7 @@
     "swap-e2e": "pnpm build-deps && tsx swap-e2e.ts",
     "swap-e2e-jupiter": "pnpm build-deps && tsx swap-e2e-jupiter.ts",
     "scanner-e2e": "pnpm build-deps && tsx scanner-e2e.ts",
-    "falcon-intent-roundtrip": "pnpm build-deps-relayer && tsx falcon-intent-roundtrip.ts",
+    "agent-delegated-private-swap": "pnpm build-deps-relayer && tsx agent-delegated-private-swap.ts",
     "alt": "pnpm build-deps && tsx ../ops/alt/create-alt.ts"
   },
   "dependencies": {
