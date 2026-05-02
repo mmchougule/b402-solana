@@ -1,6 +1,6 @@
 {
   "name": "@b402ai/solana-mcp",
-  "version": "0.0.18",
+  "version": "0.0.19",
   "description": "Model Context Protocol server exposing the b402 Solana SDK as agent-callable tools (Claude Code, Cursor, any MCP runtime)",
   "license": "Apache-2.0",
   "type": "module",

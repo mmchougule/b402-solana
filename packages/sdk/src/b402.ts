@@ -921,10 +921,16 @@ export class B402Solana {
 
     // Resolve effective inline-CPI mode (per-call > class > default false).
     const inlineNullifierCpi = req.inlineCpiNullifier ?? this.inlineCpiNullifier;
-    // Phase 9 wire shape — opt-in. Default false matches deployed mainnet
-    // (23-input adapt VK). True requires the matching pool + verifier_adapt
-    // built with `--features phase_9_dual_note` (see PRD-31 §6 for deploy plan).
-    const phase9DualNote = req.phase9DualNote === true;
+    // Phase 9 wire shape — cluster-aware default.
+    //   mainnet: TRUE (Phase 9 deployed 2026-05-02 at slot 417190656;
+    //                  pool's borsh deserializer rejects 23-input wire)
+    //   devnet:  TRUE (Phase 9 deployed 2026-05-02; same shape)
+    //   localnet: FALSE (caller controls the validator's binary; opt in)
+    // Per-call override always wins. Set explicit false ONLY when running
+    // against a self-built pool that doesn't have phase_9_dual_note feature.
+    const phase9DualNote = req.phase9DualNote ?? (
+      this.cluster === 'mainnet' || this.cluster === 'devnet'
+    );
 
     // 9. Fetch validity proof first — it's needed by both the sibling ix
     //    (legacy mainnet path) and the inline-CPI payload (Phase 7 path).
