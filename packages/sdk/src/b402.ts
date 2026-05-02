@@ -62,6 +62,7 @@ import {
 } from './programs/pda.js';
 import { instructionDiscriminator, concat, u16Le, u32Le, u64Le, vecU8 } from './programs/anchor.js';
 import { buildZeroCache, proveMostRecentLeaf, type MerkleProof } from './merkle.js';
+import { B402Indexer } from './indexer.js';
 import { commitmentHash, feeBindHash, nullifierHash, poseidonTagged } from './poseidon.js';
 import { computeExcessCommitment, deriveExcessRandom } from './excess.js';
 import { encryptNote } from './note-encryption.js';
@@ -318,7 +319,7 @@ export class B402Solana {
   /** Indexer client. Lazily created from `config.indexerUrl` if present.
    *  Null when no indexerUrl was passed → SDK falls back to
    *  proveMostRecentLeaf (rightmost-only). */
-  readonly indexer: import('./indexer.js').B402Indexer | null;
+  readonly indexer: B402Indexer | null;
   private _relayerHttp: { client: import('./relayer-http.js').RelayerHttpClient } | null = null;
 
   private _wallet: Wallet | null = null;
@@ -349,19 +350,16 @@ export class B402Solana {
     // spend-any-leaf; on indexer error it logs and falls back to the
     // rightmost-only proveMostRecentLeaf so a transient outage doesn't
     // brick all spend flows.
-    if (config.indexerUrl) {
-      // Lazy require to avoid pulling indexer.ts into bundles that don't
-      // need it. Imported synchronously here because it has no async init.
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const { B402Indexer } = require('./indexer.js') as typeof import('./indexer.js');
-      this.indexer = new B402Indexer({
-        url: config.indexerUrl,
-        connection: this.connection,
-        poolProgramId: new PublicKey(this.programIds.b402Pool),
-      });
-    } else {
-      this.indexer = null;
-    }
+    // NOTE: must be a STATIC import (top of file). The package is
+    // `"type": "module"` so `require` is undefined at runtime — using it
+    // here was the 0.0.13 bug that broke MCP startup on every tool call.
+    this.indexer = config.indexerUrl
+      ? new B402Indexer({
+          url: config.indexerUrl,
+          connection: this.connection,
+          poolProgramId: new PublicKey(this.programIds.b402Pool),
+        })
+      : null;
 
     if (config.prover) {
       this._prover = config.prover;

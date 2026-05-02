@@ -1,6 +1,6 @@
 {
   "name": "@b402ai/solana",
-  "version": "0.0.13",
+  "version": "0.0.14",
   "description": "Private DeFi on Solana — shielded pool + composable adapters + agent-callable surface",
   "license": "Apache-2.0",
   "type": "module",
