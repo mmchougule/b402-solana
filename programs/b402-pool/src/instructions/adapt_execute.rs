@@ -610,13 +610,18 @@ pub fn handler<'info>(
             let out_mint_fr = util::reduce_le_mod_p(&out_mint.to_bytes());
             let commitment_a = pi.commitment_out[0];
 
-            // random_b = Poseidon(commitment_a, TAG_EXCESS) LE.
-            // Deterministic + collision-resistant + opaque on-chain. SDK
-            // mirrors this in packages/sdk/src/excess.ts::deriveExcessRandom.
+            // random_b = Poseidon(TAG_EXCESS, commitment_a) LE.
+            // Tag-first ordering matches `poseidonTagged` convention used by
+            // every other domain-tagged Poseidon call (commitment, nullifier,
+            // recipient_bind, ...). SDK mirrors this in
+            // packages/sdk/src/excess.ts::deriveExcessRandom which calls
+            // poseidonTagged('excess', commitmentA) = Poseidon(TAG, commitmentA).
+            // Reversing this order produces different bytes (Poseidon is a
+            // sponge construction; permuting inputs changes the digest).
             let random_b = hashv(
                 Parameters::Bn254X5,
                 Endianness::LittleEndian,
-                &[&commitment_a[..], &TAG_EXCESS[..]],
+                &[&TAG_EXCESS[..], &commitment_a[..]],
             )
             .map_err(|_| error!(PoolError::ProofVerificationFailed))?
             .to_bytes();
@@ -796,10 +801,12 @@ mod excess_parity_tests {
         (commitment_a, out_mint_fr, spending_pub, excess)
     }
     fn compute_random_b(commitment_a: &[u8; 32]) -> [u8; 32] {
+        // Tag-first — must match the production handler at line ~616 and the
+        // SDK's deriveExcessRandom (poseidonTagged('excess', commitmentA)).
         hashv(
             Parameters::Bn254X5,
             Endianness::LittleEndian,
-            &[&commitment_a[..], &TAG_EXCESS[..]],
+            &[&TAG_EXCESS[..], &commitment_a[..]],
         )
         .unwrap()
         .to_bytes()
@@ -825,10 +832,13 @@ mod excess_parity_tests {
         .unwrap()
         .to_bytes()
     }
-    /// Pinned LE-hex commitment_b for the frozen fixture. Empty until first
-    /// run; matches the TS fixture's placeholder. Update both at the same
-    /// time, never one without the other.
-    const EXPECTED_COMMITMENT_B_HEX: &str = "";
+    /// Pinned LE-hex commitment_b for the frozen fixture, generated against
+    /// the tag-first Poseidon ordering. Verified bit-equal between SDK
+    /// (circomlibjs) and on-chain hashv (light-poseidon). Update both this
+    /// file AND `tests/v2/integration/dual_note_vector.test.ts` at the
+    /// same time, never one without the other.
+    const EXPECTED_COMMITMENT_B_HEX: &str =
+        "e7c90af0bf88c9e1ceb3ed40a4f9151982b38b4b61d34b6bcec5a55aab472315";
     #[test]
     fn commitment_b_is_deterministic() {
         let (commitment_a, out_mint_fr, spending_pub, excess) = fixture();
