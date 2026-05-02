@@ -13,6 +13,17 @@ export { ClientMerkleTree, buildZeroCache, proveMostRecentLeaf, type MerkleProof
 export * as poseidon from './poseidon.js';
 export * as noteEnc from './note-encryption.js';
 export { deriveExcessRandom, computeExcessCommitment } from './excess.js';
+export {
+  computeFalconIntentHash,
+  createFalconIntentEnvelope,
+  encodeFalconIntentMessage,
+  type FalconIntentEnvelope,
+  type FalconIntentAccountMetaInput,
+  type FalconIntentClusterId,
+  type FalconIntentLabel,
+  type FalconIntentRequest,
+  type FalconIntentSigner,
+} from './falcon-intent.js';
 export type { EncryptedNote } from './note-encryption.js';
 export { NoteStore } from './note-store.js';
 

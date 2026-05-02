@@ -17,6 +17,7 @@ import Fastify from 'fastify';
 import { Connection } from '@solana/web3.js';
 import { loadConfig } from './config.js';
 import { Authenticator } from './auth.js';
+import { MemoryFalconReplayStore, RustFalconVerifier } from './falcon-intent.js';
 import { RpcSubmitter } from './submit.js';
 import { registerHealth } from './routes/health.js';
 import { registerShield } from './routes/shield.js';
@@ -53,6 +54,8 @@ export async function buildServer() {
     maxTxSize: cfg.maxTxSize,
     jitoBundleUrl: cfg.jitoBundleUrl,
   });
+  const falconVerifier = new RustFalconVerifier();
+  const falconReplayStore = new MemoryFalconReplayStore();
 
   const startedAt = Date.now();
   registerHealth(fastify, {
@@ -61,10 +64,18 @@ export async function buildServer() {
     poolProgramId: cfg.poolProgramId.toBase58(),
     startedAt,
   });
-  registerShield(fastify, { cfg, auth, submitter });
-  registerUnshield(fastify, { cfg, auth, submitter });
-  registerTransact(fastify, { cfg, auth, submitter });
-  registerAdapt(fastify, { cfg, auth, submitter });
+  const relayDeps = {
+    cfg,
+    auth,
+    submitter,
+    currentSlot: async () => BigInt(await connection.getSlot('confirmed')),
+    falconVerifier,
+    falconReplayStore,
+  };
+  registerShield(fastify, relayDeps);
+  registerUnshield(fastify, relayDeps);
+  registerTransact(fastify, relayDeps);
+  registerAdapt(fastify, relayDeps);
 
   fastify.log.info(
     {
