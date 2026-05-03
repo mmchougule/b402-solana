@@ -288,6 +288,15 @@ describe('PRD-33 Phase 33.3 — per-user Kamino obligation isolation (mainnet-fo
         [Buffer.from('b402/v1'), Buffer.from('adapter')],
         KAMINO_ADAPTER_ID,
       );
+      // Per PRD-33 §5.4 — rent buffer PDA holds first-deposit setup
+      // fees collected as USDC. The adapter SPL-transfers SETUP_FEE_USDC
+      // (8 USDC) into rentBufferTa on each user's first deposit. A
+      // separate crank ix later swaps the buffer to SOL and routes to
+      // adapterAuthority.
+      const [rentBufferPda] = PublicKey.findProgramAddressSync(
+        [Buffer.from('b402/v1'), Buffer.from('rent-buffer')],
+        KAMINO_ADAPTER_ID,
+      );
 
       await registerKaminoAdapter(conn, admin);
       await addTokenConfigIfNeeded(conn, admin, inMint);
@@ -295,6 +304,8 @@ describe('PRD-33 Phase 33.3 — per-user Kamino obligation isolation (mainnet-fo
 
       const adapterInTa = await getOrCreateAssociatedTokenAccount(conn, admin, inMint, adapterAuthority, true);
       const adapterOutTa = await getOrCreateAssociatedTokenAccount(conn, admin, outMint, adapterAuthority, true);
+      const rentBufferTa = await getOrCreateAssociatedTokenAccount(conn, admin, inMint, rentBufferPda, true);
+      dbg(`rent-buffer ATA: ${rentBufferTa.address.toBase58().slice(0, 12)}…`);
 
       // Adapter authority needs SOL for init rent for THREE per-user
       // UserMetadata + Obligation accounts. Each pair costs ~0.03 SOL of
@@ -366,7 +377,11 @@ describe('PRD-33 Phase 33.3 — per-user Kamino obligation isolation (mainnet-fo
       const bobUsdcAta = await getOrCreateAssociatedTokenAccount(conn, admin, inMint, bobSigner.publicKey);
       const carolUsdcAta = await getOrCreateAssociatedTokenAccount(conn, admin, inMint, carolSigner.publicKey);
 
-      const PER_USER_USDC = 5_000_000n; // 5 USDC each
+      // Each user shields 10 USDC after PRD-33 §5.4 — fee is 8 USDC,
+      // floor leaves 2 USDC for the actual Kamino deposit. Bob and Carol
+      // need 10 USDC each transferred from alice; alice keeps 10 for
+      // her own deposit (so alice's injected balance must be ≥ 30).
+      const PER_USER_USDC = 10_000_000n; // 10 USDC each
       // Top up bob + carol with SOL for tx fees first.
       await sendAndConfirmTransaction(
         conn,
@@ -452,7 +467,12 @@ describe('PRD-33 Phase 33.3 — per-user Kamino obligation isolation (mainnet-fo
       const outVaultPda = vaultPda(POOL_ID, outMint);
       const circuits = path.resolve(__dirname, '../../../circuits/build');
 
-      const SHIELD_AMT = 1_000_000n; // 1 USDC each
+      // Per PRD-33 §5.4 — first deposit must clear SETUP_FEE_USDC (8 USDC)
+      // + MIN_FIRST_DEPOSIT_AFTER_FEE_USDC (1 USDC). 10 USDC leaves a clean
+      // 2 USDC after the fee for the kamino deposit.
+      const SHIELD_AMT = 10_000_000n; // 10 USDC each
+      const SETUP_FEE_USDC = 8_000_000n; // mirror const from kamino-adapter
+      const KAMINO_DEPOSIT_AMT = SHIELD_AMT - SETUP_FEE_USDC; // 2 USDC actual deposit
 
       for (const u of users) {
         dbg(`---- ${u.name} starting ----`);
@@ -528,6 +548,9 @@ describe('PRD-33 Phase 33.3 — per-user Kamino obligation isolation (mainnet-fo
           // PRD-33 §3.3 — owner PDA (slot 19, only present in the
           // per_user_obligation adapter build).
           { pubkey: u.ownerPda, isSigner: false, isWritable: false },
+          // PRD-33 §5.4 — rent-buffer ATA (slot 20). Per_user_obligation
+          // adapter SPL-transfers SETUP_FEE_USDC here on first deposit.
+          { pubkey: rentBufferTa.address, isSigner: false, isWritable: true },
         ];
 
         // Build action_payload: KaminoAction::Deposit. Pool prepends the
@@ -605,6 +628,20 @@ describe('PRD-33 Phase 33.3 — per-user Kamino obligation isolation (mainnet-fo
       }));
       expect(new Set(onChainObligationOwners).size).toBe(3);
 
+      // ASSERTION 6 (PRD-33 §5.4 — rent charging): rent_buffer_ta
+      // accumulated EXACTLY 3 × SETUP_FEE_USDC (one fee per first-time
+      // user). The adapter's first-deposit branch SPL-transfers the fee
+      // from adapter_in_ta to this ATA on each user's first deposit.
+      // Subsequent deposits (not exercised here — would need a second
+      // round per user) skip the fee path.
+      const rentBufferAcct = await conn.getAccountInfo(rentBufferTa.address);
+      expect(rentBufferAcct, 'rent_buffer_ta must exist').not.toBeNull();
+      // SPL token account layout: amount is u64 LE at offset 64.
+      const rentBufferBalance = BigInt(rentBufferAcct!.data.readBigUInt64LE(64));
+      const expectedFees = 3n * SETUP_FEE_USDC;
+      expect(rentBufferBalance, 'rent_buffer collected exactly 3 × SETUP_FEE_USDC').toBe(expectedFees);
+      dbg(`rent_buffer accumulated ${rentBufferBalance} USDC (= ${expectedFees} = 3 × ${SETUP_FEE_USDC})`);
+
       // Report.
       console.log('\n=== PRD-33 §33.3 fork report ===');
       for (const u of users) {
@@ -612,6 +649,7 @@ describe('PRD-33 Phase 33.3 — per-user Kamino obligation isolation (mainnet-fo
       }
       const totalDelta = users.reduce((acc, u) => acc + (u.kUsdcDelta ?? 0n), 0n);
       console.log(`total kUSDC minted via per-user obligations: ${totalDelta}`);
+      console.log(`rent buffer balance after 3 first-deposits: ${rentBufferBalance} USDC`);
     },
     900_000,
   );
