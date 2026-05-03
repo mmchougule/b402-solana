@@ -36,7 +36,14 @@ import {
   createAssociatedTokenAccountInstruction,
 } from '@solana/spl-token';
 import { keccak_256 } from '@noble/hashes/sha3';
-import { randomBytes as nodeRandomBytes } from 'node:crypto';
+// Browser-safe randomBytes. crypto.getRandomValues is in WebCrypto (browser
+// AND Node 18+ via globalThis.crypto), so we don't need node:crypto here.
+function nodeRandomBytes(n: number): Uint8Array {
+  const out = new Uint8Array(n);
+  // globalThis.crypto exists in browsers, workers, and Node 18+.
+  (globalThis.crypto as Crypto).getRandomValues(out);
+  return out;
+}
 import { FR_MODULUS, PROGRAM_IDS, B402_ALT_DEVNET, B402_ALT_MAINNET, leToFrReduced } from '@b402ai/solana-shared';
 import type { SpendableNote } from '@b402ai/solana-shared';
 import {

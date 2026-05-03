@@ -10,9 +10,36 @@
  *   model as the Solana keypair file the wallet was derived from.
  */
 
-import fs from 'node:fs';
-import path from 'node:path';
 import type { Connection, Logs, PublicKey } from '@solana/web3.js';
+
+// Lazy node-only deps. Persistence is a Node feature (atomic JSON file
+// per viewing-pub). Browsers can use NoteStore without persistence; we
+// must NOT pull fs / path with a static import or webpack treats
+// `node:fs` as an unresolvable scheme.
+//
+// The pattern: top-level await + dynamic import with /* webpackIgnore */.
+// In Node ESM (and vitest), `import('node:module').createRequire(...)` is
+// the idiomatic way to reach the CJS-style `require`. In browser, the
+// import itself throws (no `node:` scheme handler) and the catch leaves
+// `nodeFs` / `nodePath` null — the persist methods then no-op.
+type NodeFs = typeof import('node:fs');
+type NodePath = typeof import('node:path');
+let nodeFs: NodeFs | null = null;
+let nodePath: NodePath | null = null;
+try {
+  const m = await import(/* webpackIgnore: true */ 'node:module');
+  const req = (m as { createRequire: (u: string) => (s: string) => unknown }).createRequire(import.meta.url);
+  nodeFs = req('node:fs') as NodeFs;
+  nodePath = req('node:path') as NodePath;
+} catch {
+  // Browser: persist becomes a no-op. NoteStore in-memory mode works.
+}
+
+/** Browser-safe path.join for the persist filename. Avoids needing
+ *  node:path in the constructor (which always runs on both targets). */
+function joinPath(dir: string, file: string): string {
+  return dir.endsWith('/') || dir.endsWith('\\') ? dir + file : `${dir}/${file}`;
+}
 import type { Wallet } from './wallet.js';
 import { tryDecryptNote, type EncryptedNote } from './note-encryption.js';
 import { commitmentHash, nullifierHash } from './poseidon.js';
@@ -71,7 +98,7 @@ export class NoteStore {
     this.opts = opts;
     if (opts.persist) {
       const viewingHex = bytesToHex(opts.wallet.viewingPub);
-      this._persistPath = path.join(opts.persist.dir, `${viewingHex}.json`);
+      this._persistPath = joinPath(opts.persist.dir, `${viewingHex}.json`);
     }
   }
 
@@ -350,8 +377,9 @@ export class NoteStore {
    *  because of disk-full. The next mutation retries. */
   private _persist(): void {
     if (!this._persistPath) return;
+    if (!nodeFs || !nodePath) return;  // browser: persist is a no-op
     try {
-      fs.mkdirSync(path.dirname(this._persistPath), { recursive: true });
+      nodeFs.mkdirSync(nodePath.dirname(this._persistPath), { recursive: true });
       const snapshot: PersistedSnapshotV2 = {
         v: 2,
         notes: Array.from(this.notesByCommitment.values()).map((n) => ({
@@ -370,8 +398,8 @@ export class NoteStore {
         backfillCursor: this._backfillCursor,
       };
       const tmp = `${this._persistPath}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify(snapshot), { mode: 0o600 });
-      fs.renameSync(tmp, this._persistPath);
+      nodeFs.writeFileSync(tmp, JSON.stringify(snapshot), { mode: 0o600 });
+      nodeFs.renameSync(tmp, this._persistPath);
     } catch (e) {
       // eslint-disable-next-line no-console
       console.warn(`note-store: persist failed (${this._persistPath}):`, e instanceof Error ? e.message : String(e));
@@ -382,9 +410,10 @@ export class NoteStore {
    *  Tolerant: missing file = first run, malformed file = warn + ignore. */
   private _hydrate(): void {
     if (!this._persistPath) return;
-    if (!fs.existsSync(this._persistPath)) return;
+    if (!nodeFs) return;  // browser: nothing to hydrate
+    if (!nodeFs.existsSync(this._persistPath)) return;
     try {
-      const raw = fs.readFileSync(this._persistPath, 'utf8');
+      const raw = nodeFs.readFileSync(this._persistPath, 'utf8');
       const snap = JSON.parse(raw) as PersistedSnapshot;
       if (snap.v !== 1 && snap.v !== 2) {
         console.warn(`note-store: hydrate skipped — unknown schema v=${(snap as { v: unknown }).v}`);

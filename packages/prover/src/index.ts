@@ -9,7 +9,17 @@
 
 // @ts-expect-error — snarkjs lacks types
 import * as snarkjs from 'snarkjs';
-import fs from 'node:fs';
+
+// Browser-compat: node:fs only for string-path artifact existence checks.
+// Browser passes buffers, fs stays null. See packages/sdk/src/note-store.ts
+// for the pattern.
+type NodeFs = typeof import('node:fs');
+let nodeFs: NodeFs | null = null;
+try {
+  const m = await import(/* webpackIgnore: true */ 'node:module');
+  const req = (m as { createRequire: (u: string) => (s: string) => unknown }).createRequire(import.meta.url);
+  nodeFs = req('node:fs') as NodeFs;
+} catch { /* browser */ }
 
 import {
   g1JacFromSnarkjs,
@@ -88,7 +98,7 @@ export class TransactProver {
     // See AdaptProver — same logic. Buffer-based artifacts (browser) skip
     // the fs check since they're already loaded.
     for (const p of [artifacts.wasmPath, artifacts.zkeyPath]) {
-      if (typeof p === 'string' && !fs.existsSync(p)) {
+      if (typeof p === 'string' && nodeFs && !nodeFs.existsSync(p)) {
         throw new Error(`prover artifact missing: ${p}`);
       }
     }
@@ -140,7 +150,7 @@ export class TransactProver {
     if (!this.artifacts.vkeyPath) throw new Error('vkeyPath not provided');
     const vKey = JSON.parse(
       typeof this.artifacts.vkeyPath === 'string'
-        ? fs.readFileSync(this.artifacts.vkeyPath, 'utf-8')
+        ? (nodeFs ? nodeFs.readFileSync(this.artifacts.vkeyPath, 'utf-8') : (() => { throw new Error('verifyLocal needs node:fs to read vkey path; pass a buffer in browser'); })())
         : new TextDecoder().decode(this.artifacts.vkeyPath),
     );
     // Reconstruct snarkjs-style proof from our bytes by re-using the

@@ -9,7 +9,19 @@
 
 // @ts-expect-error — snarkjs lacks types
 import * as snarkjs from 'snarkjs';
-import fs from 'node:fs';
+
+// Browser-compat: node:fs is only used for the fs.existsSync pre-check on
+// string-path artifacts. Browsers always pass buffer artifacts, so the
+// fs handle stays null and the existsSync branch is skipped. Pattern
+// mirrors note-store.ts — top-level await + webpackIgnore so bundlers
+// don't try to resolve the node: scheme.
+type NodeFs = typeof import('node:fs');
+let nodeFs: NodeFs | null = null;
+try {
+  const m = await import(/* webpackIgnore: true */ 'node:module');
+  const req = (m as { createRequire: (u: string) => (s: string) => unknown }).createRequire(import.meta.url);
+  nodeFs = req('node:fs') as NodeFs;
+} catch { /* browser */ }
 
 import {
   g1JacFromSnarkjs, g2JacFromSnarkjs,
@@ -106,7 +118,7 @@ export class AdaptProver {
     // Buffer-based artifacts (browser fetch) skip the check — they're
     // already loaded by the caller.
     for (const p of [artifacts.wasmPath, artifacts.zkeyPath]) {
-      if (typeof p === 'string' && !fs.existsSync(p)) {
+      if (typeof p === 'string' && nodeFs && !nodeFs.existsSync(p)) {
         throw new Error(`adapt prover artifact missing: ${p}`);
       }
     }
