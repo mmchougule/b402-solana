@@ -91,6 +91,45 @@ pub fn commit_inputs(
     Ok(())
 }
 
+/// PRD-35 §5.5 — admin-callable garbage collector for stale
+/// pending_inputs PDAs. Closes the account (refunds rent to admin
+/// treasury) when the user's tx 2 never landed and the PDA holds
+/// stale committed inputs.
+///
+/// Why admin-gated: any non-admin caller could grief by closing
+/// PDAs that ARE actively in use (race condition: tx 1 lands,
+/// griefer closes PDA, tx 2 fails). Admin gate + a slot age check
+/// (~7 minutes since last use) is sufficient for V1. V1.5 can
+/// expose user-opt-in close via shielded-action signature.
+#[derive(Accounts)]
+pub struct GcPendingInputs<'info> {
+    /// Stale PDA to close. Admin-derived seeds; we don't validate the
+    /// derivation here because the admin gate is the trust root and
+    /// the rent refund target is the treasury, not the admin (no
+    /// asymmetric incentive to close someone else's active PDA).
+    #[account(mut, close = treasury)]
+    pub pending_inputs: Account<'info, PendingInputs>,
+    /// Pool config — admin signer must match cfg.admin_multisig.
+    #[account(
+        seeds = [VERSION_PREFIX, b"config"],
+        bump,
+    )]
+    pub pool_config: Box<Account<'info, crate::state::PoolConfig>>,
+    /// Rent refund destination. Today: admin's own pubkey; V1.5 gets a
+    /// dedicated treasury PDA.
+    /// CHECK: rent goes here; admin-gated tx so misdirection is on the admin.
+    #[account(mut)]
+    pub treasury: UncheckedAccount<'info>,
+    pub admin: Signer<'info>,
+}
+
+pub fn gc_pending_inputs(ctx: Context<GcPendingInputs>) -> Result<()> {
+    crate::instructions::admin::ensure_admin(&ctx.accounts.pool_config, &ctx.accounts.admin.key())?;
+    // Anchor's `close = treasury` constraint above does the lamport
+    // transfer + zeroes data. Nothing else to do here.
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -134,6 +134,13 @@ pub mod b402_pool {
     ) -> Result<()> {
         instructions::commit_inputs::commit_inputs(ctx, spending_pub_le, public_inputs)
     }
+
+    /// PRD-35 §5.5 — admin-callable garbage collector for stale
+    /// pending_inputs PDAs. Refunds rent to the treasury when the user's
+    /// tx 2 never landed.
+    pub fn gc_pending_inputs(ctx: Context<GcPendingInputs>) -> Result<()> {
+        instructions::commit_inputs::gc_pending_inputs(ctx)
+    }
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
