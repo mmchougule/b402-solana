@@ -23,8 +23,12 @@ pub mod adapt_mock;
 // composability plumbing minus ZK. Feature `adapt-devnet` gates dispatch.
 // Slotted for removal once the real adapt circuit + verifier land.
 pub mod adapt_execute;
+// PRD-35 §5.1 — pending-inputs PDA + commit_inputs ix. Lifts the v0-tx
+// 1232 B ceiling by moving Groth16 public inputs out of inline ix data.
+pub mod commit_inputs;
 
 pub use adapt_execute::*;
+pub use commit_inputs::*;
 pub use adapt_mock::*;
 pub use add_token_config::*;
 pub use admin::*;
