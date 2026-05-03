@@ -1,6 +1,6 @@
 {
   "name": "@b402ai/solana-mcp",
-  "version": "0.0.20",
+  "version": "0.0.21",
   "description": "Model Context Protocol server exposing the b402 Solana SDK as agent-callable tools (Claude Code, Cursor, any MCP runtime)",
   "license": "Apache-2.0",
   "type": "module",
@@ -49,7 +49,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "copy-circuits": "bash scripts/copy-circuits.sh",
-    "prepublishOnly": "pnpm run copy-circuits && pnpm run build"
+    "prepublishOnly": "pnpm run copy-circuits && pnpm run build",
+    "prepack": "pnpm run copy-circuits && pnpm run build"
   },
   "dependencies": {
     "@b402ai/solana": "workspace:*",

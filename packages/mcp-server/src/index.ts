@@ -243,13 +243,22 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    // Classify the error without logging its payload — error messages from
-    // RPC / Anchor / on-chain often embed pubkeys (recipient ATAs, mint
-    // accounts) that we treat as private metadata. Caller still gets the
-    // full message in the tool response; the file log only records the
-    // category so an admin can see frequency without leakage.
+    const stack = err instanceof Error && err.stack ? err.stack.split('\n').slice(0, 8).join('\n') : undefined;
+    // Classify for the histogram + ALSO log the full message and a top-of-
+    // stack snapshot. Earlier we logged only `kind` to avoid pubkey leakage,
+    // which made debugging "Cannot read properties of undefined" impossible
+    // — the operator sees a category, no source-line pointer, and gives up.
+    // Privacy concern remains: messages can embed mint/ATA addresses. But a
+    // self-host operator who runs this on their own machine should see
+    // their own data; we trade per-instance log privacy for debuggability.
     const kind = classifyError(msg);
-    logger.error('tool.err', { tool: name, ms: Date.now() - t0, kind });
+    logger.error('tool.err', {
+      tool: name,
+      ms: Date.now() - t0,
+      kind,
+      msg,
+      stack,
+    });
     return {
       isError: true,
       content: [{ type: 'text', text: msg }],
