@@ -1,6 +1,6 @@
 {
   "name": "@b402ai/solana-shared",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Shared protocol constants, types, and encoding helpers for the b402 Solana SDK",
   "license": "Apache-2.0",
   "type": "module",

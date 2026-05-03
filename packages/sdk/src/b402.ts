@@ -1427,6 +1427,12 @@ export class B402Solana {
     url.searchParams.set('outputMint', opts.outMint.toBase58());
     url.searchParams.set('amount', opts.amount.toString());
     url.searchParams.set('slippageBps', String(slippageBps));
+    // Match the route restrictions used by privateSwap's internal Jupiter
+    // call — otherwise an agent gets a best-route quote then a Phoenix-direct
+    // execution and sees a phantom "16% slippage" gap. Drop these once the
+    // multi-DEX ALT extender ships (Phase 8).
+    url.searchParams.set('onlyDirectRoutes', 'true');
+    url.searchParams.set('dexes', 'Phoenix');
 
     const resp = await fetch(url, { headers: { accept: 'application/json' } });
     if (!resp.ok) {

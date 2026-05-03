@@ -229,10 +229,23 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     // the right pane). The result shape varies per tool; we just sniff for
     // known fields and only emit the ones present.
     const r = result && typeof result === 'object' ? (result as Record<string, unknown>) : {};
-    const extras: Record<string, string> = {};
+    const extras: Record<string, string | number> = {};
     if (typeof r.signature === 'string') extras.sig = r.signature;
     if (typeof r.commitment === 'string') extras.commitment = r.commitment;
     if (typeof r.leafIndex === 'string') extras.leafIndex = r.leafIndex;
+    // private_swap-specific telemetry: quote vs settlement, dual-note split,
+    // slippage envelope. Without these the operator can't tell whether a
+    // weird outAmount came from quote/route mismatch, slippage burn, or a
+    // genuine on-chain divergence — every diagnosis requires reconstructing
+    // from the explorer.
+    if (typeof r.outAmount === 'string') extras.outAmount = r.outAmount;
+    if (typeof r.quoteOutAmount === 'string') extras.quoteOutAmount = r.quoteOutAmount;
+    if (typeof r.expectedOut === 'string') extras.expectedOut = r.expectedOut;
+    if (typeof r.slippageBps === 'number') extras.slippageBps = r.slippageBps;
+    if (typeof r.routeHops === 'number') extras.routeHops = r.routeHops;
+    if (typeof r.outDepositId === 'string') extras.outDepositId = r.outDepositId;
+    if (typeof r.excessOutAmount === 'string') extras.excessOutAmount = r.excessOutAmount;
+    if (typeof r.excessDepositId === 'string') extras.excessDepositId = r.excessDepositId;
     logger.info('tool.ok', {
       tool: name,
       ms: Date.now() - t0,

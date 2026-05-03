@@ -22,6 +22,12 @@ export async function handlePrivateSwap(
   signature: string;
   outAmount: string;
   outDepositId: string;
+  excessOutAmount?: string;
+  excessDepositId?: string;
+  expectedOut?: string;
+  slippageBps?: number;
+  routeHops?: number;
+  quoteOutAmount?: string;
   cluster: string;
 }> {
   const cluster = ctx.cluster;
@@ -68,6 +74,9 @@ export async function handlePrivateSwap(
   let actionPayload: Uint8Array | undefined;
   let remainingAccounts: Array<{ pubkey: PublicKey; isSigner: boolean; isWritable: boolean }> | undefined;
   let extraAlts: PublicKey[] = [];
+  let routeSlippageBps: number | undefined;
+  let routeHops: number | undefined;
+  let quoteOutAmount: bigint | undefined;
 
   if (cluster === 'mainnet' && adapterProgramId.equals(new PublicKey(PROGRAM_IDS.b402JupiterAdapter))) {
     // Default 30 bps. Pool currently mints output note at the slippage floor
@@ -96,6 +105,9 @@ export async function handlePrivateSwap(
     extraAlts = (route.swap.addressLookupTableAddresses ?? []).map((s: string) => new PublicKey(s));
     // Bind expected_out_value to slippage floor — pool enforces actual >= expected.
     expectedOut = BigInt(route.quote.otherAmountThreshold ?? route.quote.outAmount);
+    routeSlippageBps = slippageBps;
+    routeHops = Array.isArray(route.quote.routePlan) ? route.quote.routePlan.length : undefined;
+    quoteOutAmount = BigInt(route.quote.outAmount ?? '0');
   } else if (input.expectedOut) {
     expectedOut = BigInt(input.expectedOut);
   }
@@ -117,10 +129,21 @@ export async function handlePrivateSwap(
     ...(extraAlts.length > 0 ? { alts: extraAlts } : {}),
   });
 
+  const excess = result.excessNote;
   return {
     signature: result.signature,
     outAmount: result.outAmount.toString(),
     outDepositId: result.outNote.commitment.toString(16).padStart(64, '0').slice(0, 16),
+    ...(excess
+      ? {
+          excessOutAmount: (result.outAmount - (expectedOut ?? 0n)).toString(),
+          excessDepositId: excess.commitment.toString(16).padStart(64, '0').slice(0, 16),
+        }
+      : {}),
+    ...(expectedOut !== undefined ? { expectedOut: expectedOut.toString() } : {}),
+    ...(routeSlippageBps !== undefined ? { slippageBps: routeSlippageBps } : {}),
+    ...(routeHops !== undefined ? { routeHops } : {}),
+    ...(quoteOutAmount !== undefined ? { quoteOutAmount: quoteOutAmount.toString() } : {}),
     cluster,
   };
 }
