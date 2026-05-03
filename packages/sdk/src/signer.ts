@@ -15,7 +15,7 @@
  * spending key inside the zk-proof.
  */
 
-import { Keypair, PublicKey, type VersionedTransaction, type Transaction } from '@solana/web3.js';
+import { Keypair, PublicKey, VersionedTransaction, Transaction } from '@solana/web3.js';
 import { sha256 } from '@noble/hashes/sha256';
 
 /**
@@ -71,10 +71,14 @@ export class KeypairSigner implements B402Signer {
   private get kp(): Keypair { return this.keypair; }
 
   async signTransaction<T extends VersionedTransaction | Transaction>(tx: T): Promise<T> {
-    if ('sign' in tx && typeof (tx as VersionedTransaction).sign === 'function') {
-      (tx as VersionedTransaction).sign([this.kp]);
-    } else if ('partialSign' in tx && typeof (tx as Transaction).partialSign === 'function') {
-      (tx as Transaction).partialSign(this.kp);
+    // VersionedTransaction.sign takes an array of Signers; legacy
+    // Transaction.sign takes varargs. Both have a `.sign` method, so we
+    // must dispatch on the actual class. instanceof works because we
+    // import the constructors (not just the types) from web3.js.
+    if (tx instanceof VersionedTransaction) {
+      tx.sign([this.kp]);
+    } else if (tx instanceof Transaction) {
+      tx.partialSign(this.kp);
     } else {
       throw new Error('KeypairSigner: unsupported transaction shape');
     }

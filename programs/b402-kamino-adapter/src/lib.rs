@@ -199,11 +199,9 @@ mod ra_deposit {
 #[allow(dead_code)]
 mod ra_deposit_per_user {
     pub const OWNER_PDA: usize = 19;
-    /// Rent-buffer USDC ATA owned by `rent_buffer_pda`. Adapter transfers
-    /// `SETUP_FEE_USDC` from `adapter_in_ta` here on the user's first
-    /// deposit. PRD-33 §5.4.3.
-    pub const RENT_BUFFER_TA: usize = 20;
-    pub const MIN_LEN: usize = 21;
+    pub const MIN_LEN: usize = 20;
+    // RENT_BUFFER_TA at slot 20 reserved for V1.5 — deferred per
+    // handle_deposit_per_user's V1 comment block.
 }
 
 /// Position of every account in `remaining_accounts` for per-user
@@ -1043,49 +1041,37 @@ fn handle_deposit_per_user<'info>(
 
     let token_program = ctx.accounts.token_program.to_account_info();
     let adapter_in_ta = ctx.accounts.adapter_in_ta.to_account_info();
-    let rent_buffer_ta = ra[ra_deposit_per_user::RENT_BUFFER_TA].clone();
     let mut infos = forward_infos(ctx);
-    // forward_infos doesn't include owner_pda or rent_buffer_ta — append
-    // explicitly so the CPIs see AccountInfo for both.
+    // forward_infos doesn't include owner_pda — append explicitly so the
+    // CPI sees an AccountInfo for it.
     infos.push(owner_pda_info);
-    infos.push(rent_buffer_ta.clone());
 
-    // --- 0. First-deposit setup-fee transfer (PRD-33 §5.4.3) ----------------
+    // --- V1: rent comes from adapter_authority's pre-funded SOL ------------
     //
-    // First deposit (= UserMetadata doesn't exist yet) charges
-    // SETUP_FEE_USDC, transferred from adapter_in_ta into the rent-buffer
-    // ATA. The buffer is later swapped to SOL via `topup_authority_from_rent_buffer`
-    // (a separate crank ix) and routed back to adapter_authority, which
-    // pays init_user_metadata + init_obligation rent in this same tx out
-    // of its bootstrap-funded SOL balance.
+    // Originally PRD-33 §5.4.3 had a per-deposit rent fee: SPL-transfer
+    // SETUP_FEE_USDC from adapter_in_ta to a rent_buffer_ta in the same
+    // tx, then crank-swap the buffer to SOL later. Implementation deferred
+    // to V1.5 because:
     //
-    // The actual amount forwarded to deposit_v2 is `in_amount - fee`.
-    // SDK quotes the fee via Rent::minimum_balance + the same const,
-    // computes `expected_out_value` over the post-fee amount.
-    let is_first_deposit = !account_exists(&user_metadata);
-    let kamino_in_amount: u64 = if is_first_deposit {
-        require!(
-            in_amount >= SETUP_FEE_USDC + MIN_FIRST_DEPOSIT_AFTER_FEE_USDC,
-            KaminoAdapterError::DepositBelowFirstDepositMinimum
-        );
-        // SPL token::transfer adapter_in_ta -> rent_buffer_ta, signed by
-        // adapter_authority (the in_ta's owner).
-        let cpi_accounts = anchor_spl::token::Transfer {
-            from: adapter_in_ta.clone(),
-            to: rent_buffer_ta.clone(),
-            authority: ctx.accounts.adapter_authority.to_account_info(),
-        };
-        let auth_seeds_array: &[&[&[u8]]] = &[auth_seeds];
-        let cpi_ctx = anchor_lang::context::CpiContext::new_with_signer(
-            token_program.clone(),
-            cpi_accounts,
-            auth_seeds_array,
-        );
-        anchor_spl::token::transfer(cpi_ctx, SETUP_FEE_USDC)?;
-        in_amount - SETUP_FEE_USDC
-    } else {
-        in_amount
-    };
+    //   - The fee transfer adds 1 account to the tx (rent_buffer_ta).
+    //   - Per-user deposit already pushes 5 per-user PDAs into static
+    //     account slots (forced static — PDAs vary per user, can't be
+    //     ALT-resident at deploy time).
+    //   - Phase 9 dual-note minting expanded the verifier's public inputs
+    //     to 24 × 32 = 768 B inside the ix data.
+    //   - These three combined put the kamino-deposit tx already at the
+    //     1232 B v0-tx cap before the rent-fee +1 account.
+    //
+    // V1 mechanism: protocol pre-funds adapter_authority with 5 SOL at
+    // deploy time. Covers ~150 first-time depositors before SOL drains.
+    // V1.5 adds the in-tx fee path once the Phase 8 ALT auto-builder lands
+    // (per-call ALT extender — moves more accounts out of static).
+    //
+    // The SETUP_FEE_USDC, MIN_FIRST_DEPOSIT_AFTER_FEE_USDC, SEED_RENT_BUFFER
+    // constants and derive_rent_buffer_pda helper stay so the V1.5 wire-up
+    // is a single-commit re-enable. ra_deposit_per_user::RENT_BUFFER_TA
+    // slot is removed for V1.
+    let kamino_in_amount: u64 = in_amount;
 
     // --- 1. init_user_metadata (skip if exists) -----------------------------
     // owner = owner_pda (signer), feePayer = adapter_authority (signer).

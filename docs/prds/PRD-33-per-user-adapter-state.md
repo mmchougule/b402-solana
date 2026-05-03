@@ -405,6 +405,43 @@ Solana's program-account model is the constraint that forces persistent per-user
 
 ### Open questions for mayur to confirm before mainnet flip
 
+0. **BLOCKING — tx size ceiling discovered 2026-05-03.** Localnet fork test
+   surfaces that the per-user Kamino deposit tx OVERFLOWS the 1232 B v0-tx
+   cap. Compiled message has:
+   - 9 static keys × 32 B = 288 B (5 per-user PDAs forced static + 4 mandatory programs/signers)
+   - Phase 9 verifier ix data: 24 public inputs × 32 = 768 B + 256 B proof = 1024 B
+   - Plus message header, blockhash, sig array, ix metas
+   The combined tx serializes >1232 B even with full ALT compression of every
+   non-per-user-PDA. `MessageV0.serialize` throws "encoding overruns
+   Uint8Array" before the tx can be signed.
+
+   Implication: adapter binary will deploy fine to mainnet, but the FIRST
+   real privateLend call will fail SDK-side. Cannot be discovered post-deploy
+   without a frozen window for users.
+
+   Solutions ranked:
+   - **(a) Phase 8 ALT auto-builder** — per-call ephemeral ALT extender that
+     loads the per-user PDAs into the existing ALT in the SAME tx via
+     `AddressLookupTableProgram::extendLookupTable`, then references them
+     via lookup. Net change: 5 per-user PDAs go from 5×32=160 B static to
+     5×1=5 B lookup, saving ~155 B. Would fit. Estimated effort: ~1-2 days.
+   - **(b) Pre-init per-user PDAs into a long-lived ALT** — every new user
+     extends the cluster's b402 ALT with their own 5 PDAs at first deposit.
+     ALT capacity is 256 entries (per ALT), so caps the per-cluster user
+     count at ~50 unique users per ALT. Multiple ALTs per cluster as
+     needed. Lower complexity than (a); higher per-user setup cost.
+   - **(c) Reduce Phase 9 public inputs** — re-derive `outSpendingPub` from
+     another input rather than expose it as a separate public input. Saves
+     32 B of ix data. Requires Phase 9.1 ceremony (~30 min) and adapter+
+     verifier-adapt redeploy. Borderline — might still not fit with
+     Kamino's 19-account remaining_accounts list.
+   - **(d) Split into two txs** — shield in tx1, kamino-deposit in tx2.
+     Loses atomicity. If tx2 fails the user holds a shielded USDC note but
+     the deposit-amount-bound proof was burned. Not acceptable.
+
+   Recommended: (a) Phase 8 ALT auto-builder. PRD-35 to be drafted as a
+   blocker on per-user Kamino mainnet flip.
+
 1. **Default flip timing.** ~~drain-and-upgrade~~ NO LONGER NEEDED — verified 2026-05-03 that the mainnet adapter authority `J19LAUv7QvipsGqj2Z6VnEjL8p2Gs4er958Tkhd1okKT` has 0 SOL, 0 transactions, 0 token accounts. The v0.1 shared obligation was never created on mainnet. Flip can ship per-user as the only path with no drain, no migration. Treat this as a green-field deploy.
 2. **Mainnet redeploy ordering.** Pool first or adapter first? Per §6.1, the rewrite is gated on `phase_9_dual_note` AND `is_stateful_adapter`. If adapter ships per-user first while pool is still on default-feature build, pool will forward unprefixed payload → adapter's `decode_per_user_payload` fails on length check → tx aborts. Safe ordering: **pool with `phase_9_dual_note` first** (already deployed mainnet 2026-04-30 per project_b402_solana_phase7_live), THEN adapter with `per_user_obligation`.
 3. **`gc_obligation` admin model.** Currently scaffolded as `admin: Signer` with no on-chain auth check. V1.0 wants either (a) restrict to `cfg.admin_multisig` (requires loading PoolConfig via CPI — adds 1 account) or (b) leave admin-open + rely on Kamino's own emptiness check (cheaper, looser). Pick before wiring the body.
