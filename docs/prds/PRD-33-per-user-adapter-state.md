@@ -129,6 +129,99 @@ Each per-user `Obligation` (or equivalent) is a real on-chain account paying ren
 
 For V1.0 alpha + first 1k users: lazy init alone is sufficient. (1) and (2). (3) is a V1.5 concern.
 
+### 5.4 Rent funding model — user-pays-from-USDC (V1)
+
+The §5 mitigations describe ALLOCATION; this section nails down WHO PAYS. The choice is "first-time depositors pay their own per-user state's rent in the same transaction that creates it." Protocol does not subsidize.
+
+#### 5.4.1 Bootstrap
+
+The very first first-time deposit needs `adapter_authority` to already hold SOL — the rent for `init_user_metadata` + `init_obligation` is paid in lamports, not USDC, atomically inside the deposit ix. Bootstrap requirement: **5 SOL initial seed** (~$900 at $180/SOL), funded once at deploy time. This buys ~150-300 first-time deposits worth of rent before the buffer (§5.4.3) catches up. Recovers via `gc_obligation` rent refund as users opt out.
+
+#### 5.4.2 Setup fee accounting
+
+```
+SETUP_RENT_LAMPORTS  =  rent.minimum_balance(UserMetadata.LEN)
+                      + rent.minimum_balance(Obligation.LEN)
+                      ≈ 0.030 SOL  (≈ 209,520 lamports at current rent rate)
+
+SETUP_FEE_USDC       =  ceil( SETUP_RENT_LAMPORTS × USDC_PER_SOL × 1.5 )
+                     // 1.5× buffer absorbs SOL price spikes between
+                     // user deposit (USDC paid now) and adapter top-up
+                     // (USDC → SOL swap later, possibly minutes-hours away).
+
+current_setup_fee()    is computed by the SDK from a Pyth/Switchboard
+                       SOL/USDC oracle reading on the same Phase 7
+                       Jupiter route already used for swap. Quoted to
+                       the user before the deposit lands. At $180/SOL
+                       this is ~$8.10 USDC.
+```
+
+Numbers are not hard-coded into the adapter binary — they're derived from `Rent::minimum_balance()` at runtime + a pool-config-stored `setup_fee_buffer_bps` (default 5000 bps = 1.5×). Upgradeable without an adapter redeploy.
+
+#### 5.4.3 In-flight charging mechanism
+
+```
+                user shielded note (USDC = N)
+                            │
+                            ▼
+                  pool unshields N to adapter_in_ta
+                            │
+                            ▼
+       adapter Path-1 deposit handler:
+         if !account_exists(owner_pda's UserMetadata):
+             setup_fee_usdc = current_setup_fee()        // ≈ 8 USDC
+             require!(in_amount > setup_fee_usdc + MIN_DEPOSIT)
+             deposit_amount = in_amount - setup_fee_usdc
+             // 1. token::transfer adapter_in_ta -> rent_buffer_usdc_ta (8 USDC)
+             // 2. init_user_metadata + init_obligation
+             //    paid out of adapter_authority's lamport balance
+             //    (which the rent buffer has been topping up)
+         else:
+             deposit_amount = in_amount
+         // continue: refresh + deposit_v2 with deposit_amount
+                            │
+                            ▼
+                   user gets kUSDC note for deposit_amount
+                   (NOT the full N — fee is transparent in receipt)
+```
+
+A separate `topup_authority_lamports` admin-callable ix is the only thing that touches the buffer:
+- Reads `rent_buffer_usdc_ta.amount`
+- If above a `topup_threshold_usdc` (say 1 SOL worth), Jupiter-swaps it to SOL
+- Routes the SOL to `adapter_authority`
+
+This decouples deposit txs (small, fast, no Jupiter CPI overhead) from buffer→SOL conversion (large, occasional, anyone can crank but admin-gated for the keypair handling). Crank-callable by anyone; rent goes to `adapter_authority` regardless.
+
+#### 5.4.4 Refunds via gc_obligation
+
+When a user opts out (full withdraw + close):
+- `gc_obligation` closes the Kamino UserMetadata + Obligation, recovering ~0.030 SOL to `adapter_authority`
+- That refund can fund the NEXT new user's setup, or the user's gc-ix can include a clause that returns SOL-equivalent USDC to the user's shielded balance via Jupiter. V1: refund stays with the adapter (simpler); V2: explicit user refund.
+
+#### 5.4.5 Honest UX copy
+
+Pre-deposit modal text:
+```
+First time depositing into Kamino?
+
+Your private state account costs ~0.030 SOL in rent (≈ $8 USDC at current
+prices). This is paid one-time, deducted from this deposit. Subsequent
+deposits don't pay it. Recoverable when you fully exit the position via
+gc_obligation.
+```
+
+Quote the actual current_setup_fee, not the example $8.
+
+#### 5.4.6 Per-protocol generalization
+
+| Protocol | Account size | Setup fee at 1.5× buffer |
+|---|---|---|
+| Kamino   | UserMetadata + Obligation ≈ 4.4 KB | ~$8 USDC |
+| Drift    | User + UserStats ≈ 4.8 KB | ~$8.50 USDC |
+| Marginfi | MarginfiAccount ≈ 2.3 KB | ~$4 USDC |
+
+Adapter source defines the per-protocol `account_sizes` array; the fee derivation is shared logic in `b402_adapter_common`.
+
 ## 6. Implementation plan
 
 ### Phase 33.1 — Pool-side outSpendingPub forwarding (~4h)
@@ -312,7 +405,7 @@ Solana's program-account model is the constraint that forces persistent per-user
 
 ### Open questions for mayur to confirm before mainnet flip
 
-1. **Default flip timing.** `per_user_obligation` is OFF in default kamino-adapter builds. PRD §7.7 calls out a drain-and-upgrade flow: drain the v0.1 shared obligation (one full withdraw), upgrade adapter to per-user binary, begin per-user deposits. Confirm the drain step before flipping the default.
+1. **Default flip timing.** ~~drain-and-upgrade~~ NO LONGER NEEDED — verified 2026-05-03 that the mainnet adapter authority `J19LAUv7QvipsGqj2Z6VnEjL8p2Gs4er958Tkhd1okKT` has 0 SOL, 0 transactions, 0 token accounts. The v0.1 shared obligation was never created on mainnet. Flip can ship per-user as the only path with no drain, no migration. Treat this as a green-field deploy.
 2. **Mainnet redeploy ordering.** Pool first or adapter first? Per §6.1, the rewrite is gated on `phase_9_dual_note` AND `is_stateful_adapter`. If adapter ships per-user first while pool is still on default-feature build, pool will forward unprefixed payload → adapter's `decode_per_user_payload` fails on length check → tx aborts. Safe ordering: **pool with `phase_9_dual_note` first** (already deployed mainnet 2026-04-30 per project_b402_solana_phase7_live), THEN adapter with `per_user_obligation`.
 3. **`gc_obligation` admin model.** Currently scaffolded as `admin: Signer` with no on-chain auth check. V1.0 wants either (a) restrict to `cfg.admin_multisig` (requires loading PoolConfig via CPI — adds 1 account) or (b) leave admin-open + rely on Kamino's own emptiness check (cheaper, looser). Pick before wiring the body.
 4. **SDK exposure of `viewing_pub_hash` derivation.** The fork test re-derives owner_pda from `wallet.spendingPub` inside the test. The SDK's privateLend/privateRedeem helpers should auto-compute the per-user PDAs and inject them into `remainingAccounts` so callers don't need to know about the PDA layout. Out of this PR (no SDK changes).
