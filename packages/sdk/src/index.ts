@@ -1,5 +1,14 @@
 export { B402Solana } from './b402.js';
 export {
+  derivePendingInputsPda,
+  buildCommitInputsIxData,
+  buildCommitInputsIx,
+  COMMIT_INPUTS_DISCRIMINATOR,
+  PUBLIC_INPUT_COUNT_ADAPT,
+  PENDING_INPUTS_SEED,
+  VERSION_PREFIX as PRD35_VERSION_PREFIX,
+} from './commit-inputs.js';
+export {
   KeypairSigner,
   WalletAdapterSigner,
   isB402Signer,

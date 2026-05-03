@@ -55,6 +55,7 @@ import {
 
 import { buildWallet, type Wallet } from './wallet.js';
 import { KeypairSigner, type B402Signer } from './signer.js';
+import { derivePendingInputsPda } from './commit-inputs.js';
 import { NoteStore } from './note-store.js';
 import { shield, type ShieldResult } from './actions/shield.js';
 import { unshield, type UnshieldResult } from './actions/unshield.js';
@@ -231,6 +232,18 @@ export interface PrivateSwapRequest {
    * verifier rejection at runtime.
    */
   phase9DualNote?: boolean;
+  /** PRD-35 per-call switch for the 2-tx commit-then-verify flow.
+   *  When true:
+   *    1. SDK builds + submits a `pool::commit_inputs` tx that writes the
+   *       Phase 9 24×32 B public inputs into a per-user PDA.
+   *    2. SDK then submits the `pool::adapt_execute` tx which references
+   *       the PDA; the verifier reads inputs from acct.data instead of
+   *       carrying them inline.
+   *  Saves ~700-735 B on the adapt_execute tx — lifts the v0-tx 1232 B
+   *  ceiling that today blocks per-user adapters at scale.
+   *  Pool MUST be built with `--features prd_35_pending_inputs` for this
+   *  to work (default off in current mainnet pool). */
+  pendingInputsMode?: boolean;
 }
 
 export interface PrivateSwapResult {
@@ -955,6 +968,45 @@ export class B402Solana {
     // 6. Generate the adapt proof.
     const proof = await this._adaptProver.prove(witness);
 
+    // PRD-35 §5.4 — 2-tx commit-then-verify orchestration. When the
+    // caller opts into pendingInputsMode, we land a `pool::commit_inputs`
+    // tx FIRST that writes the 24×32 B public inputs into a per-user
+    // PDA. The follow-up adapt_execute then carries only the proof
+    // inline; the verifier reads inputs from the PDA. Saves ~700-735 B
+    // on the heavyweight tx, lifting the v0-tx 1232 B ceiling that
+    // today blocks per-user adapters at scale.
+    if (req.pendingInputsMode) {
+      const { buildCommitInputsIx } = await import('./commit-inputs.js');
+      const spendingPubLe = bigintToLe32(this._wallet!.spendingPub);
+      const commitIx = buildCommitInputsIx({
+        poolProgramId: new PublicKey(this.programIds.b402Pool),
+        spendingPubLe,
+        inputs: proof.publicInputsLeBytes.map((b) => new Uint8Array(b)),
+        relayer: relayerPubkey,
+      });
+      const commitBlockhash = (await this.connection.getLatestBlockhash('confirmed')).blockhash;
+      const commitMsg = new TransactionMessage({
+        payerKey: relayerPubkey,
+        recentBlockhash: commitBlockhash,
+        instructions: [commitIx],
+      }).compileToV0Message();
+      const commitVtx = new VersionedTransaction(commitMsg);
+      // Local relayer signs commit_inputs (it's the payer for any
+      // first-time PDA alloc). HTTP relayer's bundle support for the
+      // commit-tx is V1.5 — for now, self-submit via local relayer
+      // while the heavyweight adapt_execute may still go through the
+      // HTTP relayer below.
+      commitVtx.sign([this.relayer]);
+      const csig = await this.connection.sendRawTransaction(commitVtx.serialize(), {
+        skipPreflight: false,
+        preflightCommitment: 'confirmed',
+      });
+      await this.connection.confirmTransaction(
+        { signature: csig, blockhash: commitBlockhash, lastValidBlockHeight: (await this.connection.getLatestBlockhash()).lastValidBlockHeight },
+        'confirmed',
+      );
+    }
+
     // 7. Adapter ix data: default mock-adapter shape (discriminator + amount +
     //    expected_out + Vec<u8> action_payload). Caller can override for real
     //    adapters whose execute() takes a different layout.
@@ -1078,6 +1130,20 @@ export class B402Solana {
       { pubkey: req.adapterOutTa, isSigner: false, isWritable: true },
       { pubkey: feeAtaSentinel, isSigner: false, isWritable: true },
       { pubkey: SYSVAR_INSTRUCTIONS, isSigner: false, isWritable: false },
+      // PRD-35 — pending_inputs PDA, only when mode is enabled.
+      // Pool's AdaptExecute Anchor account list places `pending_inputs`
+      // BETWEEN instructions_sysvar and token_program when the
+      // prd_35_pending_inputs feature is on. SDK must match that order.
+      ...(req.pendingInputsMode
+        ? [{
+            pubkey: derivePendingInputsPda(
+              new PublicKey(this.programIds.b402Pool),
+              bigintToLe32(this._wallet!.spendingPub),
+            )[0],
+            isSigner: false,
+            isWritable: true,
+          }]
+        : []),
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       // remaining_accounts: inline nullifier block (Phase 7 only) then
