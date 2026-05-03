@@ -47,6 +47,7 @@ import {
 } from '@b402ai/solana-prover';
 
 import { buildWallet, type Wallet } from './wallet.js';
+import { KeypairSigner, type B402Signer } from './signer.js';
 import { NoteStore } from './note-store.js';
 import { shield, type ShieldResult } from './actions/shield.js';
 import { unshield, type UnshieldResult } from './actions/unshield.js';
@@ -79,8 +80,15 @@ const SYSVAR_INSTRUCTIONS = new PublicKey('Sysvar1nstructions1111111111111111111
 
 export interface B402SolanaConfig {
   cluster: 'mainnet' | 'devnet' | 'localnet';
-  /** Signer for shield/unshield txs. Used as depositor and (by default) as relayer. */
-  keypair: Keypair;
+  /** Solana keypair owning the seed (legacy path: Node, MCP, tests). The
+   *  SDK wraps it as a KeypairSigner internally. Pass this OR `signer`,
+   *  not both. */
+  keypair?: Keypair;
+  /** B402Signer abstraction (browser path with WalletAdapterSigner, or any
+   *  custom impl). When passed, on-chain signing routes through
+   *  `signer.signTransaction` and the wallet seed comes from
+   *  `signer.getSeed()`. Pass this OR `keypair`, not both. */
+  signer?: B402Signer;
   rpcUrl?: string;
   /** Pre-built transact prover. If omitted, callers must pass `proverArtifacts`. */
   prover?: TransactProver;
@@ -310,7 +318,15 @@ export class B402Solana {
   readonly connection: Connection;
   readonly cluster: B402SolanaConfig['cluster'];
   readonly programIds: typeof PROGRAM_IDS;
-  readonly keypair: Keypair;
+  /** Active signer abstraction. Always present; KeypairSigner under the
+   *  legacy `keypair` config, WalletAdapterSigner (or other) under
+   *  `signer` config. */
+  readonly signer: B402Signer;
+  /** Legacy back-compat accessor. Returns the underlying Solana Keypair
+   *  ONLY when the SDK was constructed with `keypair: Keypair` (i.e. the
+   *  KeypairSigner path). Returns null for any other Signer impl
+   *  (browser, hardware-wallet, custom relayer-backed). */
+  readonly keypair: Keypair | null;
   readonly relayer: Keypair;
   readonly notesPersistDir: string | undefined;
   readonly relayerHttpUrl: string | undefined;
@@ -340,8 +356,37 @@ export class B402Solana {
     const rpcUrl = config.rpcUrl ?? defaultRpc(config.cluster);
     this.connection = new Connection(rpcUrl, 'confirmed');
     this.programIds = { ...PROGRAM_IDS, ...(config.programIds ?? {}) };
-    this.keypair = config.keypair;
-    this.relayer = config.relayer ?? config.keypair;
+
+    if (config.keypair && config.signer) {
+      throw new Error(
+        'B402Solana: pass `keypair` OR `signer`, not both. Use `signer: new KeypairSigner(kp)` to be explicit, or stick with the legacy `keypair` field.',
+      );
+    }
+    if (!config.keypair && !config.signer) {
+      throw new Error(
+        'B402Solana: must pass either `keypair: Keypair` (Node/MCP) or `signer: B402Signer` (browser, see WalletAdapterSigner.fromAdapter).',
+      );
+    }
+    if (config.signer) {
+      this.signer = config.signer;
+      // Preserve back-compat accessor: only Keypair-backed signers expose
+      // the underlying Keypair via `b402.keypair`. Browser-derived signers
+      // by design do NOT have one.
+      this.keypair = config.signer instanceof KeypairSigner
+        ? (config.signer as KeypairSigner).keypair
+        : null;
+    } else {
+      // config.keypair is set per the check above.
+      this.keypair = config.keypair!;
+      this.signer = new KeypairSigner(config.keypair!);
+    }
+    // Relayer is the on-chain fee payer for shield/unshield self-submit
+    // paths. When the user is a Keypair we can default to them; for
+    // browser-derived signers there is no Keypair to fall back on, so the
+    // caller MUST configure either an HTTP relayer (relayerHttpUrl) or
+    // pass `relayer` explicitly. shield/unshield will surface a clear
+    // error at call time if neither is set.
+    this.relayer = config.relayer ?? this.keypair ?? (undefined as unknown as Keypair);
     this.notesPersistDir = config.notesPersistDir;
     this.relayerHttpUrl = config.relayerHttpUrl;
     this.relayerApiKey = config.relayerApiKey;
@@ -381,8 +426,11 @@ export class B402Solana {
   /** Lazy-init wallet + note store. Idempotent. */
   async ready(): Promise<void> {
     if (!this._wallet) {
-      // Deterministic b402 wallet seeded from the Solana keypair's ed25519 secret.
-      this._wallet = await buildWallet(this.keypair.secretKey.slice(0, 32));
+      // Deterministic b402 wallet seeded from the active signer. For
+      // KeypairSigner this is `keypair.secretKey[0..32]` (preserves
+      // pre-0.0.18 derivation). For WalletAdapterSigner this is
+      // sha256(adapter.signMessage(canonicalMsg))[0..32] — see signer.ts.
+      this._wallet = await buildWallet(this.signer.getSeed());
     }
     if (!this._notes) {
       this._notes = new NoteStore({
@@ -443,7 +491,7 @@ export class B402Solana {
     tokens: Array<{ mint: string; amount: string; decimals: number; tokenAccount: string }>;
   }> {
     await this.ready();
-    const owner = this.keypair.publicKey;
+    const owner = this.signer.publicKey;
     const [lamports, tokenAccounts] = await Promise.all([
       this.connection.getBalance(owner, 'confirmed'),
       this.connection.getParsedTokenAccountsByOwner(owner, { programId: TOKEN_PROGRAM_ID }, 'confirmed'),
@@ -489,7 +537,7 @@ export class B402Solana {
     // 2. User's own token accounts — anyone they hold a balance of.
     try {
       const r = await this.connection.getTokenAccountsByOwner(
-        this.keypair.publicKey,
+        this.signer.publicKey,
         { programId: TOKEN_PROGRAM_ID },
       );
       for (const acc of r.value) {
@@ -514,7 +562,7 @@ export class B402Solana {
 
     const depositorAta = await getAssociatedTokenAddress(
       req.mint,
-      this.keypair.publicKey,
+      this.signer.publicKey,
     );
 
     // Resolve cluster-default ALT for shield. Required when publishing
@@ -538,7 +586,7 @@ export class B402Solana {
       wallet: this._wallet!,
       mint: req.mint,
       depositorAta,
-      depositor: this.keypair,
+      depositor: this.signer,
       relayer: this.relayer,
       amount: req.amount,
       omitEncryptedNotes,
@@ -1307,7 +1355,7 @@ export class B402Solana {
     const explorer = (kind: 'account', addr: string) =>
       `https://solscan.io/${kind}/${addr}${this.cluster === 'devnet' ? '?cluster=devnet' : ''}`;
     return {
-      user: this.keypair.publicKey.toBase58(),
+      user: this.signer.publicKey.toBase58(),
       cluster: this.cluster,
       public: {
         sol: { lamports: publicSide.sol.amount, ui: (Number(publicSide.sol.amount) / 1e9).toFixed(6) },
@@ -1325,7 +1373,7 @@ export class B402Solana {
         balances: privateSide,
       },
       links: {
-        userOnSolscan: explorer('account', this.keypair.publicKey.toBase58()),
+        userOnSolscan: explorer('account', this.signer.publicKey.toBase58()),
         poolOnSolscan: explorer('account', this.programIds.b402Pool.toString()),
       },
     };

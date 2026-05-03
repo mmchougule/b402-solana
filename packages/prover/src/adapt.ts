@@ -78,10 +78,16 @@ export interface AdaptWitness {
   actionPayloadKeccakFr: bigint;
 }
 
+/** Either a filesystem path (Node, MCP) or a pre-loaded byte buffer
+ *  (browser; lazy-fetched + ServiceWorker-cached). snarkjs.groth16.fullProve
+ *  accepts both shapes; we just have to skip the fs.existsSync check when
+ *  the artifact is already a buffer. */
+export type CircuitArtifact = string | Uint8Array | ArrayBuffer;
+
 export interface ProverArtifacts {
-  wasmPath: string;
-  zkeyPath: string;
-  vkeyPath?: string;
+  wasmPath: CircuitArtifact;
+  zkeyPath: CircuitArtifact;
+  vkeyPath?: CircuitArtifact;
 }
 
 export interface AdaptProof {
@@ -95,8 +101,12 @@ export interface AdaptProof {
 
 export class AdaptProver {
   constructor(private readonly artifacts: ProverArtifacts) {
+    // Path-based artifacts (Node / MCP) get an existence pre-check so a
+    // missing zkey fails early at construction rather than mid-flow.
+    // Buffer-based artifacts (browser fetch) skip the check — they're
+    // already loaded by the caller.
     for (const p of [artifacts.wasmPath, artifacts.zkeyPath]) {
-      if (!fs.existsSync(p)) {
+      if (typeof p === 'string' && !fs.existsSync(p)) {
         throw new Error(`adapt prover artifact missing: ${p}`);
       }
     }

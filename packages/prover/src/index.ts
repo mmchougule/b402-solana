@@ -65,10 +65,13 @@ export interface TransactWitness {
   recipientOwnerHigh: bigint;
 }
 
+/** Filesystem path (Node, MCP) or pre-loaded byte buffer (browser). */
+export type CircuitArtifact = string | Uint8Array | ArrayBuffer;
+
 export interface ProverArtifacts {
-  wasmPath: string;
-  zkeyPath: string;
-  vkeyPath?: string;
+  wasmPath: CircuitArtifact;
+  zkeyPath: CircuitArtifact;
+  vkeyPath?: CircuitArtifact;
 }
 
 export interface TransactProof {
@@ -82,8 +85,10 @@ export interface TransactProof {
 
 export class TransactProver {
   constructor(private readonly artifacts: ProverArtifacts) {
+    // See AdaptProver — same logic. Buffer-based artifacts (browser) skip
+    // the fs check since they're already loaded.
     for (const p of [artifacts.wasmPath, artifacts.zkeyPath]) {
-      if (!fs.existsSync(p)) {
+      if (typeof p === 'string' && !fs.existsSync(p)) {
         throw new Error(`prover artifact missing: ${p}`);
       }
     }
@@ -133,7 +138,11 @@ export class TransactProver {
   /** Verify locally with snarkjs — useful for SDK tests before submitting on-chain. */
   async verifyLocal(proof: TransactProof): Promise<boolean> {
     if (!this.artifacts.vkeyPath) throw new Error('vkeyPath not provided');
-    const vKey = JSON.parse(fs.readFileSync(this.artifacts.vkeyPath, 'utf-8'));
+    const vKey = JSON.parse(
+      typeof this.artifacts.vkeyPath === 'string'
+        ? fs.readFileSync(this.artifacts.vkeyPath, 'utf-8')
+        : new TextDecoder().decode(this.artifacts.vkeyPath),
+    );
     // Reconstruct snarkjs-style proof from our bytes by re-using the
     // original signals — in practice SDK will call prove() + immediately
     // use the bytes, and verifyLocal is a belt-and-suspenders helper that

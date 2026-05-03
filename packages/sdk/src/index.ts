@@ -1,4 +1,12 @@
 export { B402Solana } from './b402.js';
+export {
+  KeypairSigner,
+  WalletAdapterSigner,
+  isB402Signer,
+  B402_SIGNER_DERIVATION_MESSAGE,
+  type B402Signer,
+  type WalletAdapterLike,
+} from './signer.js';
 export type {
   B402SolanaConfig,
   B402Status,

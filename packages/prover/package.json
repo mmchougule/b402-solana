@@ -1,6 +1,6 @@
 {
   "name": "@b402ai/solana-prover",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Groth16 proof generation for the b402 Solana shielded pool (transact + adapt circuits)",
   "license": "Apache-2.0",
   "type": "module",
