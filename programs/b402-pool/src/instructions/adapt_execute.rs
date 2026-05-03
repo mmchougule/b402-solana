@@ -214,6 +214,18 @@ pub struct AdaptExecute<'info> {
     #[account(address = anchor_lang::solana_program::sysvar::instructions::ID)]
     pub instructions_sysvar: AccountInfo<'info>,
 
+    /// PRD-35 §5.3 — per-user pending-inputs PDA. Pool validates it's
+    /// the canonical PDA derived from `pi.out_spending_pub` (the same
+    /// 32 B that appear as Phase 9's outSpendingPub[0] public input),
+    /// reads the inputs through verifier-adapt's new ix variant, and
+    /// zeroes `version` after successful verify (replay protection).
+    /// Only required under `prd_35_pending_inputs`. Default builds use
+    /// the inline-inputs verify path and ignore this account.
+    /// CHECK: handler validates seeds + version field.
+    #[cfg(feature = "prd_35_pending_inputs")]
+    #[account(mut)]
+    pub pending_inputs: UncheckedAccount<'info>,
+
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
 }
@@ -337,9 +349,80 @@ pub fn handler<'info>(
     }
 
     // Verify proof.
+    //
+    // PRD-35 §5.3 — pending_inputs path. Pool validates the per-user
+    // pending_inputs PDA matches the canonical derivation from
+    // pi.out_spending_pub, then asks verifier-adapt to read the inputs
+    // from account.data instead of carrying them inline. Saves ~768 B of
+    // ix data, lifting the v0-tx 1232 B ceiling for per-user adapters.
+    //
+    // The pool ALSO recomputes the inputs vector via build_public_inputs_
+    // for_adapt and asserts it matches the bytes the verifier will see.
+    // Otherwise a malicious caller could write OTHER inputs to a different
+    // PDA and pass that PDA in. Defence-in-depth: PDA derivation pins
+    // who-owns-the-inputs; byte-equality pins what-they-are.
     let public_inputs: Vec<[u8; 32]> = build_public_inputs_for_adapt(pi, &in_mint, &out_mint, &adapter_program_key, &computed_action_hash);
     let mut proof_bytes = [0u8; 256];
     proof_bytes.copy_from_slice(&args.proof);
+
+    #[cfg(feature = "prd_35_pending_inputs")]
+    {
+        // Phase 9 outSpendingPub is the per-user identifier. Pre-Phase-9
+        // builds don't carry this input; the prd_35 path requires Phase 9.
+        #[cfg(not(feature = "phase_9_dual_note"))]
+        compile_error!("prd_35_pending_inputs requires phase_9_dual_note (out_spending_pub is the PDA-scoping input)");
+
+        #[cfg(feature = "phase_9_dual_note")]
+        {
+            use crate::instructions::commit_inputs::{
+                PendingInputs, PENDING_INPUTS_SEED, VERSION_PREFIX,
+            };
+            let pending_acct = &ctx.accounts.pending_inputs;
+            // (1) Validate PDA derivation. Seeds match commit_inputs.rs.
+            let spending_pub_le = pi.out_spending_pub;
+            let (expected_pda, _bump) = Pubkey::find_program_address(
+                &[VERSION_PREFIX, PENDING_INPUTS_SEED, spending_pub_le.as_ref()],
+                &crate::ID,
+            );
+            require_keys_eq!(
+                pending_acct.key(),
+                expected_pda,
+                PoolError::ProofVerificationFailed
+            );
+            // (2) Validate the bytes match what we computed. Pool refuses to
+            // verify against an account whose contents disagree with the
+            // pool's recomputed pi vector — defends against PDA-hijack /
+            // wrong-inputs-substitution.
+            {
+                let acct_data = pending_acct.try_borrow_data()?;
+                require!(
+                    acct_data.len() >= 8 + PendingInputs::LEN,
+                    PoolError::ProofVerificationFailed
+                );
+                require!(acct_data[8] == 1, PoolError::ProofVerificationFailed);
+                for (i, want) in public_inputs.iter().enumerate() {
+                    let off = 8 + 1 + i * 32;
+                    let on_chain = &acct_data[off..off + 32];
+                    require!(on_chain == want.as_slice(), PoolError::ProofVerificationFailed);
+                }
+            }
+            // (3) Verify via account-inputs CPI.
+            verifier_cpi::invoke_verify_adapt_with_account_inputs(
+                &ctx.accounts.verifier_program,
+                &pending_acct.to_account_info(),
+                &proof_bytes,
+            )?;
+            // (4) Replay protection: zero the version byte. Subsequent
+            // verify attempts against this PDA fail (PendingInputsNotCommitted).
+            // We zero ONLY the version (1 byte) instead of the full 768 B
+            // inputs region — saves ~10k CU and is sufficient for replay
+            // protection (verifier requires version == 1 to read).
+            let mut acct_data = pending_acct.try_borrow_mut_data()?;
+            acct_data[8] = 0;
+        }
+    }
+
+    #[cfg(not(feature = "prd_35_pending_inputs"))]
     verifier_cpi::invoke_verify_adapt(
         &ctx.accounts.verifier_program,
         &proof_bytes,

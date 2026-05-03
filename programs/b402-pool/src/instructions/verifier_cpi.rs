@@ -83,6 +83,51 @@ pub fn invoke_verify_transact<'info>(
     Ok(())
 }
 
+/// PRD-35 §5.2 — Anchor disc for `verify_with_account_inputs`.
+/// sha256("global:verify_with_account_inputs")[0..8].
+/// Computed via `node -e 'console.log(crypto.createHash("sha256").
+/// update("global:verify_with_account_inputs").digest().subarray(0,8))'`.
+/// Regenerate if the verifier fn name changes.
+const VERIFY_WITH_ACCOUNT_INPUTS_DISCRIMINATOR: [u8; 8] =
+    [244, 173, 62, 224, 52, 21, 121, 65];
+
+/// CPI helper for the PRD-35 account-inputs verify path. Sends only the
+/// 256 B proof inline; the verifier reads public inputs from the
+/// `pending_inputs` account passed via `invoke`'s account list.
+///
+/// Wire size of the verify ix:
+///   8  (disc)
+/// + 256 (proof, fixed array — Anchor encodes [u8; 256] without a length
+///       prefix, so no +4 here)
+/// = 264 B total — vs ~1032 B inline. ~768 B saved per call.
+pub fn invoke_verify_adapt_with_account_inputs<'info>(
+    verifier_program: &AccountInfo<'info>,
+    pending_inputs: &AccountInfo<'info>,
+    proof: &[u8; 256],
+) -> Result<()> {
+    // Anchor wire format: discriminator || borsh args.
+    //   args = proof: [u8; 256] — fixed-size array, no length prefix.
+    let mut data: Vec<u8> = Vec::with_capacity(8 + 256);
+    data.extend_from_slice(&VERIFY_WITH_ACCOUNT_INPUTS_DISCRIMINATOR);
+    data.extend_from_slice(proof);
+
+    // Account list per VerifyWithAccountInputs in verifier-adapt:
+    //   pending_inputs: UncheckedAccount (read-only).
+    let ix = Instruction {
+        program_id: *verifier_program.key,
+        accounts: vec![anchor_lang::solana_program::instruction::AccountMeta {
+            pubkey: *pending_inputs.key,
+            is_signer: false,
+            is_writable: false,
+        }],
+        data,
+    };
+
+    invoke(&ix, &[verifier_program.clone(), pending_inputs.clone()])
+        .map_err(|_| error!(PoolError::ProofVerificationFailed))?;
+    Ok(())
+}
+
 /// Sibling of `invoke_verify_transact` for the adapt verifier. Same wire
 /// format — the only difference is `public_inputs.len()` must equal 23.
 pub fn invoke_verify_adapt<'info>(
