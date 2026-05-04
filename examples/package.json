@@ -20,7 +20,7 @@
     "@b402ai/solana": "workspace:*",
     "@b402ai/solana-prover": "workspace:*",
     "@b402ai/solana-shared": "workspace:*",
-    "@lightprotocol/stateless.js": "^0.23.0-beta.5",
+    "@lightprotocol/stateless.js": "^0.23.3",
     "@noble/hashes": "^1.5.0",
     "@solana/spl-token": "^0.4.9",
     "@solana/web3.js": "^1.95.8"

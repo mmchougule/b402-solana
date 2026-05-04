@@ -51,7 +51,7 @@
     "@noble/ciphers": "^1.0.0",
     "@noble/curves": "^1.6.0",
     "circomlibjs": "^0.1.7",
-    "@lightprotocol/stateless.js": "0.23.0-beta.5"
+    "@lightprotocol/stateless.js": "0.23.3"
   },
   "devDependencies": {
     "typescript": "^5.6.3",

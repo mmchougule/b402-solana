@@ -78,8 +78,8 @@ importers:
         specifier: workspace:*
         version: link:../packages/shared
       '@lightprotocol/stateless.js':
-        specifier: ^0.23.0-beta.5
-        version: 0.23.0-beta.5(@solana/web3.js@1.98.4(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6))
+        specifier: ^0.23.3
+        version: 0.23.3(@solana/web3.js@1.98.4(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6))
       '@noble/hashes':
         specifier: ^1.5.0
         version: 1.8.0
@@ -124,8 +124,8 @@ importers:
         specifier: workspace:*
         version: link:../shared
       '@lightprotocol/stateless.js':
-        specifier: 0.23.0-beta.5
-        version: 0.23.0-beta.5(@solana/web3.js@1.98.4(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6))
+        specifier: 0.23.3
+        version: 0.23.3(@solana/web3.js@1.98.4(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6))
       '@modelcontextprotocol/sdk':
         specifier: ^1.0.4
         version: 1.29.0(zod@3.25.76)
@@ -229,8 +229,8 @@ importers:
         specifier: workspace:*
         version: link:../shared
       '@lightprotocol/stateless.js':
-        specifier: 0.23.0-beta.5
-        version: 0.23.0-beta.5(@solana/web3.js@1.98.4(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6))
+        specifier: 0.23.3
+        version: 0.23.3(@solana/web3.js@1.98.4(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6))
       '@noble/ciphers':
         specifier: ^1.0.0
         version: 1.3.0
@@ -284,8 +284,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/shared
       '@lightprotocol/stateless.js':
-        specifier: 0.23.0-beta.5
-        version: 0.23.0-beta.5(@solana/web3.js@1.98.4(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6))
+        specifier: 0.23.3
+        version: 0.23.3(@solana/web3.js@1.98.4(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6))
       '@solana/spl-token':
         specifier: ^0.4.9
         version: 0.4.14(@solana/web3.js@1.98.4(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6))(bufferutil@4.1.0)(fastestsmallesttextencoderdecoder@1.0.22)(typescript@5.9.3)(utf-8-validate@6.0.6)
@@ -738,8 +738,8 @@ packages:
   '@jridgewell/sourcemap-codec@1.5.5':
     resolution: {integrity: sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og==}
 
-  '@lightprotocol/stateless.js@0.23.0-beta.5':
-    resolution: {integrity: sha512-r8scroPiZ2kae3HQsqIqeeKNERH8/IW9ZvX/l+Bb82ioSBWnPTU+OVA7Kalaj7VPrLbhsXt4U971/QClnDakGg==}
+  '@lightprotocol/stateless.js@0.23.3':
+    resolution: {integrity: sha512-ox0pPN1X4IAkGsMB/E03S3ttQvY6JWlGan90Bw4vvFWCD0Q5ivfd9Og1AqYJI+xliYzn7m8ngHcUJtCka+5Tyg==}
     peerDependencies:
       '@solana/web3.js': '>=1.73.5'
 
@@ -2236,6 +2236,7 @@ packages:
 
   uuid@8.3.2:
     resolution: {integrity: sha512-+NYs2QeMWy+GWFOEm9xnn6HCDp0l7QBD7ml8zLUmJ+93Q5NF0NocErnwkTkXVFNiX3/fpC6afS8Dhb/gz7R7eg==}
+    deprecated: uuid@10 and below is no longer supported.  For ESM codebases, update to uuid@latest.  For CommonJS codebases, use uuid@11 (but be aware this version will likely be deprecated in 2028).
     hasBin: true
 
   vary@1.1.2:
@@ -2841,7 +2842,7 @@ snapshots:
 
   '@jridgewell/sourcemap-codec@1.5.5': {}
 
-  '@lightprotocol/stateless.js@0.23.0-beta.5(@solana/web3.js@1.98.4(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6))':
+  '@lightprotocol/stateless.js@0.23.3(@solana/web3.js@1.98.4(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6))':
     dependencies:
       '@coral-xyz/borsh': 0.29.0(@solana/web3.js@1.98.4(bufferutil@4.1.0)(typescript@5.9.3)(utf-8-validate@6.0.6))
       '@noble/hashes': 1.5.0
