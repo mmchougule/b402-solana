@@ -58,7 +58,7 @@ cloned_ref_to_slice_refs = "allow"
 
 [workspace.dependencies]
 # Pinned to stay below edition2024-requiring releases until solana's bundled rustc bumps.
-indexmap = "=2.9.0"
+indexmap = "=2.14.0"
 
 anchor-lang = "0.30.1"
 anchor-spl = "0.30.1"

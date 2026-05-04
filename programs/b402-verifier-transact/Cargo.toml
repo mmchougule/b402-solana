@@ -24,7 +24,7 @@ solana-program.workspace = true
 thiserror.workspace = true
 # Force a pre-edition2024 indexmap so Solana's bundled rustc 1.84.1 can build.
 # Unpinning requires rustc ≥1.85 in the solana toolchain.
-indexmap = { version = "=2.9.0" }
+indexmap = { version = "=2.14.0" }
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }
