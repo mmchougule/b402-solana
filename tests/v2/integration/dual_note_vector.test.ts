@@ -39,13 +39,11 @@ const FIXTURE = {
  * the assertion will fail printing the actual hex; copy it into both this
  * file and the Rust test, then re-run both to confirm parity.
  */
-const EXPECTED_COMMITMENT_B_HEX = '' as const; // TODO: fill after first run
+const EXPECTED_COMMITMENT_B_HEX =
+  'e7c90af0bf88c9e1ceb3ed40a4f9151982b38b4b61d34b6bcec5a55aab472315' as const;
 
 describe('Phase 9 — dual-note commitment_b parity', () => {
-  // The first assertion intentionally fails until the trusted-setup ceremony
-  // pins EXPECTED_COMMITMENT_B_HEX. Skip it in CI so the suite stays green
-  // pre-ceremony; flip back to `it` once the hex is filled in.
-  it.skip('SDK produces a deterministic commitment_b for the frozen fixture', async () => {
+  it('SDK produces a deterministic commitment_b for the frozen fixture', async () => {
     const randomB = await deriveExcessRandom(FIXTURE.commitmentA);
     const commitmentB = await computeExcessCommitment(
       FIXTURE.outMintFr,

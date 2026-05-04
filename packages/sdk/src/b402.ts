@@ -36,7 +36,14 @@ import {
   createAssociatedTokenAccountInstruction,
 } from '@solana/spl-token';
 import { keccak_256 } from '@noble/hashes/sha3';
-import { randomBytes as nodeRandomBytes } from 'node:crypto';
+// Browser-safe randomBytes. crypto.getRandomValues is in WebCrypto (browser
+// AND Node 18+ via globalThis.crypto), so we don't need node:crypto here.
+function nodeRandomBytes(n: number): Uint8Array {
+  const out = new Uint8Array(n);
+  // globalThis.crypto exists in browsers, workers, and Node 18+.
+  (globalThis.crypto as Crypto).getRandomValues(out);
+  return out;
+}
 import { FR_MODULUS, PROGRAM_IDS, B402_ALT_DEVNET, B402_ALT_MAINNET, leToFrReduced } from '@b402ai/solana-shared';
 import type { SpendableNote } from '@b402ai/solana-shared';
 import {
@@ -47,6 +54,8 @@ import {
 } from '@b402ai/solana-prover';
 
 import { buildWallet, type Wallet } from './wallet.js';
+import { KeypairSigner, type B402Signer } from './signer.js';
+import { derivePendingInputsPda } from './commit-inputs.js';
 import { NoteStore } from './note-store.js';
 import { shield, type ShieldResult } from './actions/shield.js';
 import { unshield, type UnshieldResult } from './actions/unshield.js';
@@ -61,11 +70,10 @@ import {
   vaultPda,
 } from './programs/pda.js';
 import { instructionDiscriminator, concat, u16Le, u32Le, u64Le, vecU8 } from './programs/anchor.js';
-import { buildZeroCache, proveMostRecentLeaf } from './merkle.js';
+import { buildZeroCache, proveMostRecentLeaf, type MerkleProof } from './merkle.js';
+import { B402Indexer } from './indexer.js';
 import { commitmentHash, feeBindHash, nullifierHash, poseidonTagged } from './poseidon.js';
-// Phase 9 helpers (deriveExcessRandom, computeExcessCommitment) are exposed
-// via ./index.ts for downstream code; b402.ts itself doesn't call them in
-// the Phase 7B (default-deployed) wire shape.
+import { computeExcessCommitment, deriveExcessRandom } from './excess.js';
 import { encryptNote } from './note-encryption.js';
 import { B402Error, B402ErrorCode } from './errors.js';
 import {
@@ -80,8 +88,15 @@ const SYSVAR_INSTRUCTIONS = new PublicKey('Sysvar1nstructions1111111111111111111
 
 export interface B402SolanaConfig {
   cluster: 'mainnet' | 'devnet' | 'localnet';
-  /** Signer for shield/unshield txs. Used as depositor and (by default) as relayer. */
-  keypair: Keypair;
+  /** Solana keypair owning the seed (legacy path: Node, MCP, tests). The
+   *  SDK wraps it as a KeypairSigner internally. Pass this OR `signer`,
+   *  not both. */
+  keypair?: Keypair;
+  /** B402Signer abstraction (browser path with WalletAdapterSigner, or any
+   *  custom impl). When passed, on-chain signing routes through
+   *  `signer.signTransaction` and the wallet seed comes from
+   *  `signer.getSeed()`. Pass this OR `keypair`, not both. */
+  signer?: B402Signer;
   rpcUrl?: string;
   /** Pre-built transact prover. If omitted, callers must pass `proverArtifacts`. */
   prover?: TransactProver;
@@ -121,6 +136,23 @@ export interface B402SolanaConfig {
    * default when set.
    */
   inlineCpiNullifier?: boolean;
+  /**
+   * Indexer URL. When set, unshield + privateSwap fetch Merkle proofs for
+   * any leaf via `/v1/proof?leafIndex=N` — closes the rightmost-only
+   * limitation of `proveMostRecentLeaf` and unblocks multi-deposit
+   * unshield in any order, cross-device note discovery, and double-spend
+   * pre-checks.
+   *
+   * The indexer is a CONVENIENCE oracle: SDK still verifies the indexer's
+   * claimed `root` against the on-chain TreeState before using any proof,
+   * so a tampered indexer can DoS but cannot trick the SDK into emitting
+   * a forgeable spend.
+   *
+   * Leave undefined to fall back to `proveMostRecentLeaf` (rightmost-only).
+   * Recommended in production: set to the team-operated b402 indexer URL
+   * and let the SDK auto-fall-back if it goes down.
+   */
+  indexerUrl?: string;
 }
 
 export interface ShieldRequest {
@@ -186,6 +218,32 @@ export interface PrivateSwapRequest {
   /** Phase 7 per-call override of `B402SolanaConfig.inlineCpiNullifier`.
    *  See its docs. */
   inlineCpiNullifier?: boolean;
+  /**
+   * Phase 9 dual-note minting: when actual_out > expected_out, the pool
+   * mints a SECOND commitment for the excess and emits its leaf. The SDK
+   * mirrors that derivation locally and inserts the extra `SpendableNote`
+   * so the user can spend it without an indexer round-trip.
+   *
+   * Default **false** — produces the Phase 7B 23-public-input wire shape
+   * the deployed mainnet pool expects. Flip to **true** ONLY against a
+   * pool + verifier_adapt built with `--features phase_9_dual_note`,
+   * paired with the regenerated 24-input adapt VK from the trusted-setup
+   * ceremony. The two halves must ship together; mismatch produces
+   * verifier rejection at runtime.
+   */
+  phase9DualNote?: boolean;
+  /** PRD-35 per-call switch for the 2-tx commit-then-verify flow.
+   *  When true:
+   *    1. SDK builds + submits a `pool::commit_inputs` tx that writes the
+   *       Phase 9 24×32 B public inputs into a per-user PDA.
+   *    2. SDK then submits the `pool::adapt_execute` tx which references
+   *       the PDA; the verifier reads inputs from acct.data instead of
+   *       carrying them inline.
+   *  Saves ~700-735 B on the adapt_execute tx — lifts the v0-tx 1232 B
+   *  ceiling that today blocks per-user adapters at scale.
+   *  Pool MUST be built with `--features prd_35_pending_inputs` for this
+   *  to work (default off in current mainnet pool). */
+  pendingInputsMode?: boolean;
 }
 
 export interface PrivateSwapResult {
@@ -280,12 +338,24 @@ export class B402Solana {
   readonly connection: Connection;
   readonly cluster: B402SolanaConfig['cluster'];
   readonly programIds: typeof PROGRAM_IDS;
-  readonly keypair: Keypair;
+  /** Active signer abstraction. Always present; KeypairSigner under the
+   *  legacy `keypair` config, WalletAdapterSigner (or other) under
+   *  `signer` config. */
+  readonly signer: B402Signer;
+  /** Legacy back-compat accessor. Returns the underlying Solana Keypair
+   *  ONLY when the SDK was constructed with `keypair: Keypair` (i.e. the
+   *  KeypairSigner path). Returns null for any other Signer impl
+   *  (browser, hardware-wallet, custom relayer-backed). */
+  readonly keypair: Keypair | null;
   readonly relayer: Keypair;
   readonly notesPersistDir: string | undefined;
   readonly relayerHttpUrl: string | undefined;
   readonly relayerApiKey: string | undefined;
   readonly inlineCpiNullifier: boolean;
+  /** Indexer client. Lazily created from `config.indexerUrl` if present.
+   *  Null when no indexerUrl was passed → SDK falls back to
+   *  proveMostRecentLeaf (rightmost-only). */
+  readonly indexer: B402Indexer | null;
   private _relayerHttp: { client: import('./relayer-http.js').RelayerHttpClient } | null = null;
 
   private _wallet: Wallet | null = null;
@@ -306,12 +376,55 @@ export class B402Solana {
     const rpcUrl = config.rpcUrl ?? defaultRpc(config.cluster);
     this.connection = new Connection(rpcUrl, 'confirmed');
     this.programIds = { ...PROGRAM_IDS, ...(config.programIds ?? {}) };
-    this.keypair = config.keypair;
-    this.relayer = config.relayer ?? config.keypair;
+
+    if (config.keypair && config.signer) {
+      throw new Error(
+        'B402Solana: pass `keypair` OR `signer`, not both. Use `signer: new KeypairSigner(kp)` to be explicit, or stick with the legacy `keypair` field.',
+      );
+    }
+    if (!config.keypair && !config.signer) {
+      throw new Error(
+        'B402Solana: must pass either `keypair: Keypair` (Node/MCP) or `signer: B402Signer` (browser, see WalletAdapterSigner.fromAdapter).',
+      );
+    }
+    if (config.signer) {
+      this.signer = config.signer;
+      // Preserve back-compat accessor: only Keypair-backed signers expose
+      // the underlying Keypair via `b402.keypair`. Browser-derived signers
+      // by design do NOT have one.
+      this.keypair = config.signer instanceof KeypairSigner
+        ? (config.signer as KeypairSigner).keypair
+        : null;
+    } else {
+      // config.keypair is set per the check above.
+      this.keypair = config.keypair!;
+      this.signer = new KeypairSigner(config.keypair!);
+    }
+    // Relayer is the on-chain fee payer for shield/unshield self-submit
+    // paths. When the user is a Keypair we can default to them; for
+    // browser-derived signers there is no Keypair to fall back on, so the
+    // caller MUST configure either an HTTP relayer (relayerHttpUrl) or
+    // pass `relayer` explicitly. shield/unshield will surface a clear
+    // error at call time if neither is set.
+    this.relayer = config.relayer ?? this.keypair ?? (undefined as unknown as Keypair);
     this.notesPersistDir = config.notesPersistDir;
     this.relayerHttpUrl = config.relayerHttpUrl;
     this.relayerApiKey = config.relayerApiKey;
     this.inlineCpiNullifier = config.inlineCpiNullifier ?? false;
+    // Indexer is opt-in. When set, the SDK uses /v1/proof to support
+    // spend-any-leaf; on indexer error it logs and falls back to the
+    // rightmost-only proveMostRecentLeaf so a transient outage doesn't
+    // brick all spend flows.
+    // NOTE: must be a STATIC import (top of file). The package is
+    // `"type": "module"` so `require` is undefined at runtime — using it
+    // here was the 0.0.13 bug that broke MCP startup on every tool call.
+    this.indexer = config.indexerUrl
+      ? new B402Indexer({
+          url: config.indexerUrl,
+          connection: this.connection,
+          poolProgramId: new PublicKey(this.programIds.b402Pool),
+        })
+      : null;
 
     if (config.prover) {
       this._prover = config.prover;
@@ -333,8 +446,11 @@ export class B402Solana {
   /** Lazy-init wallet + note store. Idempotent. */
   async ready(): Promise<void> {
     if (!this._wallet) {
-      // Deterministic b402 wallet seeded from the Solana keypair's ed25519 secret.
-      this._wallet = await buildWallet(this.keypair.secretKey.slice(0, 32));
+      // Deterministic b402 wallet seeded from the active signer. For
+      // KeypairSigner this is `keypair.secretKey[0..32]` (preserves
+      // pre-0.0.18 derivation). For WalletAdapterSigner this is
+      // sha256(adapter.signMessage(canonicalMsg))[0..32] — see signer.ts.
+      this._wallet = await buildWallet(this.signer.getSeed());
     }
     if (!this._notes) {
       this._notes = new NoteStore({
@@ -395,7 +511,7 @@ export class B402Solana {
     tokens: Array<{ mint: string; amount: string; decimals: number; tokenAccount: string }>;
   }> {
     await this.ready();
-    const owner = this.keypair.publicKey;
+    const owner = this.signer.publicKey;
     const [lamports, tokenAccounts] = await Promise.all([
       this.connection.getBalance(owner, 'confirmed'),
       this.connection.getParsedTokenAccountsByOwner(owner, { programId: TOKEN_PROGRAM_ID }, 'confirmed'),
@@ -441,7 +557,7 @@ export class B402Solana {
     // 2. User's own token accounts — anyone they hold a balance of.
     try {
       const r = await this.connection.getTokenAccountsByOwner(
-        this.keypair.publicKey,
+        this.signer.publicKey,
         { programId: TOKEN_PROGRAM_ID },
       );
       for (const acc of r.value) {
@@ -466,7 +582,7 @@ export class B402Solana {
 
     const depositorAta = await getAssociatedTokenAddress(
       req.mint,
-      this.keypair.publicKey,
+      this.signer.publicKey,
     );
 
     // Resolve cluster-default ALT for shield. Required when publishing
@@ -490,7 +606,7 @@ export class B402Solana {
       wallet: this._wallet!,
       mint: req.mint,
       depositorAta,
-      depositor: this.keypair,
+      depositor: this.signer,
       relayer: this.relayer,
       amount: req.amount,
       omitEncryptedNotes,
@@ -582,20 +698,7 @@ export class B402Solana {
     }
 
     const poolProgramId = new PublicKey(this.programIds.b402Pool);
-    const tree = await fetchTreeState(
-      this.connection,
-      treeStatePda(poolProgramId),
-    );
-    const zeroCache = await buildZeroCache();
-    const zeroCacheLe = zeroCache.map(bigintToLe32);
-    const rootBig = leToBigEndian(tree.currentRoot);
-    const merkleProof = proveMostRecentLeaf(
-      note.commitment,
-      note.leafIndex,
-      rootBig,
-      tree.frontier,
-      zeroCacheLe,
-    );
+    const merkleProof = await this._proveLeafForSpend(note);
 
     const result = await unshield({
       connection: this.connection,
@@ -655,6 +758,49 @@ export class B402Solana {
     throw new B402Error(
       B402ErrorCode.RpcError,
       `tx ${signature} could not be confirmed within 6s — note NOT marked spent (retry safe)`,
+    );
+  }
+
+  /**
+   * Resolve a Merkle proof for a leaf the SDK is about to spend.
+   *
+   * Two paths:
+   *   - Indexer configured AND healthy → use `/v1/proof?leafIndex=N`. Works
+   *     for ANY leaf, not just the rightmost. Closes the proveMostRecentLeaf
+   *     gap that breaks multi-deposit unshield in arbitrary order.
+   *   - Otherwise → `proveMostRecentLeaf` against the on-chain frontier.
+   *     Works only when `note.leafIndex == treeState.leafCount - 1`. The
+   *     caller must hold the most-recently-shielded note OR will hit
+   *     Transact_221 MerkleVerify failures inside the prover.
+   *
+   * On indexer error (network failure, stale state, root mismatch) we log
+   * via stderr and fall back to proveMostRecentLeaf so a transient outage
+   * doesn't brick the rightmost-only spend that always works.
+   */
+  private async _proveLeafForSpend(note: SpendableNote): Promise<MerkleProof> {
+    if (this.indexer) {
+      try {
+        return await this.indexer.proveLeaf(note.leafIndex);
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `b402: indexer proof for leaf ${note.leafIndex} failed (${
+            (e as Error).message
+          }) — falling back to proveMostRecentLeaf. Multi-deposit spend in arbitrary order will fail until indexer recovers.`,
+        );
+      }
+    }
+    const poolProgramId = new PublicKey(this.programIds.b402Pool);
+    const tree = await fetchTreeState(this.connection, treeStatePda(poolProgramId));
+    const zeroCache = await buildZeroCache();
+    const zeroCacheLe = zeroCache.map(bigintToLe32);
+    const rootBig = leToBigEndian(tree.currentRoot);
+    return proveMostRecentLeaf(
+      note.commitment,
+      note.leafIndex,
+      rootBig,
+      tree.frontier,
+      zeroCacheLe,
     );
   }
 
@@ -742,16 +888,7 @@ export class B402Solana {
     // 2. Tree state + merkle proof for the input note.
     const poolProgramId = new PublicKey(this.programIds.b402Pool);
     const tree = await fetchTreeState(this.connection, treeStatePda(poolProgramId));
-    const zeroCache = await buildZeroCache();
-    const zeroCacheLe = zeroCache.map(bigintToLe32);
-    const rootBig = leToBigEndian(tree.currentRoot);
-    const merkleProof = proveMostRecentLeaf(
-      note.commitment,
-      note.leafIndex,
-      rootBig,
-      tree.frontier,
-      zeroCacheLe,
-    );
+    const merkleProof = await this._proveLeafForSpend(note);
 
     // 3. Build output note (single non-dummy out commitment).
     const outRandom = leToFrReduced(new Uint8Array(nodeRandomBytes(32)));
@@ -778,11 +915,14 @@ export class B402Solana {
     const nullifierVal = await nullifierHash(this._wallet!.spendingPriv, note.leafIndex);
     const nullifierLe = bigintToLe32(nullifierVal);
 
-    // 5. Witness.
+    // 5. Witness. The merkleProof's `root` IS the on-chain root the prover
+    //    needs — comes from indexer (verified against TreeState) or from
+    //    proveMostRecentLeaf (which read tree.currentRoot directly).
     const feeBind = await feeBindHash(0n, 0n);
     const recipientBindVal = await poseidonTagged('recipientBind', 0n, 0n);
+    const zeroCacheBig = await buildZeroCache();
     const witness: AdaptWitness = {
-      merkleRoot: rootBig,
+      merkleRoot: merkleProof.root,
       nullifier: [nullifierVal, 0n],
       commitmentOut: [outCommitment, 0n],
       publicAmountIn: req.amount,
@@ -812,7 +952,7 @@ export class B402Solana {
       inRandom: [note.random, 0n],
       inSpendingPriv: [this._wallet!.spendingPriv, 1n],
       inLeafIndex: [note.leafIndex, 0n],
-      inSiblings: [merkleProof.siblings, zeroCache.slice(0, 26)],
+      inSiblings: [merkleProof.siblings, zeroCacheBig.slice(0, 26)],
       inPathBits: [merkleProof.pathBits, Array(26).fill(0)],
       inIsDummy: [0, 1],
       outValue: [expectedOut, 0n],
@@ -827,6 +967,45 @@ export class B402Solana {
 
     // 6. Generate the adapt proof.
     const proof = await this._adaptProver.prove(witness);
+
+    // PRD-35 §5.4 — 2-tx commit-then-verify orchestration. When the
+    // caller opts into pendingInputsMode, we land a `pool::commit_inputs`
+    // tx FIRST that writes the 24×32 B public inputs into a per-user
+    // PDA. The follow-up adapt_execute then carries only the proof
+    // inline; the verifier reads inputs from the PDA. Saves ~700-735 B
+    // on the heavyweight tx, lifting the v0-tx 1232 B ceiling that
+    // today blocks per-user adapters at scale.
+    if (req.pendingInputsMode) {
+      const { buildCommitInputsIx } = await import('./commit-inputs.js');
+      const spendingPubLe = bigintToLe32(this._wallet!.spendingPub);
+      const commitIx = buildCommitInputsIx({
+        poolProgramId: new PublicKey(this.programIds.b402Pool),
+        spendingPubLe,
+        inputs: proof.publicInputsLeBytes.map((b) => new Uint8Array(b)),
+        relayer: relayerPubkey,
+      });
+      const commitBlockhash = (await this.connection.getLatestBlockhash('confirmed')).blockhash;
+      const commitMsg = new TransactionMessage({
+        payerKey: relayerPubkey,
+        recentBlockhash: commitBlockhash,
+        instructions: [commitIx],
+      }).compileToV0Message();
+      const commitVtx = new VersionedTransaction(commitMsg);
+      // Local relayer signs commit_inputs (it's the payer for any
+      // first-time PDA alloc). HTTP relayer's bundle support for the
+      // commit-tx is V1.5 — for now, self-submit via local relayer
+      // while the heavyweight adapt_execute may still go through the
+      // HTTP relayer below.
+      commitVtx.sign([this.relayer]);
+      const csig = await this.connection.sendRawTransaction(commitVtx.serialize(), {
+        skipPreflight: false,
+        preflightCommitment: 'confirmed',
+      });
+      await this.connection.confirmTransaction(
+        { signature: csig, blockhash: commitBlockhash, lastValidBlockHeight: (await this.connection.getLatestBlockhash()).lastValidBlockHeight },
+        'confirmed',
+      );
+    }
 
     // 7. Adapter ix data: default mock-adapter shape (discriminator + amount +
     //    expected_out + Vec<u8> action_payload). Caller can override for real
@@ -847,6 +1026,16 @@ export class B402Solana {
 
     // Resolve effective inline-CPI mode (per-call > class > default false).
     const inlineNullifierCpi = req.inlineCpiNullifier ?? this.inlineCpiNullifier;
+    // Phase 9 wire shape — cluster-aware default.
+    //   mainnet: TRUE (Phase 9 deployed 2026-05-02 at slot 417190656;
+    //                  pool's borsh deserializer rejects 23-input wire)
+    //   devnet:  TRUE (Phase 9 deployed 2026-05-02; same shape)
+    //   localnet: FALSE (caller controls the validator's binary; opt in)
+    // Per-call override always wins. Set explicit false ONLY when running
+    // against a self-built pool that doesn't have phase_9_dual_note feature.
+    const phase9DualNote = req.phase9DualNote ?? (
+      this.cluster === 'mainnet' || this.cluster === 'devnet'
+    );
 
     // 9. Fetch validity proof first — it's needed by both the sibling ix
     //    (legacy mainnet path) and the inline-CPI payload (Phase 7 path).
@@ -888,10 +1077,16 @@ export class B402Solana {
       // -32 bytes per adapt_execute, offsetting the +32B from out_spending_pub
       // so net wire stays at the Phase 7B size.
       u64Le(expectedOut),
-      // Phase 9 dual-note out_spending_pub byte goes here when the
-      // matching pool/verifier feature lands post-ceremony. Pool's default
-      // build (Phase 7B) does not consume this byte — adding it now would
-      // make the wire deserialize 32 bytes off.
+      // Phase 9 dual-note out_spending_pub byte. Conditionally appended:
+      // pool's default build (Phase 7B) does NOT consume it — including
+      // it shifts the borsh deserializer 32 bytes off the action_payload
+      // and produces an opaque "InvalidConfig" rejection. Phase 9 build
+      // (--features phase_9_dual_note) DOES consume it. The byte is read
+      // from the proof's public input slot 23 (the prover already lifts
+      // outSpendingPubA there). If the prover artifact is the older
+      // 23-input zkey, slot 23 is undefined — caller must pair phase9
+      // wire-shape with phase9 prover artifacts.
+      ...(phase9DualNote ? [proof.publicInputsLeBytes[23]] : []),
       u32Le(0), // encrypted_notes vec len = 0 (omit on-chain to save bytes)
       new Uint8Array([0b10]), // in_dummy_mask (slot 0 real, slot 1 dummy)
       new Uint8Array([0b10]), // out_dummy_mask
@@ -935,6 +1130,20 @@ export class B402Solana {
       { pubkey: req.adapterOutTa, isSigner: false, isWritable: true },
       { pubkey: feeAtaSentinel, isSigner: false, isWritable: true },
       { pubkey: SYSVAR_INSTRUCTIONS, isSigner: false, isWritable: false },
+      // PRD-35 — pending_inputs PDA, only when mode is enabled.
+      // Pool's AdaptExecute Anchor account list places `pending_inputs`
+      // BETWEEN instructions_sysvar and token_program when the
+      // prd_35_pending_inputs feature is on. SDK must match that order.
+      ...(req.pendingInputsMode
+        ? [{
+            pubkey: derivePendingInputsPda(
+              new PublicKey(this.programIds.b402Pool),
+              bigintToLe32(this._wallet!.spendingPub),
+            )[0],
+            isSigner: false,
+            isWritable: true,
+          }]
+        : []),
       { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       // remaining_accounts: inline nullifier block (Phase 7 only) then
@@ -1073,14 +1282,47 @@ export class B402Solana {
     // directly so the next balance/holdings reflects it without RPC.
     this._notes!.insertNote(outNote);
 
-    // Phase 9 dual-note local-mirror block lives here when the on-chain
-    // feature ships. The deterministic-derivation helpers
-    // (`deriveExcessRandom`, `computeExcessCommitment`) are exported from
-    // ./excess.js so the integration is mechanical — read commitment_a +
-    // TAG_EXCESS, derive random_b + commitment_b, insertNote at leafCount+1.
-    // Until then, excess delta stays in the shared vault (Phase 7B
-    // behaviour, what's currently deployed on mainnet).
-    const excessNote: SpendableNote | undefined = undefined;
+    // Phase 9 dual-note local mirror. When the pool's `excess > 0` block
+    // fires, it appends a SECOND leaf at `tree.leafCount + 1` whose
+    // commitment is deterministically derived from values the SDK already
+    // knows. We rebuild the same SpendableNote here so the next
+    // balance/holdings call sees the excess without an indexer round-trip.
+    //
+    // Determinism contract (must stay byte-equal to
+    // programs/b402-pool/src/instructions/adapt_execute.rs):
+    //   random_b      = Poseidon(TAG_EXCESS, commitment_a) LE
+    //   commitment_b  = Poseidon(TAG_COMMIT, outMintFr, excess, random_b, spendingPub) LE
+    // Verified bit-equal by tests/v2/integration/dual_note_vector.test.ts.
+    let excessNote: SpendableNote | undefined;
+    if (phase9DualNote) {
+      const excess = outAmount - expectedOut;
+      if (excess > 0n) {
+        const randomB = await deriveExcessRandom(outCommitment);
+        const commitmentB = await computeExcessCommitment(
+          outMintFr,
+          excess,
+          randomB,
+          this._wallet!.spendingPub,
+        );
+        excessNote = {
+          tokenMint: outMintFr,
+          value: excess,
+          random: randomB,
+          spendingPub: this._wallet!.spendingPub,
+          spendingPriv: this._wallet!.spendingPriv,
+          commitment: commitmentB,
+          // Pool appends commitment_a at leafCount, commitment_b at +1.
+          leafIndex: tree.leafCount + 1n,
+          // No on-chain ciphertext for the excess leaf — pool emits zero
+          // padding. SDK reconstructs the plaintext locally; the keys we
+          // need to spend it are already on this device.
+          encryptedBytes: new Uint8Array(0),
+          ephemeralPub: new Uint8Array(0),
+          viewingTag: new Uint8Array(0),
+        };
+        this._notes!.insertNote(excessNote);
+      }
+    }
 
     this.learnMint(req.inMint);
     this.learnMint(req.outMint);
@@ -1186,7 +1428,7 @@ export class B402Solana {
     const explorer = (kind: 'account', addr: string) =>
       `https://solscan.io/${kind}/${addr}${this.cluster === 'devnet' ? '?cluster=devnet' : ''}`;
     return {
-      user: this.keypair.publicKey.toBase58(),
+      user: this.signer.publicKey.toBase58(),
       cluster: this.cluster,
       public: {
         sol: { lamports: publicSide.sol.amount, ui: (Number(publicSide.sol.amount) / 1e9).toFixed(6) },
@@ -1204,7 +1446,7 @@ export class B402Solana {
         balances: privateSide,
       },
       links: {
-        userOnSolscan: explorer('account', this.keypair.publicKey.toBase58()),
+        userOnSolscan: explorer('account', this.signer.publicKey.toBase58()),
         poolOnSolscan: explorer('account', this.programIds.b402Pool.toString()),
       },
     };
@@ -1306,6 +1548,12 @@ export class B402Solana {
     url.searchParams.set('outputMint', opts.outMint.toBase58());
     url.searchParams.set('amount', opts.amount.toString());
     url.searchParams.set('slippageBps', String(slippageBps));
+    // Match the route restrictions used by privateSwap's internal Jupiter
+    // call — otherwise an agent gets a best-route quote then a Phoenix-direct
+    // execution and sees a phantom "16% slippage" gap. Drop these once the
+    // multi-DEX ALT extender ships (Phase 8).
+    url.searchParams.set('onlyDirectRoutes', 'true');
+    url.searchParams.set('dexes', 'Phoenix');
 
     const resp = await fetch(url, { headers: { accept: 'application/json' } });
     if (!resp.ok) {

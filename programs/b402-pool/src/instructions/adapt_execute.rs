@@ -214,6 +214,18 @@ pub struct AdaptExecute<'info> {
     #[account(address = anchor_lang::solana_program::sysvar::instructions::ID)]
     pub instructions_sysvar: AccountInfo<'info>,
 
+    /// PRD-35 §5.3 — per-user pending-inputs PDA. Pool validates it's
+    /// the canonical PDA derived from `pi.out_spending_pub` (the same
+    /// 32 B that appear as Phase 9's outSpendingPub[0] public input),
+    /// reads the inputs through verifier-adapt's new ix variant, and
+    /// zeroes `version` after successful verify (replay protection).
+    /// Only required under `prd_35_pending_inputs`. Default builds use
+    /// the inline-inputs verify path and ignore this account.
+    /// CHECK: handler validates seeds + version field.
+    #[cfg(feature = "prd_35_pending_inputs")]
+    #[account(mut)]
+    pub pending_inputs: UncheckedAccount<'info>,
+
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
 }
@@ -337,9 +349,80 @@ pub fn handler<'info>(
     }
 
     // Verify proof.
+    //
+    // PRD-35 §5.3 — pending_inputs path. Pool validates the per-user
+    // pending_inputs PDA matches the canonical derivation from
+    // pi.out_spending_pub, then asks verifier-adapt to read the inputs
+    // from account.data instead of carrying them inline. Saves ~768 B of
+    // ix data, lifting the v0-tx 1232 B ceiling for per-user adapters.
+    //
+    // The pool ALSO recomputes the inputs vector via build_public_inputs_
+    // for_adapt and asserts it matches the bytes the verifier will see.
+    // Otherwise a malicious caller could write OTHER inputs to a different
+    // PDA and pass that PDA in. Defence-in-depth: PDA derivation pins
+    // who-owns-the-inputs; byte-equality pins what-they-are.
     let public_inputs: Vec<[u8; 32]> = build_public_inputs_for_adapt(pi, &in_mint, &out_mint, &adapter_program_key, &computed_action_hash);
     let mut proof_bytes = [0u8; 256];
     proof_bytes.copy_from_slice(&args.proof);
+
+    #[cfg(feature = "prd_35_pending_inputs")]
+    {
+        // Phase 9 outSpendingPub is the per-user identifier. Pre-Phase-9
+        // builds don't carry this input; the prd_35 path requires Phase 9.
+        #[cfg(not(feature = "phase_9_dual_note"))]
+        compile_error!("prd_35_pending_inputs requires phase_9_dual_note (out_spending_pub is the PDA-scoping input)");
+
+        #[cfg(feature = "phase_9_dual_note")]
+        {
+            use crate::instructions::commit_inputs::{
+                PendingInputs, PENDING_INPUTS_SEED, VERSION_PREFIX,
+            };
+            let pending_acct = &ctx.accounts.pending_inputs;
+            // (1) Validate PDA derivation. Seeds match commit_inputs.rs.
+            let spending_pub_le = pi.out_spending_pub;
+            let (expected_pda, _bump) = Pubkey::find_program_address(
+                &[VERSION_PREFIX, PENDING_INPUTS_SEED, spending_pub_le.as_ref()],
+                &crate::ID,
+            );
+            require_keys_eq!(
+                pending_acct.key(),
+                expected_pda,
+                PoolError::ProofVerificationFailed
+            );
+            // (2) Validate the bytes match what we computed. Pool refuses to
+            // verify against an account whose contents disagree with the
+            // pool's recomputed pi vector — defends against PDA-hijack /
+            // wrong-inputs-substitution.
+            {
+                let acct_data = pending_acct.try_borrow_data()?;
+                require!(
+                    acct_data.len() >= 8 + PendingInputs::LEN,
+                    PoolError::ProofVerificationFailed
+                );
+                require!(acct_data[8] == 1, PoolError::ProofVerificationFailed);
+                for (i, want) in public_inputs.iter().enumerate() {
+                    let off = 8 + 1 + i * 32;
+                    let on_chain = &acct_data[off..off + 32];
+                    require!(on_chain == want.as_slice(), PoolError::ProofVerificationFailed);
+                }
+            }
+            // (3) Verify via account-inputs CPI.
+            verifier_cpi::invoke_verify_adapt_with_account_inputs(
+                &ctx.accounts.verifier_program,
+                &pending_acct.to_account_info(),
+                &proof_bytes,
+            )?;
+            // (4) Replay protection: zero the version byte. Subsequent
+            // verify attempts against this PDA fail (PendingInputsNotCommitted).
+            // We zero ONLY the version (1 byte) instead of the full 768 B
+            // inputs region — saves ~10k CU and is sufficient for replay
+            // protection (verifier requires version == 1 to read).
+            let mut acct_data = pending_acct.try_borrow_mut_data()?;
+            acct_data[8] = 0;
+        }
+    }
+
+    #[cfg(not(feature = "prd_35_pending_inputs"))]
     verifier_cpi::invoke_verify_adapt(
         &ctx.accounts.verifier_program,
         &proof_bytes,
@@ -530,10 +613,29 @@ pub fn handler<'info>(
         adapter_infos.push(a.clone());
     }
 
+    // PRD-33 Phase 33.1: stateful-adapter forwarding. When the target
+    // adapter is in the stateful list AND the pool is built with
+    // phase_9_dual_note (so `pi.out_spending_pub` is available), the inner
+    // action_payload is prefixed with the user's viewing_pub_hash before
+    // forwarding. Stateless adapters get the bytes verbatim. Path-2 builds
+    // (no phase_9_dual_note) skip the rewrite and ship the v0.1 wire
+    // unchanged — there's no out_spending_pub to forward.
+    #[cfg(feature = "phase_9_dual_note")]
+    let cpi_ix_data: Vec<u8> = if is_stateful_adapter(&adapter_program_key) {
+        prepend_viewing_pub_hash_to_action_payload(
+            &args.raw_adapter_ix_data,
+            &pi.out_spending_pub,
+        )?
+    } else {
+        args.raw_adapter_ix_data.clone()
+    };
+    #[cfg(not(feature = "phase_9_dual_note"))]
+    let cpi_ix_data: Vec<u8> = args.raw_adapter_ix_data.clone();
+
     let ix = Instruction {
         program_id: adapter_program_key,
         accounts: adapter_metas,
-        data: args.raw_adapter_ix_data.clone(),
+        data: cpi_ix_data,
     };
     invoke(&ix, &adapter_infos).map_err(|_| error!(PoolError::AdapterCallReverted))?;
 
@@ -610,13 +712,18 @@ pub fn handler<'info>(
             let out_mint_fr = util::reduce_le_mod_p(&out_mint.to_bytes());
             let commitment_a = pi.commitment_out[0];
 
-            // random_b = Poseidon(commitment_a, TAG_EXCESS) LE.
-            // Deterministic + collision-resistant + opaque on-chain. SDK
-            // mirrors this in packages/sdk/src/excess.ts::deriveExcessRandom.
+            // random_b = Poseidon(TAG_EXCESS, commitment_a) LE.
+            // Tag-first ordering matches `poseidonTagged` convention used by
+            // every other domain-tagged Poseidon call (commitment, nullifier,
+            // recipient_bind, ...). SDK mirrors this in
+            // packages/sdk/src/excess.ts::deriveExcessRandom which calls
+            // poseidonTagged('excess', commitmentA) = Poseidon(TAG, commitmentA).
+            // Reversing this order produces different bytes (Poseidon is a
+            // sponge construction; permuting inputs changes the digest).
             let random_b = hashv(
                 Parameters::Bn254X5,
                 Endianness::LittleEndian,
-                &[&commitment_a[..], &TAG_EXCESS[..]],
+                &[&TAG_EXCESS[..], &commitment_a[..]],
             )
             .map_err(|_| error!(PoolError::ProofVerificationFailed))?
             .to_bytes();
@@ -683,6 +790,89 @@ fn u64_to_fr_le(v: u64) -> [u8; 32] {
     out
 }
 
+// ---------------------------------------------------------------------------
+// PRD-33 Phase 33.1 — stateful-adapter forwarding.
+//
+// Stateful DeFi adapters (Kamino lend, Drift perps, Marginfi) require the
+// per-user `viewing_pub_hash` to derive their per-user owner PDA before
+// composing the protocol-level ix. The pool surfaces this value to the
+// adapter by surgically rewriting the adapter ix data: the inner
+// `action_payload` field is prefixed with the 32 B `pi.out_spending_pub`,
+// and the ix-data length prefix is bumped by 32. Stateless adapters
+// (Jupiter, Sanctum, mock) are forwarded byte-for-byte unchanged.
+//
+// `is_stateful_adapter` is a hardcoded const list rather than a registry
+// flag because:
+//   1. Adding a field to AdapterInfo would reshape the on-chain
+//      AdapterRegistry account, requiring a full re-init at upgrade time.
+//   2. New stateful adapters land alongside their adapter-program
+//      deployment — bumping the pool to add one entry to this list at the
+//      same time has equivalent operational cost (one upgrade tx).
+//   3. The list is auditable in source review; an off-chain registry
+//      flag is not.
+//
+// Adapter ix data layout (the universal b402 adapter ABI):
+//   [8 disc][8 in_amount][8 min_out][4 payload_len LE][payload bytes ...]
+// The transformation prepends the 32 B viewing_pub_hash to the payload
+// portion AND bumps the u32 length prefix accordingly.
+// ---------------------------------------------------------------------------
+
+/// Hardcoded list of stateful adapter program IDs (PRD-33 §6.1 — Choice C).
+/// Adding a stateful adapter = add its program ID here + bump the pool.
+fn is_stateful_adapter(program_id: &Pubkey) -> bool {
+    // Kamino lend adapter — per-user Obligation under PRD-33 §3.3.
+    const KAMINO_ADAPTER: Pubkey =
+        anchor_lang::pubkey!("2enwFgcGKJDqruHpCtvmhtxe3DYcV3k72VTvoGcdt2rX");
+    program_id == &KAMINO_ADAPTER
+}
+
+/// Offset in the adapter ix data at which the action_payload's u32 LE
+/// length prefix sits. Layout: `[8 disc][8 in_amount][8 min_out]
+/// [4 payload_len][payload bytes]`. Pinned by the b402 adapter ABI; any
+/// drift in the SDK's `concat(executeDisc, u64Le(amount), u64Le(out),
+/// vecU8(actionPayload))` builder mirrors here.
+const ACTION_PAYLOAD_LEN_OFFSET: usize = 8 + 8 + 8;
+const ACTION_PAYLOAD_BODY_OFFSET: usize = ACTION_PAYLOAD_LEN_OFFSET + 4;
+
+/// Surgically prepend `viewing_pub_hash` (32 B) to the action_payload
+/// embedded in `raw_ix_data`. Returns the new ix-data byte string.
+///
+/// Errors if `raw_ix_data` is shorter than the fixed prefix or if the
+/// embedded length prefix would overflow / overrun the input. Errors
+/// flow up as `InvalidInstructionData` so a malformed adapter ix from a
+/// buggy SDK aborts the tx cleanly instead of producing a silently-wrong
+/// CPI payload.
+fn prepend_viewing_pub_hash_to_action_payload(
+    raw_ix_data: &[u8],
+    viewing_pub_hash: &[u8; 32],
+) -> Result<Vec<u8>> {
+    require!(
+        raw_ix_data.len() >= ACTION_PAYLOAD_BODY_OFFSET,
+        crate::error::PoolError::InvalidInstructionData
+    );
+    let len_bytes: [u8; 4] = raw_ix_data
+        [ACTION_PAYLOAD_LEN_OFFSET..ACTION_PAYLOAD_BODY_OFFSET]
+        .try_into()
+        .map_err(|_| error!(crate::error::PoolError::InvalidInstructionData))?;
+    let original_payload_len = u32::from_le_bytes(len_bytes) as usize;
+    require!(
+        raw_ix_data.len() >= ACTION_PAYLOAD_BODY_OFFSET + original_payload_len,
+        crate::error::PoolError::InvalidInstructionData
+    );
+    // Defence against u32 overflow on the bumped length prefix — payloads
+    // are far below 4 GiB so this is paranoia, but it's free.
+    let new_payload_len: u32 = (original_payload_len as u32)
+        .checked_add(32)
+        .ok_or(error!(crate::error::PoolError::InvalidInstructionData))?;
+
+    let mut out = Vec::with_capacity(raw_ix_data.len() + 32);
+    out.extend_from_slice(&raw_ix_data[..ACTION_PAYLOAD_LEN_OFFSET]);
+    out.extend_from_slice(&new_payload_len.to_le_bytes());
+    out.extend_from_slice(viewing_pub_hash);
+    out.extend_from_slice(&raw_ix_data[ACTION_PAYLOAD_BODY_OFFSET..]);
+    Ok(out)
+}
+
 #[inline(never)]
 fn build_public_inputs_for_adapt(
     pi: &AdaptPublicInputs,
@@ -731,6 +921,130 @@ fn build_public_inputs_for_adapt(
     #[cfg(feature = "phase_9_dual_note")]
     v.push(pi.out_spending_pub);
     v
+}
+
+#[cfg(test)]
+mod stateful_adapter_forwarding_tests {
+    //! PRD-33 Phase 33.1 — pool-side action_payload rewrite.
+    //!
+    //! Pins:
+    //!   1. The 32-B viewing_pub_hash lands at the start of the inner
+    //!      action_payload byte-for-byte (so the adapter's
+    //!      `decode_per_user_payload` recovers it equal to what the prover
+    //!      bound).
+    //!   2. The u32 length prefix is bumped by exactly +32.
+    //!   3. The discriminator + in_amount + min_out + trailing bytes are
+    //!      preserved unchanged.
+    //!   4. Malformed inputs (too short, bad length prefix) error cleanly
+    //!      with `InvalidInstructionData` instead of panicking.
+    //!   5. The Kamino adapter program ID is recognised as stateful;
+    //!      arbitrary other program IDs are not.
+    use super::*;
+
+    fn build_adapter_ix_data(in_amount: u64, min_out: u64, payload: &[u8]) -> Vec<u8> {
+        // Mirrors examples/kamino-adapter-fork-deposit.ts and
+        // packages/sdk/src/b402.ts:911 default builder.
+        const EXECUTE_DISC: [u8; 8] = [130, 221, 242, 154, 13, 193, 189, 29];
+        let mut out = Vec::with_capacity(8 + 8 + 8 + 4 + payload.len());
+        out.extend_from_slice(&EXECUTE_DISC);
+        out.extend_from_slice(&in_amount.to_le_bytes());
+        out.extend_from_slice(&min_out.to_le_bytes());
+        out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
+
+    #[test]
+    fn prepend_inserts_hash_and_bumps_length() {
+        let original_payload: Vec<u8> = (0..49u8).collect(); // 49 B (KaminoAction::Deposit size).
+        let raw = build_adapter_ix_data(1_000_000, 950_000, &original_payload);
+        let h: [u8; 32] = [0xA1; 32];
+
+        let out = prepend_viewing_pub_hash_to_action_payload(&raw, &h).unwrap();
+
+        // Length prefix bumped by +32.
+        let new_len = u32::from_le_bytes(out[24..28].try_into().unwrap()) as usize;
+        assert_eq!(new_len, original_payload.len() + 32);
+
+        // Hash is byte-equal at offset 28..60.
+        assert_eq!(&out[28..60], &h);
+
+        // Original payload follows verbatim.
+        assert_eq!(&out[60..], original_payload.as_slice());
+
+        // Disc + in_amount + min_out untouched.
+        assert_eq!(&out[..24], &raw[..24]);
+
+        // Total grew by exactly 32.
+        assert_eq!(out.len(), raw.len() + 32);
+    }
+
+    #[test]
+    fn prepend_preserves_empty_payload_case() {
+        let raw = build_adapter_ix_data(1, 0, &[]);
+        let h: [u8; 32] = [0xBB; 32];
+        let out = prepend_viewing_pub_hash_to_action_payload(&raw, &h).unwrap();
+        assert_eq!(u32::from_le_bytes(out[24..28].try_into().unwrap()), 32);
+        assert_eq!(&out[28..60], &h);
+        assert_eq!(out.len(), raw.len() + 32);
+    }
+
+    #[test]
+    fn prepend_rejects_short_input() {
+        // Just the 8-B disc — way short of the 28-B minimum.
+        let raw = vec![0u8; 8];
+        let h = [0u8; 32];
+        assert!(prepend_viewing_pub_hash_to_action_payload(&raw, &h).is_err());
+    }
+
+    #[test]
+    fn prepend_rejects_truncated_payload() {
+        // Length prefix says payload is 100 B, but only 10 B follow.
+        let mut raw = vec![0u8; 24]; // disc + in + out
+        raw.extend_from_slice(&100u32.to_le_bytes());
+        raw.extend_from_slice(&[0u8; 10]);
+        let h = [0u8; 32];
+        assert!(prepend_viewing_pub_hash_to_action_payload(&raw, &h).is_err());
+    }
+
+    #[test]
+    fn kamino_adapter_id_is_stateful() {
+        let kamino: Pubkey =
+            anchor_lang::pubkey!("2enwFgcGKJDqruHpCtvmhtxe3DYcV3k72VTvoGcdt2rX");
+        assert!(is_stateful_adapter(&kamino));
+    }
+
+    #[test]
+    fn arbitrary_adapter_id_is_not_stateful() {
+        // The Jupiter adapter ID — stateless.
+        let arbitrary = Pubkey::new_unique();
+        assert!(!is_stateful_adapter(&arbitrary));
+    }
+
+    #[test]
+    fn round_trip_through_kamino_decoder_recovers_hash() {
+        // End-to-end: build adapter ix data, prepend, then verify the
+        // kamino-adapter-side decoder (replicated here as a standalone
+        // step) extracts the same hash. Catches subtle layout drift
+        // (e.g. wrong length-prefix endianness) without needing to load
+        // the kamino adapter as a workspace dep.
+        let inner_action: Vec<u8> = (0..49u8).collect();
+        let raw = build_adapter_ix_data(123, 0, &inner_action);
+        let h: [u8; 32] = [0x33; 32];
+        let rewritten = prepend_viewing_pub_hash_to_action_payload(&raw, &h).unwrap();
+
+        // Replicate kamino_adapter::decode_per_user_payload's prefix
+        // extraction. The adapter sees its own action_payload field
+        // (which, post-rewrite, starts with the 32-B hash followed by
+        // the original KaminoAction borsh).
+        let new_len =
+            u32::from_le_bytes(rewritten[24..28].try_into().unwrap()) as usize;
+        let action_payload = &rewritten[28..28 + new_len];
+        assert!(action_payload.len() > 32);
+        let recovered_hash: [u8; 32] = action_payload[..32].try_into().unwrap();
+        assert_eq!(recovered_hash, h);
+        assert_eq!(&action_payload[32..], inner_action.as_slice());
+    }
 }
 
 #[cfg(test)]
@@ -796,10 +1110,12 @@ mod excess_parity_tests {
         (commitment_a, out_mint_fr, spending_pub, excess)
     }
     fn compute_random_b(commitment_a: &[u8; 32]) -> [u8; 32] {
+        // Tag-first — must match the production handler at line ~616 and the
+        // SDK's deriveExcessRandom (poseidonTagged('excess', commitmentA)).
         hashv(
             Parameters::Bn254X5,
             Endianness::LittleEndian,
-            &[&commitment_a[..], &TAG_EXCESS[..]],
+            &[&TAG_EXCESS[..], &commitment_a[..]],
         )
         .unwrap()
         .to_bytes()
@@ -825,10 +1141,13 @@ mod excess_parity_tests {
         .unwrap()
         .to_bytes()
     }
-    /// Pinned LE-hex commitment_b for the frozen fixture. Empty until first
-    /// run; matches the TS fixture's placeholder. Update both at the same
-    /// time, never one without the other.
-    const EXPECTED_COMMITMENT_B_HEX: &str = "";
+    /// Pinned LE-hex commitment_b for the frozen fixture, generated against
+    /// the tag-first Poseidon ordering. Verified bit-equal between SDK
+    /// (circomlibjs) and on-chain hashv (light-poseidon). Update both this
+    /// file AND `tests/v2/integration/dual_note_vector.test.ts` at the
+    /// same time, never one without the other.
+    const EXPECTED_COMMITMENT_B_HEX: &str =
+        "e7c90af0bf88c9e1ceb3ed40a4f9151982b38b4b61d34b6bcec5a55aab472315";
     #[test]
     fn commitment_b_is_deterministic() {
         let (commitment_a, out_mint_fr, spending_pub, excess) = fixture();

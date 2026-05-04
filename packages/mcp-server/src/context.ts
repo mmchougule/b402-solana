@@ -177,6 +177,20 @@ export function loadContext(): B402Context {
     ? process.env.B402_INLINE_CPI === '1'
     : (cluster === 'mainnet' || cluster === 'devnet');
 
+  // Indexer URL — closes the spend-any-leaf gap for multi-deposit unshield
+  // and cross-device note discovery. When set, SDK fetches Merkle proofs
+  // for any leaf via /v1/proof, with cryptographic verification of the
+  // claimed root against the on-chain TreeState. Falls back to
+  // proveMostRecentLeaf (rightmost-only) on indexer error.
+  //   B402_INDEXER_URL    — explicit override
+  //   default mainnet     — team-operated Cloud Run service
+  //   default devnet      — empty (no indexer deployed for devnet yet)
+  const indexerUrl = process.env.B402_INDEXER_URL ?? (
+    cluster === 'mainnet'
+      ? 'https://b402-solana-indexer-api-62092339396.us-central1.run.app'
+      : undefined
+  );
+
   const b402 = new B402Solana({
     cluster,
     rpcUrl,
@@ -190,6 +204,7 @@ export function loadContext(): B402Context {
     ...(relayer ? { relayer } : {}),
     ...(relayerHttpUrl ? { relayerHttpUrl } : {}),
     ...(relayerApiKey ? { relayerApiKey } : {}),
+    ...(indexerUrl ? { indexerUrl } : {}),
   });
 
   // Cluster-default ALT for unshield/swap. Empty constant = no default;

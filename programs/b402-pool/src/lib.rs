@@ -121,6 +121,26 @@ pub mod b402_pool {
     ) -> Result<()> {
         instructions::adapt_execute::handler(ctx, args)
     }
+
+    /// PRD-35 §5.1 — write Groth16 public inputs into a per-user
+    /// `PendingInputs` PDA so a subsequent `adapt_execute` (or `transact`)
+    /// can read them from account data instead of carrying them inline.
+    /// Frees ~700-735 B per private op tx, lifting the 1232 B v0-tx
+    /// ceiling that today blocks per-user adapters.
+    pub fn commit_inputs(
+        ctx: Context<CommitInputs>,
+        spending_pub_le: [u8; 32],
+        public_inputs: Vec<[u8; 32]>,
+    ) -> Result<()> {
+        instructions::commit_inputs::commit_inputs(ctx, spending_pub_le, public_inputs)
+    }
+
+    /// PRD-35 §5.5 — admin-callable garbage collector for stale
+    /// pending_inputs PDAs. Refunds rent to the treasury when the user's
+    /// tx 2 never landed.
+    pub fn gc_pending_inputs(ctx: Context<GcPendingInputs>) -> Result<()> {
+        instructions::commit_inputs::gc_pending_inputs(ctx)
+    }
 }
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
