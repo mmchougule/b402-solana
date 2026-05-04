@@ -42,7 +42,7 @@ anchor-lang = { workspace = true, features = ["init-if-needed"] }
 anchor-spl.workspace = true
 thiserror.workspace = true
 bytemuck.workspace = true
-indexmap = { version = "=2.9.0" }
+indexmap = { version = "=2.14.0" }
 
 [lints]
 workspace = true
