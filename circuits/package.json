@@ -13,7 +13,7 @@
   "devDependencies": {
     "@noble/hashes": "^1.5.0",
     "@types/node": "^22.9.0",
-    "circom_tester": "^0.0.20",
+    "circom_tester": "^0.0.24",
     "circomlib": "^2.0.5",
     "circomlibjs": "^0.1.7",
     "fast-check": "^3.22.0",
