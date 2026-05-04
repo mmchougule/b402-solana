@@ -1351,9 +1351,9 @@ dependencies = [
 
 [[package]]
 name = "groth16-solana"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e88b742ab45083ea752bcece9bb0a1f8b9bdff52013a5f6b4dce77ac2b59f34c"
+checksum = "3a6d1ffb18dbf5cfc60b11bd7da88474c672870247c1e5b498619bcb6ba3d8f5"
 dependencies = [
  "ark-bn254 0.5.0",
  "ark-ec 0.5.0",
