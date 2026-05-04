@@ -133,11 +133,11 @@ pub mod b402_verifier_adapt {
         proof_c.copy_from_slice(&proof[192..256]);
 
         let mut public_inputs: [[u8; 32]; PUBLIC_INPUT_COUNT] = [[0u8; 32]; PUBLIC_INPUT_COUNT];
-        for i in 0..PUBLIC_INPUT_COUNT {
+        for (i, slot) in public_inputs.iter_mut().enumerate() {
             let off = 8 + 1 + i * 32;
             let mut le = [0u8; 32];
             le.copy_from_slice(&acct_data[off..off + 32]);
-            public_inputs[i] = reverse_endianness(&le);
+            *slot = reverse_endianness(&le);
         }
 
         verify_proof_be(&proof_a, &proof_b, &proof_c, &public_inputs).map_err(|e| error!(e))?;

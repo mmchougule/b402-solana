@@ -8,7 +8,10 @@
 //! Tx ordering (PRD-35 §3.2):
 //!   tx 1: `pool::commit_inputs(spending_pub_le, public_inputs)` — writes here.
 //!   tx 2: `pool::adapt_execute(proof, ...)` — reads from PDA, runs verifier
-//!         CPI, executes adapter, ZEROES the inputs region.
+//!         CPI, executes adapter, then zeroes the SINGLE version byte
+//!         (the 768 B inputs region is left intact — verifier requires
+//!         `version == 1` to read so a 1-byte zero is sufficient for
+//!         replay protection and saves ~10k CU vs full memzero).
 //!
 //! The PDA is scoped by the user's `spending_pub_le` (32 B little-endian
 //! Fr — the same bytes that appear as `outSpendingPub[0]` in the proof).
@@ -24,9 +27,12 @@ use crate::instructions::verifier_cpi::PUBLIC_INPUT_COUNT_ADAPT;
 
 /// Account stored at the per-user pending-inputs PDA.
 ///
-/// Layout: 8 (anchor disc) + 1 (version) + 32 × N (inputs) = 9 + 32N B.
-/// At Phase 9 (N=24): 9 + 768 = 777 B. Anchor adds 8 B padding for the
-/// account discriminator → 785 B accounted on-chain.
+/// On-chain account size: `space = 8 + PendingInputs::LEN` where
+/// `PendingInputs::LEN = 1 + 32 × PUBLIC_INPUT_COUNT_ADAPT` and the
+/// leading 8 bytes are Anchor's account discriminator. At Phase 9 with
+/// N = 24 inputs: 8 + 1 + 768 = **777 B total** allocated on chain.
+/// (No additional padding — the 8-byte discriminator is already counted
+/// in the `space` argument.)
 #[account]
 pub struct PendingInputs {
     /// 0 = empty / consumed. 1 = committed and ready for verify. Set to 1
@@ -98,9 +104,12 @@ pub fn commit_inputs(
 ///
 /// Why admin-gated: any non-admin caller could grief by closing
 /// PDAs that ARE actively in use (race condition: tx 1 lands,
-/// griefer closes PDA, tx 2 fails). Admin gate + a slot age check
-/// (~7 minutes since last use) is sufficient for V1. V1.5 can
-/// expose user-opt-in close via shielded-action signature.
+/// griefer closes PDA, tx 2 fails). Admin gate alone is the V1 trust
+/// root. V1.5 will add a slot-age field to `PendingInputs` (e.g.
+/// `last_committed_slot`) so the gc handler can additionally enforce
+/// "must be older than ~1000 slots" — that needs a struct change so
+/// it ships separately. V1.5 also exposes user-opt-in close via a
+/// shielded-action signature so users can reclaim their own rent.
 #[derive(Accounts)]
 pub struct GcPendingInputs<'info> {
     /// Stale PDA to close. Admin-derived seeds; we don't validate the

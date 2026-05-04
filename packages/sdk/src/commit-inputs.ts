@@ -74,8 +74,10 @@ export function buildCommitInputsIxData(
   if (spendingPubLe.length !== 32) {
     throw new Error(`buildCommitInputsIxData: spending_pub_le must be 32 bytes, got ${spendingPubLe.length}`);
   }
-  if (inputs.length === 0) {
-    throw new Error(`buildCommitInputsIxData: inputs must be non-empty (pool expects ${PUBLIC_INPUT_COUNT_ADAPT})`);
+  if (inputs.length !== PUBLIC_INPUT_COUNT_ADAPT) {
+    throw new Error(
+      `buildCommitInputsIxData: inputs.length must equal PUBLIC_INPUT_COUNT_ADAPT (${PUBLIC_INPUT_COUNT_ADAPT}); got ${inputs.length}. Pool's commit_inputs handler rejects any other length, so failing locally is faster.`,
+    );
   }
   for (let i = 0; i < inputs.length; i++) {
     if (inputs[i].length !== 32) {

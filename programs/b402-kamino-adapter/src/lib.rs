@@ -132,10 +132,11 @@ pub const SEED_RENT_BUFFER: &[u8] = b"rent-buffer";
 
 /// First-deposit setup fee in USDC base units (PRD-33 §5.4.2).
 ///
-/// Sized to cover the lamport rent for `init_user_metadata` (~0.007 SOL)
-/// + `init_obligation` (~0.023 SOL) ≈ 0.030 SOL, with a 1.5× buffer for
-/// SOL-price drift between deposit time (USDC paid now) and adapter
-/// authority top-up time (USDC→SOL swap, possibly hours later).
+/// Sized to cover the lamport rent for two Kamino accounts together —
+/// `init_user_metadata` (~0.007 SOL) plus `init_obligation` (~0.023 SOL)
+/// totalling ~0.030 SOL, with a 1.5× buffer for SOL-price drift between
+/// deposit time (USDC paid now) and adapter authority top-up time
+/// (USDC→SOL swap, possibly hours later).
 ///
 /// Computation at deploy: 0.030 SOL × 180 USDC/SOL × 1.5 ≈ 8.1 USDC.
 /// Hardcoded for V1 — if SOL goes above $200 sustained, redeploy with a
@@ -553,7 +554,7 @@ fn build_kamino_ix(
     let account_metas: Vec<AccountMeta> = metas
         .iter()
         .map(|m| {
-            let is_signer = signer_keys.iter().any(|k| *k == m.key);
+            let is_signer = signer_keys.contains(&m.key);
             if m.is_writable {
                 AccountMeta::new(m.key, is_signer)
             } else {

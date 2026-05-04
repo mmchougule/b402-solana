@@ -819,6 +819,11 @@ fn u64_to_fr_le(v: u64) -> [u8; 32] {
 
 /// Hardcoded list of stateful adapter program IDs (PRD-33 §6.1 — Choice C).
 /// Adding a stateful adapter = add its program ID here + bump the pool.
+/// Used only by the `phase_9_dual_note` build (out_spending_pub is the
+/// per-user identifier the rewrite is keyed on); default builds skip
+/// the rewrite entirely. `allow(dead_code)` so default-feature CI clippy
+/// doesn't flag this.
+#[allow(dead_code)]
 fn is_stateful_adapter(program_id: &Pubkey) -> bool {
     // Kamino lend adapter — per-user Obligation under PRD-33 §3.3.
     const KAMINO_ADAPTER: Pubkey =
@@ -831,7 +836,9 @@ fn is_stateful_adapter(program_id: &Pubkey) -> bool {
 /// [4 payload_len][payload bytes]`. Pinned by the b402 adapter ABI; any
 /// drift in the SDK's `concat(executeDisc, u64Le(amount), u64Le(out),
 /// vecU8(actionPayload))` builder mirrors here.
+#[allow(dead_code)]
 const ACTION_PAYLOAD_LEN_OFFSET: usize = 8 + 8 + 8;
+#[allow(dead_code)]
 const ACTION_PAYLOAD_BODY_OFFSET: usize = ACTION_PAYLOAD_LEN_OFFSET + 4;
 
 /// Surgically prepend `viewing_pub_hash` (32 B) to the action_payload
@@ -842,6 +849,7 @@ const ACTION_PAYLOAD_BODY_OFFSET: usize = ACTION_PAYLOAD_LEN_OFFSET + 4;
 /// flow up as `InvalidInstructionData` so a malformed adapter ix from a
 /// buggy SDK aborts the tx cleanly instead of producing a silently-wrong
 /// CPI payload.
+#[allow(dead_code)]
 fn prepend_viewing_pub_hash_to_action_payload(
     raw_ix_data: &[u8],
     viewing_pub_hash: &[u8; 32],

@@ -84,6 +84,18 @@ describe('buildCommitInputsIxData', () => {
 
   it('rejects empty inputs vector — pool requires exactly PUBLIC_INPUT_COUNT_ADAPT', () => {
     const sp = new Uint8Array(32);
-    expect(() => buildCommitInputsIxData(sp, [])).toThrow(/inputs/);
+    expect(() => buildCommitInputsIxData(sp, [])).toThrow(/PUBLIC_INPUT_COUNT_ADAPT/);
+  });
+
+  it('rejects wrong-length inputs vector (less than PUBLIC_INPUT_COUNT_ADAPT)', () => {
+    const sp = new Uint8Array(32);
+    const tooFew = Array.from({ length: 23 }, () => new Uint8Array(32));
+    expect(() => buildCommitInputsIxData(sp, tooFew)).toThrow(/PUBLIC_INPUT_COUNT_ADAPT.*got 23/);
+  });
+
+  it('rejects wrong-length inputs vector (more than PUBLIC_INPUT_COUNT_ADAPT)', () => {
+    const sp = new Uint8Array(32);
+    const tooMany = Array.from({ length: 25 }, () => new Uint8Array(32));
+    expect(() => buildCommitInputsIxData(sp, tooMany)).toThrow(/PUBLIC_INPUT_COUNT_ADAPT.*got 25/);
   });
 });

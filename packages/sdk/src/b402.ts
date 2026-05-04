@@ -347,7 +347,11 @@ export class B402Solana {
    *  KeypairSigner path). Returns null for any other Signer impl
    *  (browser, hardware-wallet, custom relayer-backed). */
   readonly keypair: Keypair | null;
-  readonly relayer: Keypair;
+  /** Local relayer Keypair. Null only when constructed with a non-Keypair
+   *  signer (browser) AND no `relayer` was passed AND no `relayerHttpUrl`
+   *  is configured — i.e. read-only mode. Tx-submitting methods guard
+   *  this with a clear error. */
+  readonly relayer: Keypair | null;
   readonly notesPersistDir: string | undefined;
   readonly relayerHttpUrl: string | undefined;
   readonly relayerApiKey: string | undefined;
@@ -401,12 +405,16 @@ export class B402Solana {
       this.signer = new KeypairSigner(config.keypair!);
     }
     // Relayer is the on-chain fee payer for shield/unshield self-submit
-    // paths. When the user is a Keypair we can default to them; for
-    // browser-derived signers there is no Keypair to fall back on, so the
-    // caller MUST configure either an HTTP relayer (relayerHttpUrl) or
-    // pass `relayer` explicitly. shield/unshield will surface a clear
-    // error at call time if neither is set.
-    this.relayer = config.relayer ?? this.keypair ?? (undefined as unknown as Keypair);
+    // paths AND the local commit_inputs tx in PRD-35's pendingInputsMode.
+    // When the user is a Keypair we default to them; otherwise the caller
+    // configures `relayer` explicitly (Node) or `relayerHttpUrl` (browser
+    // — hosted relayer pays fees, no local Keypair needed). Construction
+    // tolerates an absent relayer so a read-only SDK (status, holdings,
+    // balance — operations that don't submit txs) works in browsers
+    // without a relayer keypair. Methods that submit txs check
+    // `this.relayer != null` and throw with a clear error pointing to
+    // the missing config.
+    this.relayer = config.relayer ?? this.keypair ?? null;
     this.notesPersistDir = config.notesPersistDir;
     this.relayerHttpUrl = config.relayerHttpUrl;
     this.relayerApiKey = config.relayerApiKey;
@@ -607,7 +615,7 @@ export class B402Solana {
       mint: req.mint,
       depositorAta,
       depositor: this.signer,
-      relayer: this.relayer,
+      relayer: this._requireRelayer('shield'),
       amount: req.amount,
       omitEncryptedNotes,
       ...(alt ? { alt } : {}),
@@ -684,8 +692,9 @@ export class B402Solana {
     // initialized before the transfer. Idempotent: skips if already there.
     const ataInfo = await this.connection.getAccountInfo(recipientAta);
     if (!ataInfo) {
+      const relayer = this._requireRelayer('unshield: ATA initialization');
       const ix = createAssociatedTokenAccountInstruction(
-        this.relayer.publicKey,
+        relayer.publicKey,
         recipientAta,
         req.to,
         mint,
@@ -693,7 +702,7 @@ export class B402Solana {
       await sendAndConfirmTransaction(
         this.connection,
         new Transaction().add(ix),
-        [this.relayer],
+        [relayer],
       );
     }
 
@@ -711,7 +720,7 @@ export class B402Solana {
       merkleProof,
       recipientTokenAccount: recipientAta,
       recipientOwner: req.to,
-      relayer: this.relayer,
+      relayer: this._requireRelayer('unshield'),
       photonRpc: req.photonRpc,
       alt: req.alt,
       inlineNullifierCpi: req.inlineCpiNullifier ?? this.inlineCpiNullifier,
@@ -814,7 +823,8 @@ export class B402Solana {
     // Relayer pubkey bound into the ix's account[0] + relayer_fee_recipient
     // placeholder + feeAtaSentinel derivation. When the HTTP relayer is in
     // use, we use ITS pubkey so on-chain accounts match the actual fee payer.
-    const relayerPubkey = this._relayerHttp?.client.pubkey ?? this.relayer.publicKey;
+    const relayerPubkey = this._relayerHttp?.client.pubkey
+      ?? this._requireRelayer('privateSwap').publicKey;
     if (!this._prover) {
       throw new B402Error(
         B402ErrorCode.InvalidConfig,
@@ -984,10 +994,15 @@ export class B402Solana {
         inputs: proof.publicInputsLeBytes.map((b) => new Uint8Array(b)),
         relayer: relayerPubkey,
       });
-      const commitBlockhash = (await this.connection.getLatestBlockhash('confirmed')).blockhash;
+      // Single getLatestBlockhash call — blockhash + lastValidBlockHeight
+      // are a pair and confirmTransaction needs them from the SAME response.
+      // Two separate fetches can yield a blockhash that's already past its
+      // lastValidBlockHeight from the second fetch's perspective and trip
+      // spurious confirmation timeouts.
+      const commitBh = await this.connection.getLatestBlockhash('confirmed');
       const commitMsg = new TransactionMessage({
         payerKey: relayerPubkey,
-        recentBlockhash: commitBlockhash,
+        recentBlockhash: commitBh.blockhash,
         instructions: [commitIx],
       }).compileToV0Message();
       const commitVtx = new VersionedTransaction(commitMsg);
@@ -996,13 +1011,13 @@ export class B402Solana {
       // commit-tx is V1.5 — for now, self-submit via local relayer
       // while the heavyweight adapt_execute may still go through the
       // HTTP relayer below.
-      commitVtx.sign([this.relayer]);
+      commitVtx.sign([this._requireRelayer('privateSwap (commit_inputs tx 1)')]);
       const csig = await this.connection.sendRawTransaction(commitVtx.serialize(), {
         skipPreflight: false,
         preflightCommitment: 'confirmed',
       });
       await this.connection.confirmTransaction(
-        { signature: csig, blockhash: commitBlockhash, lastValidBlockHeight: (await this.connection.getLatestBlockhash()).lastValidBlockHeight },
+        { signature: csig, blockhash: commitBh.blockhash, lastValidBlockHeight: commitBh.lastValidBlockHeight },
         'confirmed',
       );
     }
@@ -1210,12 +1225,17 @@ export class B402Solana {
       });
       signature = r.signature;
     } else {
-      const blockhash = (await this.connection.getLatestBlockhash('confirmed')).blockhash;
+      // Self-submit path. Need a local relayer keypair; throws clearly
+      // if the SDK was constructed without one.
+      const localRelayer = this._requireRelayer('privateSwap (self-submit path)');
+      // Single getLatestBlockhash — pair the blockhash with its
+      // lastValidBlockHeight from the same response for confirmTransaction.
+      const bh = await this.connection.getLatestBlockhash('confirmed');
       const localIxs: TransactionInstruction[] = [cuIx, poolIx];
       if (nullifierIx) localIxs.push(nullifierIx);
       const msg = new TransactionMessage({
-        payerKey: this.relayer.publicKey,
-        recentBlockhash: blockhash,
+        payerKey: localRelayer.publicKey,
+        recentBlockhash: bh.blockhash,
         instructions: localIxs,
       }).compileToV0Message(lookupTables);
       // PHASE-7 DEBUG: log size BEFORE sign so we see compiled message stats
@@ -1228,7 +1248,7 @@ export class B402Solana {
         try { console.log('  message bytes:', msg.serialize().length); } catch (e) { console.log('  message serialize threw:', (e as Error).message); }
       }
       const vtx = new VersionedTransaction(msg);
-      vtx.sign([this.relayer]);
+      vtx.sign([localRelayer]);
 
       // PHASE-7 DEBUG: tx-size breakdown so we can see what's not ALT-compressed.
       if (process.env.B402_DEBUG_TX === '1') {
@@ -1250,7 +1270,7 @@ export class B402Solana {
         preflightCommitment: 'confirmed',
       });
       await this.connection.confirmTransaction(
-        { signature, blockhash, lastValidBlockHeight: (await this.connection.getLatestBlockhash()).lastValidBlockHeight },
+        { signature, blockhash: bh.blockhash, lastValidBlockHeight: bh.lastValidBlockHeight },
         'confirmed',
       );
     }
@@ -1346,6 +1366,22 @@ export class B402Solana {
   get wallet(): Wallet {
     if (!this._wallet) throw new Error('call ready() first');
     return this._wallet;
+  }
+
+  /**
+   * Resolve the local relayer Keypair, throwing a clear error if the SDK
+   * was constructed without one. Used by every code path that submits
+   * a tx via raw RPC. Browser callers should configure `relayerHttpUrl`
+   * instead — those code paths route through the hosted relayer service
+   * and never call this helper.
+   */
+  private _requireRelayer(opName: string): Keypair {
+    if (!this.relayer) {
+      throw new Error(
+        `${opName} needs a local relayer Keypair. Either pass \`relayer: Keypair\` to B402Solana, \`keypair: Keypair\` (legacy — used as relayer fallback), or configure \`relayerHttpUrl\` (browser; the hosted relayer pays fees and the SDK skips the local-submit path).`,
+      );
+    }
+    return this.relayer;
   }
 
   get notes(): NoteStore {

@@ -1,24 +1,29 @@
 #!/usr/bin/env bash
-# Gate 5 — CU + tx size budget. Hard limits per Solana runtime:
-#   - 1.4M CU per tx (target: 1.2M to leave headroom)
-#   - 1232 B per v0 message (alarm: 1100 B uncompressed to leave 132 B
-#     for sig + recent_blockhash + preflight metadata)
-#   - 64 accounts per legacy tx, 256 in v0 with ALT
+# Gate 5 — tx-size budget. Solana v0 hard cap is 1232 B; we alarm at
+# 1100 B to leave 132 B headroom for sig + recent_blockhash + preflight
+# metadata that doesn't appear in the inner ix.
 #
-# This gate parses the latest fork test logs (assumes gate 2 just ran)
-# for B402_DEBUG_TX=1 output and asserts compiled message bytes <
-# threshold. If the SDK doesn't log the size, this gate is a no-op
-# warning instead of a hard fail — better to ship without it than to
-# block on a logging gap.
+# CU enforcement is intentionally NOT gated here yet: there's no stable
+# `CU:` log line we can grep across the fork tests today. When the SDK
+# adds B402_DEBUG_CU=1 output (or vitest reports compute-unit usage),
+# add the parser + threshold check below — the constants are listed for
+# reference. Until then, calling this script "tx-size budget" matches
+# what it actually checks.
+#
+# Hard limits per Solana runtime, kept here as a reference for the
+# future CU parser:
+#   - 1.4M CU per tx
+#   - 1232 B per v0 message (gated below)
+#   - 64 accounts per legacy tx, 256 in v0 with ALT
 
 set -euo pipefail
 
 PROGRAM="$1"
-PROGRAM_ID="$2"
-FEATURES="$3"
-
-CU_HARD=1_400_000
-CU_ALARM=1_200_000
+PROGRAM_ID="${2:-}"
+FEATURES="${3:-}"
+# Reference-only future budget (CU parser TODO).
+# CU_HARD=1_400_000
+# CU_ALARM=1_200_000
 TX_SIZE_HARD=1232
 TX_SIZE_ALARM=1100
 

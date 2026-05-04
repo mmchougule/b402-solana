@@ -6,8 +6,14 @@
 set -euo pipefail
 
 PROGRAM="$1"
-PROGRAM_ID="$2"
-FEATURES="$3"
+PROGRAM_ID="${2:-}"
+FEATURES="${3:-}"
+# PROGRAM_ID + FEATURES kept for harness shape parity with the other gates
+# (every gate takes the same argv); they aren't used here because boot is
+# orchestrated by tests/v2/scripts/start-mainnet-fork.sh which loads from
+# the standard build paths regardless of which program triggered the run.
+# PROGRAM IS used below for per-program test selection.
+: "${PROGRAM_ID:=}" "${FEATURES:=}"
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO_ROOT"

@@ -40,11 +40,16 @@ jobs:
           node-version: 20
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # Build workspace deps first — vitest resolves @b402ai/solana-shared via
-      # its compiled dist/ output, which doesn't exist until the package is built.
+      # Build workspace deps first — vitest resolves @b402ai/solana-shared
+      # AND @b402ai/solana-prover via their compiled dist/ output, which
+      # doesn't exist until those packages are built. Without prover/dist,
+      # b402.ts's import of AdaptProver/TransactProver fails to resolve and
+      # b402-signer-config.test.ts can't load.
       - run: pnpm --filter='@b402ai/solana-shared' build
+      - run: pnpm --filter='@b402ai/solana-prover' build
       - run: pnpm --filter='@b402ai/solana' test
       - run: pnpm --filter='@b402ai/solana-shared' --if-present test
+      - run: pnpm --filter='@b402ai/solana-prover' --if-present test
 
   crypto-rust:
     name: crypto crate (cargo test)

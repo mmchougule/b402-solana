@@ -96,10 +96,12 @@ const VERIFY_WITH_ACCOUNT_INPUTS_DISCRIMINATOR: [u8; 8] =
 /// `pending_inputs` account passed via `invoke`'s account list.
 ///
 /// Wire size of the verify ix:
-///   8  (disc)
-/// + 256 (proof, fixed array — Anchor encodes [u8; 256] without a length
-///       prefix, so no +4 here)
-/// = 264 B total — vs ~1032 B inline. ~768 B saved per call.
+///
+///     8  disc
+///   256  proof  (fixed array — Anchor encodes [u8; 256] without a length
+///                prefix, so no +4 here)
+///   ───
+///   264  B total — vs ~1032 B inline. ~768 B saved per call.
 pub fn invoke_verify_adapt_with_account_inputs<'info>(
     verifier_program: &AccountInfo<'info>,
     pending_inputs: &AccountInfo<'info>,
