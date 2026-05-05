@@ -119,8 +119,16 @@ pub struct AdaptExecuteArgs {
     pub nullifier_cpi_payloads: Vec<[u8; 134]>,
 }
 
+// PRD-35.9: no `#[instruction(args: ...)]` tag.
+//
+// The dispatcher already deserializes the typed args (V1 = AdaptExecuteArgs,
+// V2 = AdaptExecuteV2Args) before calling `try_accounts`. The tag would force
+// `try_accounts` to RE-deserialize __ix_data as V1 args, which fails on V2
+// wire shape (no public_inputs block). Removing it lets the same Accounts
+// struct serve both ix variants cleanly. None of the constraints reference
+// `args.*`, so the tag was vestigial — the only cost was the wasted
+// V1-deserialize on every adapt_execute call.
 #[derive(Accounts)]
-#[instruction(args: AdaptExecuteArgs)]
 pub struct AdaptExecute<'info> {
     #[account(mut)]
     pub relayer: Signer<'info>,
@@ -228,6 +236,62 @@ pub struct AdaptExecute<'info> {
 
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
+}
+
+/// PRD-35.9 — lean args for `adapt_execute_v2`.
+///
+/// Identical to `AdaptExecuteArgs` minus `public_inputs`. Pool reads
+/// the public-input vector from the per-user `pending_inputs` PDA
+/// instead and reconstructs a synthetic `AdaptPublicInputs` via
+/// `parse_adapt_public_inputs_from_pda`. Saves ~320 B on the wire by
+/// dropping the embedded struct.
+///
+/// SDK callers under `pendingInputsMode: true` build this shape +
+/// dispatch to the v2 ix discriminator. Pre-PRD-35 callers keep using
+/// the legacy `adapt_execute` ix unchanged.
+#[cfg(feature = "prd_35_pending_inputs")]
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
+pub struct AdaptExecuteV2Args {
+    pub proof: Vec<u8>, // must be 256 bytes
+    pub encrypted_notes: Vec<EncryptedNote>, // 0..=2 entries
+    pub in_dummy_mask: u8,
+    pub out_dummy_mask: u8,
+    pub relayer_fee_recipient: Pubkey,
+    pub raw_adapter_ix_data: Vec<u8>,
+    pub action_payload: Vec<u8>,
+    #[cfg(feature = "inline_cpi_nullifier")]
+    pub nullifier_cpi_payloads: Vec<[u8; 134]>,
+}
+
+/// PRD-35.9 — `adapt_execute_v2` entry point.
+///
+/// Reads `pi: AdaptPublicInputs` from the per-user `pending_inputs` PDA,
+/// synthesizes the legacy `AdaptExecuteArgs` shape, and delegates to the
+/// shared `handler`. End result is byte-identical to a v1 call with the
+/// same pi — just ~320 B smaller on the wire.
+#[cfg(feature = "prd_35_pending_inputs")]
+#[inline(never)]
+pub fn handler_v2<'info>(
+    ctx: Context<'_, '_, '_, 'info, AdaptExecute<'info>>,
+    args_v2: Box<AdaptExecuteV2Args>,
+) -> Result<()> {
+    let pi: AdaptPublicInputs = {
+        let acct_data = ctx.accounts.pending_inputs.try_borrow_data()?;
+        parse_adapt_public_inputs_from_pda(&acct_data)?
+    };
+    let args = Box::new(AdaptExecuteArgs {
+        proof: args_v2.proof,
+        public_inputs: pi,
+        encrypted_notes: args_v2.encrypted_notes,
+        in_dummy_mask: args_v2.in_dummy_mask,
+        out_dummy_mask: args_v2.out_dummy_mask,
+        relayer_fee_recipient: args_v2.relayer_fee_recipient,
+        raw_adapter_ix_data: args_v2.raw_adapter_ix_data,
+        action_payload: args_v2.action_payload,
+        #[cfg(feature = "inline_cpi_nullifier")]
+        nullifier_cpi_payloads: args_v2.nullifier_cpi_payloads,
+    });
+    handler(ctx, args)
 }
 
 #[inline(never)]
@@ -1205,5 +1269,261 @@ mod excess_parity_tests {
     fn _smoke_imports() {
         let arr: [u8; 4] = [1, 2, 3, 4];
         let _: [u8; 4] = arr.as_slice().try_into().unwrap();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PRD-35.9 — parse `AdaptPublicInputs` back from a `PendingInputs` PDA.
+//
+// `adapt_execute_v2` (the PRD-35 path) drops `args.public_inputs` from
+// the outer ix wire and instead reads the 24-input vector from the per-
+// user pending_inputs PDA. This function is the inverse mapping — given
+// the raw bytes that `build_public_inputs_for_adapt` would produce,
+// it recovers the structured `AdaptPublicInputs` so the rest of
+// `handler` runs unchanged.
+//
+// Inputs:
+//   `acct_data` is the full pending_inputs account data, including the
+//   8 B Anchor discriminator and 1 B version byte:
+//     bytes[ 0.. 8] = anchor disc (ignored)
+//     bytes[ 8]     = version (caller checks == 1)
+//     bytes[ 9..9 + 32 × N] = 24 × 32 B inputs in build order
+//
+// The mapping mirrors `build_public_inputs_for_adapt` exactly. Index
+// numbers are pinned by tests below.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "prd_35_pending_inputs")]
+fn fr_le_to_u64(fr: &[u8; 32]) -> Result<u64> {
+    // u64_to_fr_le packs u64 LE into bytes[0..8] and zeros the rest.
+    // Inverse: read u64 LE from [0..8] and require [8..32] == 0 — any
+    // non-zero in the upper bytes means the source value didn't fit in
+    // a u64, which would be a circuit-side bug, not a runtime case.
+    for &b in &fr[8..32] {
+        if b != 0 {
+            return err!(crate::error::PoolError::ProofPublicInputMismatch);
+        }
+    }
+    let mut le = [0u8; 8];
+    le.copy_from_slice(&fr[0..8]);
+    Ok(u64::from_le_bytes(le))
+}
+
+#[cfg(feature = "prd_35_pending_inputs")]
+#[allow(clippy::manual_memcpy)]
+fn parse_adapt_public_inputs_from_pda(acct_data: &[u8]) -> Result<AdaptPublicInputs> {
+    use crate::instructions::verifier_cpi::PUBLIC_INPUT_COUNT_ADAPT;
+
+    require!(
+        acct_data.len() >= 8 + 1 + 32 * PUBLIC_INPUT_COUNT_ADAPT,
+        crate::error::PoolError::ProofPublicInputMismatch
+    );
+    require!(
+        acct_data[8] == 1,
+        crate::error::PoolError::ProofPublicInputMismatch
+    );
+
+    // 24 inputs starting at offset 9.
+    let read_input = |idx: usize| -> [u8; 32] {
+        let off = 9 + idx * 32;
+        let mut buf = [0u8; 32];
+        buf.copy_from_slice(&acct_data[off..off + 32]);
+        buf
+    };
+
+    // Mapping per `build_public_inputs_for_adapt` (lines 894-930):
+    //   0  merkle_root
+    //   1  nullifier[0]
+    //   2  nullifier[1]
+    //   3  commitment_out[0]
+    //   4  commitment_out[1]
+    //   5  u64_to_fr_le(public_amount_in)
+    //   6  u64_to_fr_le(public_amount_out)
+    //   7  in_mint Fr           (derived; not in pi)
+    //   8  u64_to_fr_le(relayer_fee)
+    //   9  relayer_fee_bind
+    //   10 root_bind
+    //   11 recipient_bind
+    //   12-17 domain tag constants  (derived; not in pi)
+    //   18 adapter_id              (derived; not in pi)
+    //   19 action_hash             (derived; not in pi)
+    //   20 u64_to_fr_le(expected_out_value)
+    //   21 out_mint Fr             (derived; not in pi)
+    //   22 TAG_ADAPT_BIND          (derived; not in pi)
+    //   23 out_spending_pub        (Phase 9 only)
+    let pi = AdaptPublicInputs {
+        merkle_root: read_input(0),
+        nullifier: [read_input(1), read_input(2)],
+        commitment_out: [read_input(3), read_input(4)],
+        public_amount_in: fr_le_to_u64(&read_input(5))?,
+        public_amount_out: fr_le_to_u64(&read_input(6))?,
+        // skip 7 (in_mint, derived)
+        relayer_fee: fr_le_to_u64(&read_input(8))?,
+        relayer_fee_bind: read_input(9),
+        root_bind: read_input(10),
+        recipient_bind: read_input(11),
+        // skip 12-17 (domain tag constants), 18 (adapter_id), 19 (action_hash)
+        expected_out_value: fr_le_to_u64(&read_input(20))?,
+        // skip 21 (out_mint), 22 (TAG_ADAPT_BIND)
+        #[cfg(feature = "phase_9_dual_note")]
+        out_spending_pub: read_input(23),
+    };
+    Ok(pi)
+}
+
+#[cfg(test)]
+#[cfg(feature = "prd_35_pending_inputs")]
+mod prd_35_pi_parser_tests {
+    //! PRD-35.9 — round-trip parity test.
+    //!
+    //! For ANY `pi: AdaptPublicInputs`, parsing the bytes that
+    //! `build_public_inputs_for_adapt(pi, ...)` would write into the
+    //! pending_inputs PDA must yield back a `pi'` such that every field
+    //! the parser extracts is byte-equal to the original. Derived fields
+    //! (in_mint, adapter_id, action_hash, etc.) are NOT round-tripped —
+    //! pool recomputes them at handler time from accounts/payload.
+
+    use super::*;
+
+    fn fixture_pi() -> AdaptPublicInputs {
+        AdaptPublicInputs {
+            merkle_root: [1u8; 32],
+            nullifier: [[2u8; 32], [3u8; 32]],
+            commitment_out: [[4u8; 32], [5u8; 32]],
+            public_amount_in: 1_000_000,
+            public_amount_out: 0,
+            relayer_fee: 100,
+            relayer_fee_bind: [9u8; 32],
+            root_bind: [10u8; 32],
+            recipient_bind: [11u8; 32],
+            expected_out_value: 1_500_000,
+            #[cfg(feature = "phase_9_dual_note")]
+            out_spending_pub: [13u8; 32],
+        }
+    }
+
+    fn write_pda_bytes(pi: &AdaptPublicInputs) -> Vec<u8> {
+        // Synthesize PDA bytes the way commit_inputs would. Each input is
+        // 32 B at offset 9 + i*32, all 24 inputs present (Phase 9 build).
+        // Derived fields (mint, action_hash, etc.) get filled with sentinel
+        // values; the parser must IGNORE those.
+        use crate::instructions::verifier_cpi::PUBLIC_INPUT_COUNT_ADAPT;
+        let mut out = vec![0u8; 8 + 1 + 32 * PUBLIC_INPUT_COUNT_ADAPT];
+        out[8] = 1;
+        let mut put = |idx: usize, val: [u8; 32]| {
+            let off = 9 + idx * 32;
+            out[off..off + 32].copy_from_slice(&val);
+        };
+        put(0, pi.merkle_root);
+        put(1, pi.nullifier[0]);
+        put(2, pi.nullifier[1]);
+        put(3, pi.commitment_out[0]);
+        put(4, pi.commitment_out[1]);
+        put(5, u64_to_fr_le(pi.public_amount_in));
+        put(6, u64_to_fr_le(pi.public_amount_out));
+        put(7, [0xff; 32]); // in_mint sentinel — must be ignored
+        put(8, u64_to_fr_le(pi.relayer_fee));
+        put(9, pi.relayer_fee_bind);
+        put(10, pi.root_bind);
+        put(11, pi.recipient_bind);
+        put(12, [0xee; 32]); // tag constants — ignored
+        put(13, [0xee; 32]);
+        put(14, [0xee; 32]);
+        put(15, [0xee; 32]);
+        put(16, [0xee; 32]);
+        put(17, [0xee; 32]);
+        put(18, [0xdd; 32]); // adapter_id sentinel — ignored
+        put(19, [0xcc; 32]); // action_hash sentinel — ignored
+        put(20, u64_to_fr_le(pi.expected_out_value));
+        put(21, [0xbb; 32]); // out_mint — ignored
+        put(22, [0xaa; 32]); // TAG_ADAPT_BIND — ignored
+        #[cfg(feature = "phase_9_dual_note")]
+        put(23, pi.out_spending_pub);
+        out
+    }
+
+    #[test]
+    fn parse_returns_byte_equal_pi_fields() {
+        let pi = fixture_pi();
+        let bytes = write_pda_bytes(&pi);
+        let parsed = parse_adapt_public_inputs_from_pda(&bytes).unwrap();
+        assert_eq!(parsed.merkle_root, pi.merkle_root);
+        assert_eq!(parsed.nullifier, pi.nullifier);
+        assert_eq!(parsed.commitment_out, pi.commitment_out);
+        assert_eq!(parsed.public_amount_in, pi.public_amount_in);
+        assert_eq!(parsed.public_amount_out, pi.public_amount_out);
+        assert_eq!(parsed.relayer_fee, pi.relayer_fee);
+        assert_eq!(parsed.relayer_fee_bind, pi.relayer_fee_bind);
+        assert_eq!(parsed.root_bind, pi.root_bind);
+        assert_eq!(parsed.recipient_bind, pi.recipient_bind);
+        assert_eq!(parsed.expected_out_value, pi.expected_out_value);
+        #[cfg(feature = "phase_9_dual_note")]
+        assert_eq!(parsed.out_spending_pub, pi.out_spending_pub);
+    }
+
+    #[test]
+    fn parse_rejects_unset_version() {
+        let mut bytes = write_pda_bytes(&fixture_pi());
+        bytes[8] = 0; // not committed
+        assert!(parse_adapt_public_inputs_from_pda(&bytes).is_err());
+    }
+
+    #[test]
+    fn parse_rejects_short_buffer() {
+        let bytes = vec![0u8; 100]; // way too short
+        assert!(parse_adapt_public_inputs_from_pda(&bytes).is_err());
+    }
+
+    #[test]
+    fn fr_le_to_u64_round_trips() {
+        for v in [0u64, 1, 100, u64::MAX] {
+            let fr = u64_to_fr_le(v);
+            assert_eq!(fr_le_to_u64(&fr).unwrap(), v);
+        }
+    }
+
+    #[test]
+    fn fr_le_to_u64_rejects_oversize() {
+        let mut fr = [0u8; 32];
+        fr[10] = 1; // non-zero in the high bytes — not representable as u64
+        assert!(fr_le_to_u64(&fr).is_err());
+    }
+
+    #[test]
+    fn parse_round_trip_via_build_function() {
+        // The strongest invariant: parse is the exact inverse of
+        // build_public_inputs_for_adapt's pi-derived fields. We feed
+        // through build → parse and the structured fields survive.
+        use anchor_lang::solana_program::pubkey::Pubkey;
+        let pi = fixture_pi();
+        let in_mint = Pubkey::new_unique();
+        let out_mint = Pubkey::new_unique();
+        let adapter = Pubkey::new_unique();
+        let action_hash = [42u8; 32];
+        let v = build_public_inputs_for_adapt(&pi, &in_mint, &out_mint, &adapter, &action_hash);
+
+        // Synthesize PDA bytes from the build output.
+        use crate::instructions::verifier_cpi::PUBLIC_INPUT_COUNT_ADAPT;
+        assert_eq!(v.len(), PUBLIC_INPUT_COUNT_ADAPT);
+        let mut bytes = vec![0u8; 8 + 1 + 32 * PUBLIC_INPUT_COUNT_ADAPT];
+        bytes[8] = 1;
+        for (i, fr) in v.iter().enumerate() {
+            let off = 9 + i * 32;
+            bytes[off..off + 32].copy_from_slice(fr);
+        }
+
+        let parsed = parse_adapt_public_inputs_from_pda(&bytes).unwrap();
+        assert_eq!(parsed.merkle_root, pi.merkle_root);
+        assert_eq!(parsed.nullifier, pi.nullifier);
+        assert_eq!(parsed.commitment_out, pi.commitment_out);
+        assert_eq!(parsed.public_amount_in, pi.public_amount_in);
+        assert_eq!(parsed.public_amount_out, pi.public_amount_out);
+        assert_eq!(parsed.relayer_fee, pi.relayer_fee);
+        assert_eq!(parsed.relayer_fee_bind, pi.relayer_fee_bind);
+        assert_eq!(parsed.root_bind, pi.root_bind);
+        assert_eq!(parsed.recipient_bind, pi.recipient_bind);
+        assert_eq!(parsed.expected_out_value, pi.expected_out_value);
+        #[cfg(feature = "phase_9_dual_note")]
+        assert_eq!(parsed.out_spending_pub, pi.out_spending_pub);
     }
 }

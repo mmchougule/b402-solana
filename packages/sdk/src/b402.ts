@@ -1070,45 +1070,58 @@ export class B402Solana {
     //    Phase 7 (`inlineNullifierCpi`): appends `nullifier_cpi_payloads:
     //    Vec<Vec<u8>>` after `action_payload`. mask 0b10 → 1 real nullifier
     //    slot → outer vec len = 1, single 134 B inner payload.
-    const poolIxParts: Uint8Array[] = [
-      instructionDiscriminator('adapt_execute'),
-      vecU8(proof.proofBytes),
-      proof.publicInputsLeBytes[0], // merkle_root
-      proof.publicInputsLeBytes[1], // nullifier[0]
-      proof.publicInputsLeBytes[2], // nullifier[1]
-      proof.publicInputsLeBytes[3], // commitment_out[0]
-      proof.publicInputsLeBytes[4], // commitment_out[1]
-      u64Le(req.amount),
-      u64Le(0n),
-      u64Le(0n), // relayer_fee
-      proof.publicInputsLeBytes[9], // relayer_fee_bind
-      proof.publicInputsLeBytes[10], // root_bind
-      proof.publicInputsLeBytes[11], // recipient_bind
-      // Phase 7B trim: adapter_id is no longer on the wire — pool reconstructs
-      // from the adapter_program account on-chain. -32 bytes per adapt_execute.
-      // Phase 9 trim: action_hash also dropped from the wire — pool already
-      // reconstructs Poseidon_3(adaptBindTag, keccak(action_payload) mod p,
-      // out_mint Fr) for its binding check; same value goes to the verifier.
-      // -32 bytes per adapt_execute, offsetting the +32B from out_spending_pub
-      // so net wire stays at the Phase 7B size.
-      u64Le(expectedOut),
-      // Phase 9 dual-note out_spending_pub byte. Conditionally appended:
-      // pool's default build (Phase 7B) does NOT consume it — including
-      // it shifts the borsh deserializer 32 bytes off the action_payload
-      // and produces an opaque "InvalidConfig" rejection. Phase 9 build
-      // (--features phase_9_dual_note) DOES consume it. The byte is read
-      // from the proof's public input slot 23 (the prover already lifts
-      // outSpendingPubA there). If the prover artifact is the older
-      // 23-input zkey, slot 23 is undefined — caller must pair phase9
-      // wire-shape with phase9 prover artifacts.
-      ...(phase9DualNote ? [proof.publicInputsLeBytes[23]] : []),
-      u32Le(0), // encrypted_notes vec len = 0 (omit on-chain to save bytes)
-      new Uint8Array([0b10]), // in_dummy_mask (slot 0 real, slot 1 dummy)
-      new Uint8Array([0b10]), // out_dummy_mask
-      relayerPubkey.toBytes(),
-      vecU8(adapterIxData),
-      vecU8(actionPayload),
-    ];
+    // PRD-35.9 — when pendingInputsMode is on, dispatch to
+    // `adapt_execute_v2` which DROPS the entire AdaptPublicInputs
+    // sub-struct (~320 B savings) — pool reads pi from the per-user
+    // pending_inputs PDA instead. The rest of the args is identical to
+    // v1 minus the public_inputs block.
+    const poolIxParts: Uint8Array[] = req.pendingInputsMode
+      ? [
+          instructionDiscriminator('adapt_execute_v2'),
+          vecU8(proof.proofBytes),
+          // No public_inputs — read from PDA in pool::handler_v2.
+          u32Le(0), // encrypted_notes vec len = 0
+          new Uint8Array([0b10]), // in_dummy_mask
+          new Uint8Array([0b10]), // out_dummy_mask
+          relayerPubkey.toBytes(),
+          vecU8(adapterIxData),
+          vecU8(actionPayload),
+        ]
+      : [
+          instructionDiscriminator('adapt_execute'),
+          vecU8(proof.proofBytes),
+          proof.publicInputsLeBytes[0], // merkle_root
+          proof.publicInputsLeBytes[1], // nullifier[0]
+          proof.publicInputsLeBytes[2], // nullifier[1]
+          proof.publicInputsLeBytes[3], // commitment_out[0]
+          proof.publicInputsLeBytes[4], // commitment_out[1]
+          u64Le(req.amount),
+          u64Le(0n),
+          u64Le(0n), // relayer_fee
+          proof.publicInputsLeBytes[9], // relayer_fee_bind
+          proof.publicInputsLeBytes[10], // root_bind
+          proof.publicInputsLeBytes[11], // recipient_bind
+          // Phase 7B trim: adapter_id is no longer on the wire — pool reconstructs
+          // from the adapter_program account on-chain. -32 bytes per adapt_execute.
+          // Phase 9 trim: action_hash also dropped from the wire — pool already
+          // reconstructs Poseidon_3(adaptBindTag, keccak(action_payload) mod p,
+          // out_mint Fr) for its binding check; same value goes to the verifier.
+          // -32 bytes per adapt_execute, offsetting the +32B from out_spending_pub
+          // so net wire stays at the Phase 7B size.
+          u64Le(expectedOut),
+          // Phase 9 dual-note out_spending_pub byte. Conditionally appended:
+          // pool's default build (Phase 7B) does NOT consume it — including
+          // it shifts the borsh deserializer 32 bytes off the action_payload
+          // and produces an opaque "InvalidConfig" rejection. Phase 9 build
+          // (--features phase_9_dual_note) DOES consume it.
+          ...(phase9DualNote ? [proof.publicInputsLeBytes[23]] : []),
+          u32Le(0), // encrypted_notes vec len = 0 (omit on-chain to save bytes)
+          new Uint8Array([0b10]), // in_dummy_mask (slot 0 real, slot 1 dummy)
+          new Uint8Array([0b10]), // out_dummy_mask
+          relayerPubkey.toBytes(),
+          vecU8(adapterIxData),
+          vecU8(actionPayload),
+        ];
     if (inlineNullifierCpi) {
       // Vec<[u8; 134]>: outer u32 len, then 134 raw bytes per entry (no inner
       // length varint — Phase 7B trim, saves 4 wire bytes per nullifier).

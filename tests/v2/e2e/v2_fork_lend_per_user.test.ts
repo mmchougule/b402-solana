@@ -58,6 +58,7 @@ import {
   B402Solana,
   adapterRegistryPda,
   buildWallet,
+  derivePendingInputsPda,
   instructionDiscriminator,
   poolConfigPda,
   tokenConfigPda,
@@ -70,6 +71,7 @@ const SOLANA_RPC = process.env.SOLANA_RPC ?? 'http://127.0.0.1:8899';
 const PHOTON_RPC = process.env.PHOTON_RPC ?? 'http://127.0.0.1:8784';
 const POOL_ID = new PublicKey('42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y');
 const NULLIFIER_ID = new PublicKey('2AnRZwWu6CTurZs1yQpqrcJWo4yRYL1xpeV78b2siweq');
+const VERIFIER_T_ID = new PublicKey('Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK');
 const VERIFIER_A_ID = new PublicKey('3Y2tyhNSaUiW5AcZcmFGRyTMdnroxHxc5GqFQPcMTZae');
 const KAMINO_ADAPTER_ID = new PublicKey('2enwFgcGKJDqruHpCtvmhtxe3DYcV3k72VTvoGcdt2rX');
 const KLEND = new PublicKey('KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD');
@@ -199,6 +201,36 @@ function parseReserve(market: PublicKey, data: Buffer): ReserveAccts {
 }
 
 // ---- pool admin ix builders (from v2_fork_lend.test.ts) ----
+async function initPoolIfNeeded(conn: Connection, admin: Keypair): Promise<void> {
+  if (await conn.getAccountInfo(poolConfigPda(POOL_ID))) return;
+  const treasury = PublicKey.findProgramAddressSync(
+    [Buffer.from('b402/v1'), Buffer.from('treasury')], POOL_ID,
+  )[0];
+  const data = Buffer.concat([
+    Buffer.from(instructionDiscriminator('init_pool')),
+    admin.publicKey.toBuffer(),
+    Buffer.from([1]),
+    VERIFIER_T_ID.toBuffer(),  // verifier_transact
+    VERIFIER_A_ID.toBuffer(),  // verifier_adapt
+    VERIFIER_T_ID.toBuffer(),  // verifier_unshield
+    admin.publicKey.toBuffer(),
+  ]);
+  const ix = new TransactionInstruction({
+    programId: POOL_ID,
+    keys: [
+      { pubkey: admin.publicKey, isSigner: true, isWritable: true },
+      { pubkey: poolConfigPda(POOL_ID), isSigner: false, isWritable: true },
+      { pubkey: treeStatePda(POOL_ID), isSigner: false, isWritable: true },
+      { pubkey: adapterRegistryPda(POOL_ID), isSigner: false, isWritable: true },
+      { pubkey: treasury, isSigner: false, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    data,
+  });
+  const cu = ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 });
+  await sendAndConfirmTransaction(conn, new Transaction().add(cu, ix), [admin], { commitment: 'confirmed' });
+}
+
 async function registerKaminoAdapter(conn: Connection, admin: Keypair): Promise<void> {
   const reg = await conn.getAccountInfo(adapterRegistryPda(POOL_ID));
   if (reg && reg.data.length > 12) {
@@ -296,6 +328,7 @@ describe('PRD-33 Phase 33.3 — per-user Kamino obligation isolation (mainnet-fo
       // SEED_RENT_BUFFER + derive_rent_buffer_pda + SETUP_FEE_USDC remain
       // in the adapter source so the V1.5 re-enable is a single commit.
 
+      await initPoolIfNeeded(conn, admin);
       await registerKaminoAdapter(conn, admin);
       await addTokenConfigIfNeeded(conn, admin, inMint);
       await addTokenConfigIfNeeded(conn, admin, outMint);
@@ -436,6 +469,7 @@ describe('PRD-33 Phase 33.3 — per-user Kamino obligation isolation (mainnet-fo
         KAMINO_ADAPTER_ID, adapterAuthority,
         adapterInTa.address, adapterOutTa.address,
         relayerFeeAta.address,
+        sharedRelayer.publicKey,           // fee payer pubkey (otherwise static)
         RESERVE, MARKET, MARKET_AUTH,
         r.liquiditySupply, r.collateralMint, r.collateralReserveDestSupply,
         r.oracles.pyth ?? KLEND, r.oracles.switchboardPrice ?? KLEND,
@@ -560,6 +594,32 @@ describe('PRD-33 Phase 33.3 — per-user Kamino obligation isolation (mainnet-fo
         const preInfo = await conn.getAccountInfo(outVaultPda);
         const preKUsdc = preInfo ? BigInt(preInfo.data.readBigUInt64LE(64)) : 0n;
 
+        // PRD-35 §5.4 — extend the shared ALT with EVERY per-user PDA so
+        // they all compress to 1 B in the adapt_execute tx instead of
+        // sitting in the static-key list at 32 B each. Per-user kamino
+        // = userMetadata, obligation, obligationFarm + ownerPda + the
+        // PRD-35 pending_inputs PDA. Without this the tx overflows.
+        const spLeBuf = Buffer.alloc(32);
+        {
+          let v = (b402 as any)._wallet.spendingPub as bigint;
+          for (let i = 0; i < 32; i++) { spLeBuf[i] = Number(v & 0xffn); v >>= 8n; }
+        }
+        const [pendingInputsPda] = derivePendingInputsPda(POOL_ID, spLeBuf);
+        const perUserExtend = AddressLookupTableProgram.extendLookupTable({
+          payer: admin.publicKey, authority: admin.publicKey, lookupTable: altPubkey,
+          addresses: [
+            u.signer.publicKey,        // shows up as static (b402 wallet pubkey)
+            u.ownerPda,
+            u.userMetadata,
+            u.obligation,
+            ...(isFarmAttached ? [u.obligationFarm] : []),
+            ...(isFarmAttached && u.reserveFarmState && !u.reserveFarmState.equals(KLEND) ? [u.reserveFarmState] : []),
+            pendingInputsPda,
+          ],
+        });
+        await sendAndConfirmTransaction(conn, new Transaction().add(perUserExtend), [admin], { commitment: 'confirmed' });
+        await new Promise((r) => setTimeout(r, 3000));
+
         const lendRes = await b402.privateSwap({
           inMint, outMint,
           amount: SHIELD_AMT,
@@ -572,6 +632,8 @@ describe('PRD-33 Phase 33.3 — per-user Kamino obligation isolation (mainnet-fo
           adapterIxData,
           actionPayload: kaminoActionPayload,
           remainingAccounts,
+          phase9DualNote: true,
+          pendingInputsMode: true,                // PRD-35 — read inputs from PDA
         });
         u.lendSig = lendRes.signature;
 
