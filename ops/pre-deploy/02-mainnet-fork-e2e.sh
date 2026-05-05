@@ -23,8 +23,12 @@ light test-validator --stop >/dev/null 2>&1 || true
 
 echo "booting fork validator with prd_35 + per_user_obligation feature
 binaries..."
+# verifier_transact MUST be in LOAD_AT_BOOT — shield/unshield CPIs into it.
+# The default in start-mainnet-fork.sh omits it because the wrapper has a
+# total-arg-length cap; pass an explicit list here.
 INJECT_USDC_ATA=/tmp/alice-usdc-ata.json \
 ALICE_USDC_ATA="${ALICE_USDC_ATA:-C8pMt1GJcVximLsVjz1xiu9FgYuEjLnaAPzCbgQGUfGy}" \
+LOAD_AT_BOOT="pool,nullifier,verifier_transact,verifier_adapt,kamino_adapter" \
   tests/v2/scripts/start-mainnet-fork.sh > /tmp/b402-fork.log 2>&1 &
 
 # Wait up to 120s for RPC.
@@ -71,10 +75,13 @@ if [[ ${#TESTS[@]} -eq 0 ]]; then
 fi
 
 cd tests/v2
+# Mainnet pool runs with inline_cpi_nullifier ON, so AdaptExecute(V2)Args
+# expects a trailing nullifier_cpi_payloads field. SDK only appends it
+# when INLINE_CPI=1 — must be set or the binary deserialize fails.
 for t in "${TESTS[@]}"; do
   rel="${t#tests/v2/}"
   echo "running $rel ..."
-  if ! B402_FORK_PRD_35=1 pnpm vitest run "$rel" --no-coverage; then
+  if ! B402_FORK_PRD_35=1 INLINE_CPI=1 pnpm vitest run "$rel" --no-coverage; then
     echo "FAIL: $rel" >&2
     light test-validator --stop >/dev/null 2>&1 || true
     exit 1

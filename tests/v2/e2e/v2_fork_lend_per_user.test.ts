@@ -430,7 +430,15 @@ describe('PRD-33 Phase 33.3 — per-user Kamino obligation isolation (mainnet-fo
 
       // ---- ALT setup. The per-user PDAs vary per user, so they go inline; ----
       // shared infra is in the table.
-      const slot = (await conn.getSlot('finalized')) - 1;
+      // Fresh light test-validator boots with finalized slot = 0 for a few
+      // seconds. Poll briefly so `recentSlot - 1` is non-negative.
+      let finalizedSlot = await conn.getSlot('finalized');
+      const slotDeadline = Date.now() + 30_000;
+      while (finalizedSlot < 2 && Date.now() < slotDeadline) {
+        await new Promise((r) => setTimeout(r, 1000));
+        finalizedSlot = await conn.getSlot('finalized');
+      }
+      const slot = Math.max(1, finalizedSlot - 1);
       const [createIx, altPubkey] = AddressLookupTableProgram.createLookupTable({
         authority: admin.publicKey, payer: admin.publicKey, recentSlot: slot,
       });
