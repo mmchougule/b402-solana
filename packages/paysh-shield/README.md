@@ -1,8 +1,8 @@
-# @b402ai/paysh-bridge
+# @b402ai/paysh-shield
 
 Auto-shielding watcher for x402 / [pay.sh](https://pay.sh) providers on Solana.
 
-An x402 provider declares a `payTo` wallet in every 402 challenge it serves. With this package, that `payTo` is an ingress address that the bridge subscribes to over RPC; each incoming USDC transfer is converted into a shielded note in the b402-solana pool. The provider unshields to whatever address it wants, whenever it wants — there is no on-chain edge from the receivable to the spend.
+An x402 provider declares a `payTo` wallet in every 402 challenge it serves. With this package, that `payTo` is an ingress address that the shield subscribes to over RPC; each incoming USDC transfer is converted into a shielded note in the b402-solana pool. The provider unshields to whatever address it wants, whenever it wants — there is no on-chain edge from the receivable to the spend.
 
 Designed to drop in next to an existing x402 server. No protocol changes, no payer-side changes.
 
@@ -11,7 +11,7 @@ Designed to drop in next to an existing x402 server. No protocol changes, no pay
 ```
   payer ──USDC SPL transfer──▶ ingress ATA  (visible — same as today's x402)
                                     │
-                            paysh-bridge watcher
+                            paysh-shield watcher
                                     │ B402Solana.shield()
                                     ▼
                              shielded note in pool
@@ -38,7 +38,7 @@ Designed to drop in next to an existing x402 server. No protocol changes, no pay
 ## Install
 
 ```bash
-pnpm add @b402ai/paysh-bridge @b402ai/solana @solana/web3.js
+pnpm add @b402ai/paysh-shield @b402ai/solana @solana/web3.js
 ```
 
 ## Library API
@@ -47,7 +47,7 @@ pnpm add @b402ai/paysh-bridge @b402ai/solana @solana/web3.js
 import { Connection, PublicKey } from '@solana/web3.js';
 import { getAssociatedTokenAddressSync } from '@solana/spl-token';
 import { B402Solana } from '@b402ai/solana';
-import { PayshBridge, makeSdkShieldFn } from '@b402ai/paysh-bridge';
+import { PayshShield, makeSdkShieldFn } from '@b402ai/paysh-shield';
 
 const operator = /* operator Keypair */;
 const mint = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'); // USDC
@@ -60,20 +60,20 @@ const b402 = new B402Solana({
   proverArtifacts: { wasmPath: '...', zkeyPath: '...' },
 });
 
-const bridge = new PayshBridge({
+const shield = new PayshShield({
   connection: conn,
   ingressOwner: operator.publicKey,
   ingressAta: getAssociatedTokenAddressSync(mint, operator.publicKey),
   shield: makeSdkShieldFn(b402, mint),
 });
 
-bridge.on((evt) => {
+shield.on((evt) => {
   if (evt.name === 'shielded') console.log('shielded', evt.txSig, evt.commitment);
   if (evt.name === 'failed')   console.error('shield failed', evt.txSig, evt.error);
 });
 
-await bridge.start();
-// In your x402 server, declare payTo = bridge.payTo()
+await shield.start();
+// In your x402 server, declare payTo = shield.payTo()
 ```
 
 ### x402 helpers
@@ -84,7 +84,7 @@ import {
   decodePaymentHeader,
   verifyPayment,
   SOLANA_NETWORKS,
-} from '@b402ai/paysh-bridge';
+} from '@b402ai/paysh-shield';
 
 // In your 402 handler:
 res.statusCode = 402;
@@ -92,7 +92,7 @@ res.end(JSON.stringify(buildPaymentRequired([{
   scheme: 'exact',
   network: SOLANA_NETWORKS.mainnet,
   asset: 'usdc',
-  payTo: bridge.payTo(),
+  payTo: shield.payTo(),
   amount: '1000', // smallest units
 }])));
 
@@ -108,22 +108,22 @@ if (!result.ok) { res.statusCode = result.status; res.end(result.error); return;
 
 | Threat | Status |
 |---|---|
-| Bridge process compromise | Operator's keypair is held in process memory to sign shield instructions (the SPL transfer authority must be the depositor — a Solana-level constraint). An attacker with that key can drain unshielded float (USDC sitting in the operator's ATA between settlement and shield) and forge spend proofs for any shielded note. Mitigation: keep the float interval small (default reconciler heartbeat is 30s), run the bridge under standard hot-key hygiene (memory-scoped, no swap), or wait for the sponsored-shield path that removes the in-process key. |
-| RPC provider observability | The bridge subscribes to its ingress ATA via `Connection.onLogs`. The RPC provider sees every payment as it arrives — same surface as any wallet using a third-party RPC. Choose a provider you'd trust to host an active wallet. |
-| Replay / double-shield | Reconciler dedupes by `txSig`. The pluggable `BridgeStore` interface persists state across restarts; the in-memory store is for tests only — supply a SQLite or Postgres impl in production. |
+| Shield process compromise | Operator's keypair is held in process memory to sign shield instructions (the SPL transfer authority must be the depositor — a Solana-level constraint). An attacker with that key can drain unshielded float (USDC sitting in the operator's ATA between settlement and shield) and forge spend proofs for any shielded note. Mitigation: keep the float interval small (default reconciler heartbeat is 30s), run the shield under standard hot-key hygiene (memory-scoped, no swap), or wait for the sponsored-shield path that removes the in-process key. |
+| RPC provider observability | The shield subscribes to its ingress ATA via `Connection.onLogs`. The RPC provider sees every payment as it arrives — same surface as any wallet using a third-party RPC. Choose a provider you'd trust to host an active wallet. |
+| Replay / double-shield | Reconciler dedupes by `txSig`. The pluggable `ShieldStore` interface persists state across restarts; the in-memory store is for tests only — supply a SQLite or Postgres impl in production. |
 | Failure during shield | Reconciler retries with exponential backoff (1s, 2s, 4s … capped at `maxDelayMs`), gives up at `maxAttempts` (default 5) and emits a `failed` event for operator alerting. Receivable USDC is unaffected — it stays in the ingress ATA awaiting manual recovery. |
-| Public ingress correlation | The ingress wallet pubkey is published in the provider's PAY.md and in every 402 challenge. Anyone watching the chain can attribute all incoming volume to that operator. The bridge does not address payer-side or amount-on-deposit privacy. |
+| Public ingress correlation | The ingress wallet pubkey is published in the provider's PAY.md and in every 402 challenge. Anyone watching the chain can attribute all incoming volume to that operator. The shield does not address payer-side or amount-on-deposit privacy. |
 
 ## Limitations
 
 - v1 ships a single long-lived ingress per operator. Per-payment rotated stealth addresses are tracked as a follow-up.
 - Shield latency is on the order of 1–3 seconds (proof gen + Merkle append). Resource serving in the x402 handler does not wait for shield — it returns 200 as soon as the SPL transfer confirms; shielding happens asynchronously.
-- The persisted `BridgeStore` ships only in-memory in this release. SQLite is on the roadmap.
+- The persisted `ShieldStore` ships only in-memory in this release. SQLite is on the roadmap.
 - Only `scheme: "exact"` and `asset: "usdc"` are handled. Other x402 schemes / assets are not parsed.
 
 ## Examples
 
-- `examples/paysh-private-receivables-e2e.ts` — end-to-end on devnet with a fresh test SPL token. Demonstrates the bridge lifecycle without an HTTP layer.
+- `examples/paysh-private-receivables-e2e.ts` — end-to-end on devnet with a fresh test SPL token. Demonstrates the shield lifecycle without an HTTP layer.
 - `examples/paysh-x402-real-usdc-e2e.ts` — end-to-end with USDC over an x402 HTTP server in-process.
 - `examples/paysh-x402-server-only.ts` — long-running server for conformance testing against external clients (curl, the `pay` CLI).
 

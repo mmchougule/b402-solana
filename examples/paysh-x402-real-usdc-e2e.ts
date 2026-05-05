@@ -10,7 +10,7 @@
  *     it as a PaymentPayload, and retries with `X-PAYMENT: <base64>`.
  *   - The server decodes, submits, confirms, and verifies the on-chain
  *     transfer matches the challenge. On match: 200 + JSON resource.
- *   - In parallel, PayshBridge's WS subscription detects the same tx
+ *   - In parallel, PayshShield's WS subscription detects the same tx
  *     and invokes B402Solana.shield(), producing a Poseidon commitment
  *     in the on-chain Merkle tree. The operator's main wallet does NOT
  *     receive the USDC; it lands as a shielded note.
@@ -82,18 +82,18 @@ import {
 } from '@solana/spl-token';
 import { TransactionInstruction } from '@solana/web3.js';
 import {
-  PayshBridge,
+  PayshShield,
   buildPaymentRequired,
   decodePaymentHeader,
   encodePaymentHeader,
   makeSdkShieldFn,
   verifyPayment,
   SOLANA_NETWORKS,
-  type BridgeEvent,
+  type ShieldEvent,
   type Network,
   type PaymentPayload,
   type PaymentRequirement,
-} from '@b402ai/paysh-bridge';
+} from '@b402ai/paysh-shield';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -168,7 +168,7 @@ async function main(): Promise<void> {
     console.log('  ✓ registered');
   }
 
-  // ── B402Solana + bridge ───────────────────────────────────────────
+  // ── B402Solana + shield ───────────────────────────────────────────
   const b402 = new B402Solana({
     cluster: CLUSTER === 'mainnet' ? 'mainnet' : 'devnet',
     rpcUrl: RPC_URL,
@@ -179,21 +179,21 @@ async function main(): Promise<void> {
     },
   });
 
-  const bridge = new PayshBridge({
+  const shield = new PayshShield({
     connection: conn,
     ingressOwner: operator.publicKey,
     ingressAta: operatorAta,
     shield: makeSdkShieldFn(b402, USDC_MINT),
     tickIntervalMs: 0,
   });
-  const shielded = new Promise<BridgeEvent>((resolve, reject) => {
-    bridge.on((e) => {
+  const shielded = new Promise<ShieldEvent>((resolve, reject) => {
+    shield.on((e) => {
       if (e.name === 'shielded') resolve(e);
       else if (e.name === 'failed') reject(new Error(`shield failed: ${e.error}`));
     });
   });
-  await bridge.start();
-  console.log(`bridge started; payTo = ${bridge.payTo()}`);
+  await shield.start();
+  console.log(`shield started; payTo = ${shield.payTo()}`);
 
   // ── HTTP server: x402-protected /weather/:city ────────────────────
   const requirement: PaymentRequirement = {
@@ -252,13 +252,13 @@ async function main(): Promise<void> {
     }
     console.log(`[client] received 200 — body: ${r2.body}`);
 
-    // ── wait for bridge to shield (real Groth16 proof on chain) ────
-    console.log('\nwaiting for bridge to shield (Groth16 + Merkle append)…');
+    // ── wait for the shield to land (real Groth16 proof on chain) ────
+    console.log('\nwaiting for the shield to land (Groth16 + Merkle append)…');
     const t0 = Date.now();
     const evt = await Promise.race([
       shielded,
       new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error('timeout: bridge did not shield within 90s')), 90_000),
+        setTimeout(() => reject(new Error('timeout: shield did not land within 90s')), 90_000),
       ),
     ]);
     console.log(`  ✓ shielded in ${(Date.now() - t0) / 1000}s`);
@@ -309,7 +309,7 @@ async function main(): Promise<void> {
     console.log('   shielded commitment until the operator chooses where it lands.');
   } finally {
     server.close();
-    await bridge.stop();
+    await shield.stop();
   }
 }
 

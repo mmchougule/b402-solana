@@ -10,7 +10,7 @@
     "dev": "tsx src/server.ts"
   },
   "dependencies": {
-    "@b402ai/paysh-bridge": "workspace:*",
+    "@b402ai/paysh-shield": "workspace:*",
     "@b402ai/solana": "workspace:*",
     "@b402ai/solana-shared": "workspace:*",
     "@lightprotocol/stateless.js": "^0.23.0-beta.5",

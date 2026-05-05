@@ -14,27 +14,27 @@ COPY pnpm-workspace.yaml package.json pnpm-lock.yaml .npmrc ./
 COPY packages/shared/package.json packages/shared/
 COPY packages/prover/package.json packages/prover/
 COPY packages/sdk/package.json packages/sdk/
-COPY packages/paysh-bridge/package.json packages/paysh-bridge/
+COPY packages/paysh-shield/package.json packages/paysh-shield/
 COPY apps/paysh-demo-server/package.json apps/paysh-demo-server/
 RUN pnpm install --frozen-lockfile \
   --filter @b402ai/solana-shared \
   --filter @b402ai/solana-prover \
   --filter @b402ai/solana \
-  --filter @b402ai/paysh-bridge \
+  --filter @b402ai/paysh-shield \
   --filter @b402ai/paysh-demo-server
 
 # Source for the workspace deps + the app
 COPY packages/shared packages/shared
 COPY packages/prover packages/prover
 COPY packages/sdk packages/sdk
-COPY packages/paysh-bridge packages/paysh-bridge
+COPY packages/paysh-shield packages/paysh-shield
 COPY apps/paysh-demo-server apps/paysh-demo-server
 
 # Build chain — order matters for type resolution
 RUN pnpm --filter @b402ai/solana-shared build \
  && pnpm --filter @b402ai/solana-prover build \
  && pnpm --filter @b402ai/solana build \
- && pnpm --filter @b402ai/paysh-bridge build \
+ && pnpm --filter @b402ai/paysh-shield build \
  && pnpm --filter @b402ai/paysh-demo-server build
 
 # Prune to runtime-only deps for the deployable

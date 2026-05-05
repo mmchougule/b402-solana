@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { PublicKey } from '@solana/web3.js';
-import { PayshBridge, type BridgeConnection } from '../bridge.js';
-import type { BridgeEvent, ShieldFn } from '../types.js';
+import { PayshShield, type ShieldConnection } from '../paysh-shield.js';
+import type { ShieldEvent, ShieldFn } from '../types.js';
 import type { ParsedTxLike } from '../parse.js';
 
 const INGRESS_OWNER = new PublicKey('11111111111111111111111111111112');
@@ -10,7 +10,7 @@ const PAYER = 'Payer1111111111111111111111111111111111111';
 
 function makeFakeConnection(opts?: {
   txByCallback?: (sig: string) => ParsedTxLike | null;
-}): BridgeConnection & {
+}): ShieldConnection & {
   triggerLog: (sig: string, opts?: { err?: unknown; slot?: number }) => void;
   removed: number[];
 } {
@@ -58,9 +58,9 @@ async function flush(): Promise<void> {
   for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r));
 }
 
-describe('PayshBridge', () => {
+describe('PayshShield', () => {
   it('payTo returns the ingress owner pubkey base58', () => {
-    const b = new PayshBridge({
+    const b = new PayshShield({
       connection: makeFakeConnection(),
       ingressOwner: INGRESS_OWNER,
       ingressAta: INGRESS_ATA,
@@ -75,8 +75,8 @@ describe('PayshBridge', () => {
       txByCallback: (sig) => splTransferTx(sig, INGRESS_ATA.toBase58(), '100000'),
     });
     const shield = vi.fn<ShieldFn>(async () => ({ signature: 's-shield', commitment: '0xc' }));
-    const events: BridgeEvent[] = [];
-    const b = new PayshBridge({
+    const events: ShieldEvent[] = [];
+    const b = new PayshShield({
       connection: conn,
       ingressOwner: INGRESS_OWNER,
       ingressAta: INGRESS_ATA,
@@ -102,7 +102,7 @@ describe('PayshBridge', () => {
       txByCallback: () => splTransferTx('x', INGRESS_ATA.toBase58(), '1'),
     });
     const shield = vi.fn<ShieldFn>(async () => ({ signature: 's', commitment: '0xc' }));
-    const b = new PayshBridge({
+    const b = new PayshShield({
       connection: conn,
       ingressOwner: INGRESS_OWNER,
       ingressAta: INGRESS_ATA,
@@ -123,7 +123,7 @@ describe('PayshBridge', () => {
         splTransferTx(sig, '99999999999999999999999999999999999999999999', '1'),
     });
     const shield = vi.fn<ShieldFn>();
-    const b = new PayshBridge({
+    const b = new PayshShield({
       connection: conn,
       ingressOwner: INGRESS_OWNER,
       ingressAta: INGRESS_ATA,
@@ -138,7 +138,7 @@ describe('PayshBridge', () => {
 
   it('stop removes the subscription', async () => {
     const conn = makeFakeConnection();
-    const b = new PayshBridge({
+    const b = new PayshShield({
       connection: conn,
       ingressOwner: INGRESS_OWNER,
       ingressAta: INGRESS_ATA,
@@ -155,7 +155,7 @@ describe('PayshBridge', () => {
       txByCallback: (sig) => splTransferTx(sig, INGRESS_ATA.toBase58(), '42'),
     });
     const shield = vi.fn<ShieldFn>(async () => ({ signature: 's', commitment: '0xc' }));
-    const b = new PayshBridge({
+    const b = new PayshShield({
       connection: conn,
       ingressOwner: INGRESS_OWNER,
       ingressAta: INGRESS_ATA,
@@ -173,7 +173,7 @@ describe('PayshBridge', () => {
 
   it('submit() lets callers replay observations directly (e.g. backfill)', async () => {
     const shield = vi.fn<ShieldFn>(async () => ({ signature: 's', commitment: '0xc' }));
-    const b = new PayshBridge({
+    const b = new PayshShield({
       connection: makeFakeConnection(),
       ingressOwner: INGRESS_OWNER,
       ingressAta: INGRESS_ATA,

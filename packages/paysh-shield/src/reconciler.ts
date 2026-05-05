@@ -1,6 +1,6 @@
 import type {
-  BridgeEvent,
-  BridgeStore,
+  ShieldEvent,
+  ShieldStore,
   Observation,
   RetryPolicy,
   ShieldFn,
@@ -8,7 +8,7 @@ import type {
 import { DEFAULT_RETRY_POLICY } from './types.js';
 
 /**
- * Reconciler — the invariant-enforcing core of the bridge.
+ * Reconciler — the invariant-enforcing core of the shield.
  *
  * Given a stream of `Observation`s (each one an incoming USDC SPL transfer
  * to the ingress), the reconciler:
@@ -18,7 +18,7 @@ import { DEFAULT_RETRY_POLICY } from './types.js';
  *      using the injected `shield` function.
  *   3. On `shield` failure, retries with exponential backoff up to
  *      `policy.maxAttempts`, then marks the record `failed`.
- *   4. Emits events on terminal transitions so the bridge can notify
+ *   4. Emits events on terminal transitions so the shield can notify
  *      the operator.
  *
  * Concurrency model: `submit()` is safe to call concurrently with itself
@@ -30,14 +30,14 @@ import { DEFAULT_RETRY_POLICY } from './types.js';
  */
 export class Reconciler {
   private readonly policy: RetryPolicy;
-  private readonly listeners: Array<(e: BridgeEvent) => void> = [];
+  private readonly listeners: Array<(e: ShieldEvent) => void> = [];
   /** In-flight shield promises, keyed by txSig, so we never start two for the same record. */
   private readonly inflight = new Map<string, Promise<void>>();
   /** Test seam: callable that returns a delay's worth of wait. Replaceable so tests don't sleep. */
   private readonly waiter: (ms: number) => Promise<void>;
 
   constructor(
-    private readonly store: BridgeStore,
+    private readonly store: ShieldStore,
     private readonly shield: ShieldFn,
     opts?: {
       policy?: Partial<RetryPolicy>;
@@ -48,7 +48,7 @@ export class Reconciler {
     this.waiter = opts?.waiter ?? defaultWaiter;
   }
 
-  on(cb: (e: BridgeEvent) => void): void {
+  on(cb: (e: ShieldEvent) => void): void {
     this.listeners.push(cb);
   }
 
@@ -145,7 +145,7 @@ export class Reconciler {
     }
   }
 
-  private emit(e: BridgeEvent): void {
+  private emit(e: ShieldEvent): void {
     for (const cb of this.listeners) {
       try {
         cb(e);

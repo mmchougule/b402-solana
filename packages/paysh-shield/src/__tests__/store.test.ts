@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { InMemoryBridgeStore } from '../store.js';
+import { InMemoryShieldStore } from '../store.js';
 import type { Observation } from '../types.js';
 
 const obs = (txSig: string, overrides: Partial<Observation> = {}): Observation => ({
@@ -10,9 +10,9 @@ const obs = (txSig: string, overrides: Partial<Observation> = {}): Observation =
   ...overrides,
 });
 
-describe('InMemoryBridgeStore', () => {
+describe('InMemoryShieldStore', () => {
   it('putSeen creates a fresh record in `seen` state', async () => {
-    const s = new InMemoryBridgeStore();
+    const s = new InMemoryShieldStore();
     const r = await s.putSeen(obs('tx1'));
     expect(r.state).toBe('seen');
     expect(r.attempts).toBe(0);
@@ -20,7 +20,7 @@ describe('InMemoryBridgeStore', () => {
   });
 
   it('putSeen is idempotent on txSig — second call returns the existing record', async () => {
-    const s = new InMemoryBridgeStore();
+    const s = new InMemoryShieldStore();
     const r1 = await s.putSeen(obs('tx1', { amount: '10000' }));
     const r2 = await s.putSeen(obs('tx1', { amount: '99999' }));
     // we keep the first record; we don't overwrite a record that's possibly
@@ -30,7 +30,7 @@ describe('InMemoryBridgeStore', () => {
   });
 
   it('transition seen → shielding bumps attempts', async () => {
-    const s = new InMemoryBridgeStore();
+    const s = new InMemoryShieldStore();
     await s.putSeen(obs('tx1'));
     const r = await s.transition('tx1', 'seen', 'shielding');
     expect(r.state).toBe('shielding');
@@ -38,7 +38,7 @@ describe('InMemoryBridgeStore', () => {
   });
 
   it('transition shielding → shielded does NOT bump attempts', async () => {
-    const s = new InMemoryBridgeStore();
+    const s = new InMemoryShieldStore();
     await s.putSeen(obs('tx1'));
     await s.transition('tx1', 'seen', 'shielding');
     const r = await s.transition('tx1', 'shielding', 'shielded', {
@@ -50,7 +50,7 @@ describe('InMemoryBridgeStore', () => {
   });
 
   it('transition rejects mismatched from-state', async () => {
-    const s = new InMemoryBridgeStore();
+    const s = new InMemoryShieldStore();
     await s.putSeen(obs('tx1'));
     await expect(s.transition('tx1', 'shielding', 'shielded')).rejects.toThrow(
       /bad transition/,
@@ -58,14 +58,14 @@ describe('InMemoryBridgeStore', () => {
   });
 
   it('transition rejects unknown txSig', async () => {
-    const s = new InMemoryBridgeStore();
+    const s = new InMemoryShieldStore();
     await expect(s.transition('nope', 'seen', 'shielding')).rejects.toThrow(
       /unknown txSig/,
     );
   });
 
   it('pending excludes terminal states', async () => {
-    const s = new InMemoryBridgeStore();
+    const s = new InMemoryShieldStore();
     await s.putSeen(obs('tx1'));
     await s.putSeen(obs('tx2'));
     await s.transition('tx2', 'seen', 'shielding');
@@ -77,7 +77,7 @@ describe('InMemoryBridgeStore', () => {
   });
 
   it('all returns every record regardless of state', async () => {
-    const s = new InMemoryBridgeStore();
+    const s = new InMemoryShieldStore();
     await s.putSeen(obs('tx1'));
     await s.putSeen(obs('tx2'));
     const a = await s.all();

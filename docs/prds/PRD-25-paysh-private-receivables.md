@@ -1,4 +1,4 @@
-# PRD-25 — pay.sh Private Receivables Bridge
+# PRD-25 — pay.sh Private Receivables Shield
 
 **Status:** Signed Off — Locked (2026-05-05, @mayur).
 **Depends on:** PRD-06 (SDK), PRD-22 (bonded relayer — only the hosted-relayer surface, not the bonded variant).
@@ -21,7 +21,7 @@ This is also the first concrete public showcase of b402-solana's value beyond th
 
 - Payer privacy. The payer's wallet remains on the deposit tx. Out of scope.
 - A new x402 scheme. Pursued separately as an upstream RFC, not blocking this PRD.
-- Bonded-relayer integration (PRD-22). The hosted relayer is sufficient for v1 of this bridge.
+- Bonded-relayer integration (PRD-22). The hosted relayer is sufficient for v1 of this shield.
 - Multi-operator shared ingress. v1 is one-ingress-per-operator; sharing is a v2.
 - A hosted SaaS. v1 is a runnable example + library; operators run their own watcher.
 
@@ -52,7 +52,7 @@ This is also the first concrete public showcase of b402-solana's value beyond th
                               └─────────────┬──────────────────────────┘
                                             │
                                   ┌─────────▼──────────┐
-                                  │  paysh-bridge      │  (this PRD)
+                                  │  paysh-shield      │  (this PRD)
                                   │  watcher service   │
                                   │   • subscribes RPC │
                                   │   • dedupes by sig │
@@ -74,7 +74,7 @@ This is also the first concrete public showcase of b402-solana's value beyond th
 
 ### 5.1 Components
 
-1. **`@b402ai/paysh-bridge` (new package, `packages/paysh-bridge/`):**
+1. **`@b402ai/paysh-shield` (new package, `packages/paysh-shield/`):**
    - Library + thin CLI.
    - Library API:
      ```ts
@@ -85,21 +85,21 @@ This is also the first concrete public showcase of b402-solana's value beyond th
        operatorViewingKey: Uint8Array;    // who the shielded note is for
        mint: PublicKey;                   // USDC mainnet or devnet
        relayerUrl?: string;               // optional hosted relayer
-       store: BridgeStore;                // persisted (txSig → shielded?) map
+       store: ShieldStore;                // persisted (txSig → shielded?) map
      }
-     export class PayshBridge {
+     export class PayshShield {
        constructor(cfg: BridgeConfig);
        payTo(): string;                   // base58, what the operator puts in 402 accepts[]
        start(): Promise<void>;            // subscribe + reconcile loop
        stop(): Promise<void>;
-       on(event: 'shielded' | 'failed' | 'reconciled', cb: (evt: BridgeEvent) => void): void;
+       on(event: 'shielded' | 'failed' | 'reconciled', cb: (evt: ShieldEvent) => void): void;
      }
      ```
-   - CLI: `paysh-bridge run --config bridge.yaml`. Same library under the hood. Used in the e2e harness.
+   - CLI: `paysh-shield run --config shield.yaml`. Same library under the hood. Used in the e2e harness.
 
 2. **`examples/paysh-private-receivables-e2e.ts` (new):** end-to-end test harness. Spins up:
    - A demo Express provider that 402's on `GET /weather/:city` for 0.01 USDC.
-   - The bridge watcher.
+   - The shield watcher.
    - Either `pay --sandbox curl` if installed, or a hand-rolled x402 client we already have building blocks for.
    - Asserts: payer has -0.01 USDC, ingress has 0 USDC (auto-shielded), operator has +0.01 in shielded balance, then `unshield` to a fresh wallet → fresh wallet has +0.01 USDC, no on-chain edge from payer to fresh wallet.
 
@@ -112,15 +112,15 @@ This is also the first concrete public showcase of b402-solana's value beyond th
 | 1 | Ingress: single long-lived vs rotated per payment? | **v1 single long-lived per operator.** Rotation is a v2 (PRD-25-A) once we know operators want it. Single ingress already wins on the operator-spend side; rotation only gains payer-link unlinkability on the deposit side, which we explicitly punted. |
 | 2 | Shielding trigger: WS subs vs polling? | **Both, with WS primary and polling reconciler at 30s interval.** Reconciler catches anything WS missed; idempotency dedupes. |
 | 3 | Shielding signer | **v1: ingress keypair stays hot in the watcher process.** Document threat model clearly: an attacker with the ingress key can drain *unshielded* balance (i.e. funds that arrived in the last <30s before being shielded), nothing more. v2 considers a sponsored-shield path that does not require the ingress to sign the SPL transfer. |
-| 4 | Operator UX | **Reuse existing `@b402ai/solana-mcp`** for read + unshield. The bridge does not duplicate that surface. |
+| 4 | Operator UX | **Reuse existing `@b402ai/solana-mcp`** for read + unshield. The shield does not duplicate that surface. |
 | 5 | Sandbox harness | **e2e runs in two modes:** (a) "stub" — local Solana validator + a fake gateway that just calls our verifier loop; (b) "real" — against `pay --sandbox` if `pay` is on `$PATH`. CI runs (a); manual demo runs (b). |
-| 6 | Failure-mode reconciliation | **Persisted `BridgeStore`** keyed by `(ingress, txSig)` with state `seen | shielding | shielded | failed`. Retries with exponential backoff on `failed`, capped at 5 attempts then alerts. SQLite via `better-sqlite3` for v1; pluggable interface so operators can swap. |
+| 6 | Failure-mode reconciliation | **Persisted `ShieldStore`** keyed by `(ingress, txSig)` with state `seen | shielding | shielded | failed`. Retries with exponential backoff on `failed`, capped at 5 attempts then alerts. SQLite via `better-sqlite3` for v1; pluggable interface so operators can swap. |
 
 ## 6. TDD plan
 
 Per CLAUDE.md and PRD-07, every component lands with tests first.
 
-### 6.1 Unit (Vitest, in `packages/paysh-bridge/src/__tests__`)
+### 6.1 Unit (Vitest, in `packages/paysh-shield/src/__tests__`)
 
 | Test | Subject |
 |---|---|
@@ -131,7 +131,7 @@ Per CLAUDE.md and PRD-07, every component lands with tests first.
 | `unknown mint transfer ignored` | accepts only configured mint |
 | `amount=0 ignored` | edge |
 | `multiple instructions in one tx — only USDC-to-ingress counted` | parsing correctness |
-| `BridgeStore round-trips state` | store contract |
+| `ShieldStore round-trips state` | store contract |
 
 ### 6.2 Property tests (fast-check)
 
@@ -142,10 +142,10 @@ Per CLAUDE.md and PRD-07, every component lands with tests first.
 
 - Bring up local validator with USDC mock mint and the b402 program deployed.
 - Fund a payer keypair, fund the ingress for SOL.
-- Wire bridge → SDK against the local validator.
+- Wire shield → SDK against the local validator.
 - Test: 5 sequential payments → 5 shielded notes → operator unshield → balance correct.
 - Test: 3 concurrent payments → exactly 3 shielded notes (not 6, not 2).
-- Test: kill bridge mid-shield → restart → reconciler completes the in-flight one.
+- Test: kill shield mid-shield → restart → reconciler completes the in-flight one.
 
 ### 6.4 End-to-end (`examples/paysh-private-receivables-e2e.ts`)
 
@@ -155,11 +155,11 @@ The full demo flow. Runs in CI under stub mode; runs locally against pay.sh sand
 
 PRD-25 is "done" when all of the following hold:
 
-1. `apps/paysh-bridge` compiles, all unit + property + integration tests green in CI.
+1. `apps/paysh-shield` compiles, all unit + property + integration tests green in CI.
 2. e2e example runs end-to-end on `solana-test-validator` in under 60s.
 3. e2e example, run against pay.sh sandbox manually, completes a real 402 → payment → shield → unshield round trip and the recorded shielded amount equals the payment minus protocol fee (0).
 4. Operator never appears on chain in the deposit-side path. Verified by parsing all txs in the e2e and asserting the operator's main wallet pubkey is not in any account-list.
-5. README in `packages/paysh-bridge` documents: install, configure, run, threat model, limitations.
+5. README in `packages/paysh-shield` documents: install, configure, run, threat model, limitations.
 6. Blog-post draft committed under `docs/blog/2026-paysh-private-receivables.md`. Not published from this PR.
 
 ## 8. Out-of-scope follow-ups
@@ -167,7 +167,7 @@ PRD-25 is "done" when all of the following hold:
 - **PRD-25-A:** rotated stealth ingress (per-payment).
 - **PRD-25-B:** sponsored shield (ingress does not need a keypair; relayer signs).
 - **PRD-25-C:** payer-side sponsored gas. Today's x402 `exact` scheme on Solana makes the payer the tx fee payer, so they need a SOL float just to pay USDC. Solana's tx model allows a separate `fee_payer` from the SPL `authority`; a "sponsored exact" variant could have the server return a partially-built tx with `fee_payer = sponsor`, payer adds their authority signature, server submits. Requires either a new x402 scheme string or `extra:{}` metadata that the `pay` CLI doesn't yet read. Tracked separately.
-- **PRD-26 (skeleton):** relayer fee policy. The hosted relayer (`@b402ai/solana-relayer`) currently signs unshield + private_swap at-cost. A configurable fee policy mirrors the EVM-side schedule already in production for the Base/Arb/BSC fork: a flat USDC base fee per relayed tx plus a tiered percentage of the unshield amount. Implementation is a config addition on the relayer side, opt-in via `B402_RELAYER_HTTP_URL` on the SDK; bridge consumers see no behavioral change. Tracked separately so it doesn't gate this PRD.
+- **PRD-26 (skeleton):** relayer fee policy. The hosted relayer (`@b402ai/solana-relayer`) currently signs unshield + private_swap at-cost. A configurable fee policy mirrors the EVM-side schedule already in production for the Base/Arb/BSC fork: a flat USDC base fee per relayed tx plus a tiered percentage of the unshield amount. Implementation is a config addition on the relayer side, opt-in via `B402_RELAYER_HTTP_URL` on the SDK; shield consumers see no behavioral change. Tracked separately so it doesn't gate this PRD.
 - **Upstream RFC:** propose a `scheme: "shielded-solana"` to pay.sh, with `extra.shieldedTo` carrying a viewing-key commitment instead of a pubkey. Tracked outside this repo.
 - **Operator dashboard:** a small Next.js app reading the `@b402ai/solana-mcp` surface. Bonus, not blocking.
 
@@ -178,7 +178,7 @@ PRD-25 is "done" when all of the following hold:
 | pay.sh sandbox rejects a payTo that isn't a USDC ATA owner with prior history | Low | Verify in spike before implementation; if rejected, pre-create the ingress ATA and prefund SOL |
 | Shielding latency > 402 timeout (300s) is irrelevant (verifier checks the deposit, not the shield) but operator-side balance lags | Low | Acceptable; document. The payer is already paid the moment the SPL transfer lands |
 | Ingress key compromise drains unshielded float | Medium | Keep float small; reconciler shields aggressively; document; future PRD-25-B removes the key |
-| pay.sh adds a real `scheme: "shielded"` next month and obsoletes this | Medium | We propose that RFC ourselves; this bridge is the working proof that motivates it |
+| pay.sh adds a real `scheme: "shielded"` next month and obsoletes this | Medium | We propose that RFC ourselves; this shield is the working proof that motivates it |
 
 ## 10. Review process
 
@@ -189,4 +189,4 @@ PRD-25 is "done" when all of the following hold:
 ## Revision history
 
 - 2026-05-05: Initial draft. Ready for review.
-- 2026-05-05: Signed Off — Locked. Package location set to `packages/paysh-bridge`.
+- 2026-05-05: Signed Off — Locked. Package location set to `packages/paysh-shield`.

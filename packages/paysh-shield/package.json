@@ -1,5 +1,5 @@
 {
-  "name": "@b402ai/paysh-bridge",
+  "name": "@b402ai/paysh-shield",
   "version": "0.0.1",
   "description": "Privacy bridge for x402 / pay.sh receivables on Solana — auto-shields incoming USDC into a b402 shielded balance",
   "license": "Apache-2.0",
@@ -22,7 +22,7 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/mmchougule/b402-solana.git",
-    "directory": "packages/paysh-bridge"
+    "directory": "packages/paysh-shield"
   },
   "keywords": [
     "solana",

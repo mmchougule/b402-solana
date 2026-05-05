@@ -107,7 +107,7 @@ What this is *not* (called out so we don't oversell):
 
 ## 8. Recommended next step
 
-Lock the design in **PRD-25 — pay.sh Private Receivables Bridge** (next free number; PRD-24 is the last drafted). PRD-25 should answer the six open questions, define the package layout (likely `apps/paysh-bridge` + `examples/paysh-private-receivables-e2e.ts`), and specify the TDD plan (unit tests on the shield-trigger logic, property tests on idempotency, e2e against pay.sh sandbox).
+Lock the design in **PRD-25 — pay.sh Private Receivables Shield** (next free number; PRD-24 is the last drafted). PRD-25 should answer the six open questions, define the package layout (likely `apps/paysh-shield` + `examples/paysh-private-receivables-e2e.ts`), and specify the TDD plan (unit tests on the shield-trigger logic, property tests on idempotency, e2e against pay.sh sandbox).
 
 No code lands until PRD-25 is signed off, per repo convention.
 

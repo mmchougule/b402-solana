@@ -1,7 +1,7 @@
 /**
  * Standalone x402-protected HTTP server, no in-process payer.
  *
- * Runs a real `paysh-bridge` against devnet so external clients (the
+ * Runs a real `paysh-shield` against devnet so external clients (the
  * `pay` CLI, `curl`, anything that speaks x402) can hit it and pay.
  *
  * Use this to verify wire-format compatibility against the reference
@@ -39,7 +39,7 @@ import {
   vaultPda,
 } from '@b402ai/solana';
 import {
-  PayshBridge,
+  PayshShield,
   buildPaymentRequired,
   decodePaymentHeader,
   makeSdkShieldFn,
@@ -47,7 +47,7 @@ import {
   SOLANA_NETWORKS,
   type PaymentPayload,
   type PaymentRequirement,
-} from '@b402ai/paysh-bridge';
+} from '@b402ai/paysh-shield';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 function requireEnv(name: string, hint = ''): string {
@@ -82,15 +82,15 @@ async function main(): Promise<void> {
       zkeyPath: path.join(CIRCUITS, 'ceremony/transact_final.zkey'),
     },
   });
-  const bridge = new PayshBridge({
+  const shield = new PayshShield({
     connection: conn, ingressOwner: operator.publicKey, ingressAta: ata,
     shield: makeSdkShieldFn(b402, USDC_MINT), tickIntervalMs: 0,
   });
-  bridge.on((e) => {
-    if (e.name === 'shielded') console.log(`[bridge] shielded ${e.txSig.slice(0, 12)}… → ${e.commitment?.slice(0, 18)}…`);
-    if (e.name === 'failed')   console.log(`[bridge] FAILED ${e.txSig}: ${e.error}`);
+  shield.on((e) => {
+    if (e.name === 'shielded') console.log(`[shield] shielded ${e.txSig.slice(0, 12)}… → ${e.commitment?.slice(0, 18)}…`);
+    if (e.name === 'failed')   console.log(`[shield] FAILED ${e.txSig}: ${e.error}`);
   });
-  await bridge.start();
+  await shield.start();
 
   const requirement: PaymentRequirement = {
     scheme: 'exact',
@@ -124,7 +124,7 @@ async function main(): Promise<void> {
 
   const stop = async () => {
     server.close();
-    await bridge.stop();
+    await shield.stop();
     process.exit(0);
   };
   process.on('SIGINT', () => void stop());

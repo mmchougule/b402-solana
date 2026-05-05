@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import fc from 'fast-check';
 import { Reconciler } from '../reconciler.js';
-import { InMemoryBridgeStore } from '../store.js';
-import type { BridgeEvent, Observation, ShieldFn } from '../types.js';
+import { InMemoryShieldStore } from '../store.js';
+import type { ShieldEvent, Observation, ShieldFn } from '../types.js';
 
 const obs = (txSig: string, overrides: Partial<Observation> = {}): Observation => ({
   txSig,
@@ -17,12 +17,12 @@ const noWait = () => Promise.resolve();
 
 describe('Reconciler — happy path', () => {
   it('shields a single observation end-to-end', async () => {
-    const store = new InMemoryBridgeStore();
+    const store = new InMemoryShieldStore();
     const shield: ShieldFn = vi.fn(async (o) => ({
       commitment: `cmt-${o.txSig}`,
       signature: `sig-${o.txSig}`,
     }));
-    const events: BridgeEvent[] = [];
+    const events: ShieldEvent[] = [];
 
     const r = new Reconciler(store, shield, { waiter: noWait });
     r.on((e) => events.push(e));
@@ -43,7 +43,7 @@ describe('Reconciler — happy path', () => {
 
 describe('Reconciler — dedupe', () => {
   it('submit called twice with the same txSig only shields once', async () => {
-    const store = new InMemoryBridgeStore();
+    const store = new InMemoryShieldStore();
     const shield = vi.fn<ShieldFn>(async (o) => ({
       commitment: `cmt-${o.txSig}`,
       signature: `sig-${o.txSig}`,
@@ -57,7 +57,7 @@ describe('Reconciler — dedupe', () => {
   });
 
   it('submit after success is a no-op', async () => {
-    const store = new InMemoryBridgeStore();
+    const store = new InMemoryShieldStore();
     const shield = vi.fn<ShieldFn>(async (o) => ({
       commitment: `cmt-${o.txSig}`,
       signature: `sig-${o.txSig}`,
@@ -76,7 +76,7 @@ describe('Reconciler — dedupe', () => {
 
 describe('Reconciler — filters', () => {
   it('drops amount=0 silently', async () => {
-    const store = new InMemoryBridgeStore();
+    const store = new InMemoryShieldStore();
     const shield = vi.fn<ShieldFn>();
     const r = new Reconciler(store, shield, { waiter: noWait });
 
@@ -90,14 +90,14 @@ describe('Reconciler — filters', () => {
 
 describe('Reconciler — retry & backoff', () => {
   it('retries on shield failure and eventually succeeds', async () => {
-    const store = new InMemoryBridgeStore();
+    const store = new InMemoryShieldStore();
     let calls = 0;
     const shield: ShieldFn = vi.fn(async (o) => {
       calls += 1;
       if (calls < 3) throw new Error('rpc flaked');
       return { commitment: `cmt-${o.txSig}`, signature: `sig-${o.txSig}` };
     });
-    const events: BridgeEvent[] = [];
+    const events: ShieldEvent[] = [];
     const waitsObserved: number[] = [];
     const waiter = (ms: number) => {
       waitsObserved.push(ms);
@@ -121,7 +121,7 @@ describe('Reconciler — retry & backoff', () => {
   });
 
   it('caps backoff at maxDelayMs', async () => {
-    const store = new InMemoryBridgeStore();
+    const store = new InMemoryShieldStore();
     let calls = 0;
     const shield: ShieldFn = async (o) => {
       calls += 1;
@@ -148,11 +148,11 @@ describe('Reconciler — retry & backoff', () => {
   });
 
   it('gives up after maxAttempts and emits failed event', async () => {
-    const store = new InMemoryBridgeStore();
+    const store = new InMemoryShieldStore();
     const shield: ShieldFn = vi.fn(async () => {
       throw new Error('permaglitch');
     });
-    const events: BridgeEvent[] = [];
+    const events: ShieldEvent[] = [];
     const r = new Reconciler(store, shield, {
       waiter: noWait,
       policy: { maxAttempts: 3, baseDelayMs: 1, maxDelayMs: 1 },
@@ -172,7 +172,7 @@ describe('Reconciler — retry & backoff', () => {
 
 describe('Reconciler — tick (heartbeat)', () => {
   it('re-drives a stuck `shielding` record left over from a previous process', async () => {
-    const store = new InMemoryBridgeStore();
+    const store = new InMemoryShieldStore();
     // Simulate a crash mid-shield: putSeen + transition to shielding, no
     // in-flight promise exists in this fresh reconciler.
     await store.putSeen(obs('tx1'));
@@ -192,9 +192,9 @@ describe('Reconciler — tick (heartbeat)', () => {
   });
 
   it('emits `reconciled` event each tick', async () => {
-    const store = new InMemoryBridgeStore();
+    const store = new InMemoryShieldStore();
     const shield: ShieldFn = async () => ({ commitment: 'c', signature: 's' });
-    const events: BridgeEvent[] = [];
+    const events: ShieldEvent[] = [];
     const r = new Reconciler(store, shield, { waiter: noWait });
     r.on((e) => events.push(e));
 
@@ -216,7 +216,7 @@ describe('Reconciler — property: invariants', () => {
           { minLength: 1, maxLength: 30 },
         ),
         async (ops) => {
-          const store = new InMemoryBridgeStore();
+          const store = new InMemoryShieldStore();
           const callsByTx = new Map<string, number>();
           const shield: ShieldFn = async (o) => {
             callsByTx.set(o.txSig, (callsByTx.get(o.txSig) ?? 0) + 1);

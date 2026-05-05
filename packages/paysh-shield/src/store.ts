@@ -1,5 +1,5 @@
 import type {
-  BridgeStore,
+  ShieldStore,
   Observation,
   ObservationRecord,
   ObservationState,
@@ -14,7 +14,7 @@ import type {
  * `transition` codepath that any pluggable store will use, so contract
  * tests apply identically.
  */
-export class InMemoryBridgeStore implements BridgeStore {
+export class InMemoryShieldStore implements ShieldStore {
   private readonly map = new Map<string, ObservationRecord>();
 
   async get(txSig: string): Promise<ObservationRecord | undefined> {

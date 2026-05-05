@@ -1,12 +1,12 @@
 /**
- * paysh demo server — deployable single-process HTTP + bridge.
+ * paysh demo server — deployable single-process HTTP + shield.
  *
  * Endpoints:
  *   GET /healthz          — liveness probe
  *   GET /openapi.json     — static OpenAPI 3.1 spec
  *   GET /weather/{city}   — x402-gated, 0.001 USDC per call
  *
- * Bridge auto-shields every USDC transfer that lands at the operator's
+ * Shield auto-shields every USDC transfer that lands at the operator's
  * USDC ATA into a b402-solana shielded note.
  */
 
@@ -22,7 +22,7 @@ import {
 
 import { B402Solana } from '@b402ai/solana';
 import {
-  PayshBridge,
+  PayshShield,
   buildPaymentRequired,
   decodePaymentHeader,
   makeSdkShieldFn,
@@ -31,7 +31,7 @@ import {
   type Network,
   type PaymentPayload,
   type PaymentRequirement,
-} from '@b402ai/paysh-bridge';
+} from '@b402ai/paysh-shield';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -84,22 +84,22 @@ async function main(): Promise<void> {
     },
   });
 
-  const bridge = new PayshBridge({
+  const shield = new PayshShield({
     connection: conn,
     ingressOwner: operator.publicKey,
     ingressAta: ata,
     shield: makeSdkShieldFn(b402, USDC_MINT),
     tickIntervalMs: 30_000,
   });
-  bridge.on((evt) => {
+  shield.on((evt) => {
     if (evt.name === 'shielded') {
-      console.log(`[bridge] shielded ${evt.txSig.slice(0, 12)}… → ${evt.commitment?.slice(0, 18)}…`);
+      console.log(`[shield] shielded ${evt.txSig.slice(0, 12)}… → ${evt.commitment?.slice(0, 18)}…`);
     } else if (evt.name === 'failed') {
-      console.error(`[bridge] FAILED ${evt.txSig}: ${evt.error}`);
+      console.error(`[shield] FAILED ${evt.txSig}: ${evt.error}`);
     }
   });
-  await bridge.start();
-  console.log(`[boot] bridge subscribed to onLogs`);
+  await shield.start();
+  console.log(`[boot] shield subscribed to onLogs`);
 
   const requirement: PaymentRequirement = {
     scheme: 'exact',
@@ -130,7 +130,7 @@ async function main(): Promise<void> {
   const stop = async (signal: string) => {
     console.log(`[shutdown] ${signal}`);
     server.close();
-    await bridge.stop();
+    await shield.stop();
     process.exit(0);
   };
   process.on('SIGINT', () => void stop('SIGINT'));

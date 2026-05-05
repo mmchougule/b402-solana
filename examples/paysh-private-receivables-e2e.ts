@@ -1,21 +1,21 @@
 /**
  * pay.sh Private Receivables — end-to-end demo on devnet.
  *
- * Demonstrates the privacy bridge of PRD-25 with real on-chain operations:
- *   1. Operator runs a PayshBridge configured with their devnet keypair as
+ * Demonstrates the privacy shield of PRD-25 with real on-chain operations:
+ *   1. Operator runs a PayshShield configured with their devnet keypair as
  *      the stealth ingress.
  *   2. A simulated payer (fresh keypair, airdropped) sends a real SPL
  *      transfer of test-USDC to the operator's ingress ATA — this is what
  *      an x402 / pay.sh client would do under the hood when paying
  *      against a metered endpoint with `payTo = <operator pubkey>`.
- *   3. Bridge picks up the WS log, parses the transfer, calls
+ *   3. Shield picks up the WS log, parses the transfer, calls
  *      `b402.shield()` (real Groth16 proof, real Merkle tree append).
  *   4. Operator unshields to a freshly-generated wallet — the recipient
  *      has no on-chain link to the payer.
  *
  * What this proves:
  *   - The b402-solana SDK shield/unshield actually executes inside the
- *     bridge's lifecycle. The privacy comes from the SDK; the bridge
+ *     shield's lifecycle. The privacy comes from the SDK; the shield
  *     is the glue.
  *   - An external SPL transfer to the ingress ATA is detected, parsed,
  *     and shielded automatically — no operator action between payment
@@ -68,10 +68,10 @@ import {
   vaultPda,
 } from '@b402ai/solana';
 import {
-  PayshBridge,
+  PayshShield,
   makeSdkShieldFn,
-  type BridgeEvent,
-} from '@b402ai/paysh-bridge';
+  type ShieldEvent,
+} from '@b402ai/paysh-shield';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const RPC_URL = process.env.RPC_URL ?? 'https://api.devnet.solana.com';
@@ -108,7 +108,7 @@ async function main(): Promise<void> {
   await addTokenConfig(conn, operator, mint);
   console.log(`  operator ATA ${operatorAta.address.toBase58()} (this is what payers transfer to)`);
 
-  // ── 3. Spin up the bridge ───────────────────────────────────────────
+  // ── 3. Spin up the shield ───────────────────────────────────────────
   const b402 = new B402Solana({
     cluster: 'devnet',
     rpcUrl: RPC_URL,
@@ -119,7 +119,7 @@ async function main(): Promise<void> {
     },
   });
 
-  const bridge = new PayshBridge({
+  const shield = new PayshShield({
     connection: conn,
     ingressOwner: operator.publicKey,
     ingressAta: operatorAta.address,
@@ -128,15 +128,15 @@ async function main(): Promise<void> {
   });
 
   // Promise that resolves on the first `shielded` event.
-  const shielded = new Promise<BridgeEvent>((resolve, reject) => {
-    bridge.on((e) => {
+  const shielded = new Promise<ShieldEvent>((resolve, reject) => {
+    shield.on((e) => {
       if (e.name === 'shielded') resolve(e);
       else if (e.name === 'failed') reject(new Error(`shield failed: ${e.error}`));
     });
   });
 
-  await bridge.start();
-  console.log(`\nbridge started; payTo = ${bridge.payTo()}`);
+  await shield.start();
+  console.log(`\nbridge started; payTo = ${shield.payTo()}`);
   console.log(`  → in a real pay.sh provider, this is what goes in accepts[].payTo`);
 
   // ── 4. Simulate an x402 payment: fresh payer transfers test-USDC ────
@@ -168,13 +168,13 @@ async function main(): Promise<void> {
   console.log(`  payment tx ${paymentSig}`);
   console.log(`  https://explorer.solana.com/tx/${paymentSig}?cluster=devnet`);
 
-  // ── 5. Wait for the bridge to shield ────────────────────────────────
-  console.log('\nwaiting for bridge to shield (Groth16 proof + Merkle append)…');
+  // ── 5. Wait for the shield to land ────────────────────────────────
+  console.log('\nwaiting for the shield to land (Groth16 proof + Merkle append)…');
   const t0 = Date.now();
   const evt = await Promise.race([
     shielded,
     new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error('timeout: bridge did not shield within 90s')), 90_000),
+      setTimeout(() => reject(new Error('timeout: shield did not land within 90s')), 90_000),
     ),
   ]);
   console.log(`  ✓ shielded in ${(Date.now() - t0) / 1000}s`);
@@ -218,7 +218,7 @@ async function main(): Promise<void> {
       console.log('  ⚠ skipped — RPC does not serve Photon (Light Protocol indexer).');
       console.log('     set RPC_URL to a Helius/Triton devnet endpoint and re-run, e.g.');
       console.log('     RPC_URL=https://devnet.helius-rpc.com/?api-key=<key> pnpm paysh-e2e');
-      console.log('     the SHIELD step above is the privacy-bridge demonstration and');
+      console.log('     the SHIELD step above is the privacy-shield demonstration and');
       console.log('     completed successfully. Unshield is a separate operator action.');
     } else {
       throw err;
@@ -242,7 +242,7 @@ async function main(): Promise<void> {
     console.log('   the operator\'s shielded balance is unlinkable to any future spend.');
   }
 
-  await bridge.stop();
+  await shield.stop();
 }
 
 // ── helpers ──────────────────────────────────────────────────────────

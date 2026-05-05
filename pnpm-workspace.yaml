@@ -5,7 +5,7 @@ packages:
   - 'packages/relayer'
   - 'packages/mcp-server'
   - 'packages/create-agent'
-  - 'packages/paysh-bridge'
+  - 'packages/paysh-shield'
   - 'apps/paysh-demo-server'
   - 'apps/playground'
   - 'circuits'

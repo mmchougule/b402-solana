@@ -1,11 +1,11 @@
 import type { PublicKey } from '@solana/web3.js';
 
 import { Reconciler } from './reconciler.js';
-import { InMemoryBridgeStore } from './store.js';
+import { InMemoryShieldStore } from './store.js';
 import { parseUsdcTransfersToIngress, type ParsedTxLike } from './parse.js';
 import type {
-  BridgeEvent,
-  BridgeStore,
+  ShieldEvent,
+  ShieldStore,
   Observation,
   RetryPolicy,
   ShieldFn,
@@ -16,7 +16,7 @@ import type {
  * Typed structurally so tests can supply a fake without pulling in the
  * full RPC client.
  */
-export interface BridgeConnection {
+export interface ShieldConnection {
   onLogs(
     target: PublicKey,
     callback: (logs: { signature: string; err: unknown }, ctx: { slot: number }) => void,
@@ -29,19 +29,19 @@ export interface BridgeConnection {
   ): Promise<ParsedTxLike | null>;
 }
 
-export interface PayshBridgeConfig {
+export interface PayshShieldConfig {
   /** Solana connection used for log subscription + tx fetch. */
-  connection: BridgeConnection;
+  connection: ShieldConnection;
   /** Wallet pubkey of the ingress (what an x402 provider declares as `payTo`). */
   ingressOwner: PublicKey;
-  /** ATA derived from `(ingressOwner, mint)`. The bridge subscribes to logs
+  /** ATA derived from `(ingressOwner, mint)`. The shield subscribes to logs
    *  of this account and matches incoming transfers' `destination` against it. */
   ingressAta: PublicKey;
   /** The shield function — typically `makeSdkShieldFn(b402Solana, mint)`,
    *  but injected so tests can use a stub. */
   shield: ShieldFn;
   /** Optional persistent store. Defaults to in-memory. */
-  store?: BridgeStore;
+  store?: ShieldStore;
   /** Retry policy override. */
   retry?: Partial<RetryPolicy>;
   /** Reconciler tick interval in ms. Pass 0 to disable the heartbeat (tests). */
@@ -58,17 +58,17 @@ export interface PayshBridgeConfig {
  *     → Reconciler invokes `shield()` (the SDK), retries on failure,
  *       emits `shielded` / `failed` / `reconciled` events.
  *
- * Lifecycle: caller invokes `start()` once; bridge owns the subscription
+ * Lifecycle: caller invokes `start()` once; shield owns the subscription
  * and the heartbeat timer until `stop()`.
  */
-export class PayshBridge {
+export class PayshShield {
   private readonly reconciler: Reconciler;
-  private readonly listeners: Array<(e: BridgeEvent) => void> = [];
+  private readonly listeners: Array<(e: ShieldEvent) => void> = [];
   private subscriptionId: number | null = null;
   private tickHandle: ReturnType<typeof setInterval> | null = null;
 
-  constructor(private readonly cfg: PayshBridgeConfig) {
-    const store = cfg.store ?? new InMemoryBridgeStore();
+  constructor(private readonly cfg: PayshShieldConfig) {
+    const store = cfg.store ?? new InMemoryShieldStore();
     const opts = cfg.retry ? { policy: cfg.retry } : {};
     this.reconciler = new Reconciler(store, cfg.shield, opts);
     this.reconciler.on((e) => this.emit(e));
@@ -79,7 +79,7 @@ export class PayshBridge {
     return this.cfg.ingressOwner.toBase58();
   }
 
-  on(cb: (e: BridgeEvent) => void): void {
+  on(cb: (e: ShieldEvent) => void): void {
     this.listeners.push(cb);
   }
 
@@ -142,12 +142,12 @@ export class PayshBridge {
     }
   }
 
-  private emit(e: BridgeEvent): void {
+  private emit(e: ShieldEvent): void {
     for (const cb of this.listeners) {
       try {
         cb(e);
       } catch {
-        /* listener errors are not the bridge's problem */
+        /* listener errors are not the shield's problem */
       }
     }
   }

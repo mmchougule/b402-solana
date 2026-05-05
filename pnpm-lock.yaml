@@ -10,9 +10,9 @@ importers:
 
   apps/paysh-demo-server:
     dependencies:
-      '@b402ai/paysh-bridge':
+      '@b402ai/paysh-shield':
         specifier: workspace:*
-        version: link:../../packages/paysh-bridge
+        version: link:../../packages/paysh-shield
       '@b402ai/solana':
         specifier: workspace:*
         version: link:../../packages/sdk
@@ -99,9 +99,9 @@ importers:
 
   examples:
     dependencies:
-      '@b402ai/paysh-bridge':
+      '@b402ai/paysh-shield':
         specifier: workspace:*
-        version: link:../packages/paysh-bridge
+        version: link:../packages/paysh-shield
       '@b402ai/solana':
         specifier: workspace:*
         version: link:../packages/sdk
@@ -189,7 +189,7 @@ importers:
         specifier: ^2.1.4
         version: 2.1.9(@types/node@22.19.17)
 
-  packages/paysh-bridge:
+  packages/paysh-shield:
     dependencies:
       '@b402ai/solana':
         specifier: workspace:*

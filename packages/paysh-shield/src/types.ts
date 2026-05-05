@@ -1,12 +1,12 @@
 /**
- * Public types for @b402ai/paysh-bridge.
+ * Public types for @b402ai/paysh-shield.
  *
- * The bridge converts incoming USDC SPL transfers (paid by an x402 / pay.sh
+ * The shield converts incoming USDC SPL transfers (paid by an x402 / pay.sh
  * client to a stealth ingress address) into shielded notes for an operator,
  * via the b402-solana SDK. See PRD-25.
  *
  * The data model is small on purpose: each incoming USDC transfer becomes
- * one `Observation` that walks a small state machine in `BridgeStore`:
+ * one `Observation` that walks a small state machine in `ShieldStore`:
  *
  *   seen ──▶ shielding ──▶ shielded
  *               │
@@ -31,7 +31,7 @@ export type ObservationState =
   | 'shielded'    // confirmed on-chain, note created
   | 'failed';     // gave up after retries
 
-/** Per-tx record stored by the bridge. */
+/** Per-tx record stored by the shield. */
 export interface ObservationRecord {
   observation: Observation;
   state: ObservationState;
@@ -45,16 +45,16 @@ export interface ObservationRecord {
 }
 
 /**
- * Persistent state for the bridge. v1 ships an in-memory implementation;
+ * Persistent state for the shield. v1 ships an in-memory implementation;
  * the interface is pluggable so an operator can drop in SQLite, Postgres,
  * etc. without touching reconciler logic.
  *
  * Implementations MUST be safe under concurrent calls from a single process
  * (the reconciler may interleave with the WS handler). Cross-process
- * concurrency is out of scope for v1 — operators run a single bridge
+ * concurrency is out of scope for v1 — operators run a single shield
  * instance per ingress.
  */
-export interface BridgeStore {
+export interface ShieldStore {
   get(txSig: string): Promise<ObservationRecord | undefined>;
   /** Insert a fresh `seen` record. No-op (returns existing) if txSig already known. */
   putSeen(o: Observation): Promise<ObservationRecord>;
@@ -71,10 +71,10 @@ export interface BridgeStore {
   all(): Promise<ObservationRecord[]>;
 }
 
-export type BridgeEventName = 'shielded' | 'failed' | 'reconciled';
+export type ShieldEventName = 'shielded' | 'failed' | 'reconciled';
 
-export interface BridgeEvent {
-  name: BridgeEventName;
+export interface ShieldEvent {
+  name: ShieldEventName;
   txSig: string;
   /** Present on `shielded`. */
   commitment?: string;

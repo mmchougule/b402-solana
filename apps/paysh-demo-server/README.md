@@ -1,12 +1,12 @@
 # paysh-demo-server
 
-Deployable demo — single Node process running an x402-gated `/weather/{city}` endpoint backed by `@b402ai/paysh-bridge`. Every USDC payment that lands at the operator's USDC ATA is auto-shielded into a b402 note.
+Deployable demo — single Node process running an x402-gated `/weather/{city}` endpoint backed by `@b402ai/paysh-shield`. Every USDC payment that lands at the operator's USDC ATA is auto-shielded into a b402 note.
 
 ## Architecture
 
 - HTTP server (Node `http`): `/weather/{city}` (402-gated), `/openapi.json`, `/healthz`.
-- Long-lived `PayshBridge`: `Connection.onLogs` on the operator's USDC ATA → SDK `shield()`.
-- Single `Connection` shared by the HTTP path and the bridge.
+- Long-lived `PayshShield`: `Connection.onLogs` on the operator's USDC ATA → SDK `shield()`.
+- Single `Connection` shared by the HTTP path and the shield.
 
 ## Deploy on Railway
 
@@ -51,13 +51,13 @@ curl -i https://<deploy-host>/weather/Tokyo
 # 2. Pay + retry (uses the official pay CLI)
 pay --mainnet curl https://<deploy-host>/weather/Tokyo
 
-# 3. Bridge logs in Railway should show:
-#    [bridge] shielded <txSig>… → <commitment>…
+# 3. Shield logs in Railway should show:
+#    [shield] shielded <txSig>… → <commitment>…
 ```
 
 ## Threat model on a public deploy
 
-- The operator keypair is in container env. Treat as a hot key. Keep float small (the bridge shields with ~30s latency on the worst path; SOL fees per shield ~5000 lamports).
+- The operator keypair is in container env. Treat as a hot key. Keep float small (the shield shields with ~30s latency on the worst path; SOL fees per shield ~5000 lamports).
 - Helius RPC sees every payment; same trust assumption as any wallet behind a hosted RPC.
 - No rate limit on `/weather/{city}` — the 402 already gates spam (each request requires a paid USDC tx). Adding rate limit is reasonable if cost spikes become an issue.
 - The container's CPU usage spikes ~2s per shield (Groth16 proof generation). Memory peak ~500MB. A standard Railway plan is sufficient.
