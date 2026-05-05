@@ -24,6 +24,13 @@ default = []
 # owner. Default flips after fork-test sign-off + mainnet redeploy
 # (PRD-33 Phase 33.4).
 per_user_obligation = []
+# PRD-33 §6.4 — restricts execute() to CPI calls from b402_pool only.
+# Without this, anyone with a depositor's public viewing_pub_hash can
+# call execute(Withdraw) directly and drain the user's obligation
+# (out_vault has no owner constraint). Production deploys MUST include
+# this feature; default off only for unit tests that don't simulate the
+# pool wrapper.
+cpi-only = []
 
 [dependencies]
 anchor-lang.workspace = true

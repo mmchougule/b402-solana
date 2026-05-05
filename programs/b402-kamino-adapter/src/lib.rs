@@ -124,6 +124,19 @@ pub const KAMINO_IX_REPAY_OBLIGATION_LIQUIDITY: [u8; 8] = [145, 178, 13, 225, 76
 pub const SEED_KAMINO_OBL: &[u8] = b"kamino-obl";
 /// Versioned namespace shared with the rest of b402.
 pub const VERSION_PREFIX: &[u8] = b"b402/v1";
+/// PRD-33 §6.4 — the only program permitted to CPI into kamino-adapter
+/// when built with `--features cpi-only`. Without this restriction,
+/// anyone watching a depositor's privateLend tx can extract
+/// `viewing_pub_hash`, derive the user's `owner_pda`, and call
+/// `execute(Withdraw)` directly — adapter signs Kamino's withdraw via
+/// PDA seeds (no spending_priv check on the adapter side), out_vault
+/// is unconstrained, attacker drains the user's obligation.
+///
+/// Mirrors b402_nullifier::B402_POOL_PROGRAM_ID. Pinned at the same
+/// canonical deploy address.
+#[cfg(feature = "cpi-only")]
+pub const B402_POOL_PROGRAM_ID: anchor_lang::prelude::Pubkey =
+    anchor_lang::pubkey!("42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y");
 /// PDA seed for adapter authority. Same scheme as every b402 adapter.
 pub const SEED_ADAPTER: &[u8] = b"adapter";
 /// PDA seed for per-user adapter-side obligation owner (PRD-33 §3.2).
@@ -322,6 +335,41 @@ pub mod b402_kamino_adapter {
         min_out_amount: u64,
         action_payload: Vec<u8>,
     ) -> Result<()> {
+        // PRD-33 §6.4 — CPI-only enforcement for stateful adapters.
+        //
+        // Without this gate the per-user obligation model is unsafe: a
+        // depositor's `viewing_pub_hash` is public (lives in the deposit
+        // tx's action_payload), so anyone can construct a direct
+        // `execute(Withdraw)` call with the same hash, derive the
+        // depositor's `owner_pda`, and have the adapter sign Kamino's
+        // withdraw on their behalf. `out_vault` has no owner constraint
+        // in `Execute<'info>` — an attacker passes their own USDC
+        // account and drains the user.
+        //
+        // The pool's privateRedeem path proves spending_priv ownership
+        // of the kUSDC voucher note before invoking the adapter, so
+        // calls routed through the pool are safe. cpi-only refuses any
+        // OTHER caller (mirrors `b402_nullifier::create_nullifier`).
+        #[cfg(feature = "cpi-only")]
+        {
+            use anchor_lang::solana_program::instruction::get_stack_height;
+            use anchor_lang::solana_program::sysvar::instructions::{
+                load_current_index_checked, load_instruction_at_checked,
+            };
+            // Stack height 1 = top-level dispatch. Reject — only CPIs allowed.
+            require!(
+                get_stack_height() > 1,
+                KaminoAdapterError::DirectCallRejected
+            );
+            let ix_sysvar = &ctx.accounts.ix_sysvar;
+            let current_idx = load_current_index_checked(ix_sysvar)? as usize;
+            let outer_ix = load_instruction_at_checked(current_idx, ix_sysvar)?;
+            require!(
+                outer_ix.program_id == crate::B402_POOL_PROGRAM_ID,
+                KaminoAdapterError::CallerNotB402Pool
+            );
+        }
+
         // ABI sanity. Mirrors b402-jupiter-adapter.
         require!(in_amount > 0, KaminoAdapterError::InvalidAmount);
 
@@ -1720,6 +1768,28 @@ pub struct Execute<'info> {
     pub adapter_out_ta: Account<'info, TokenAccount>,
 
     pub token_program: Program<'info, Token>,
+
+    /// CPI-ONLY MODE (PRD-33 §6.4): the instructions sysvar lets the
+    /// adapter walk the tx's outer ix and verify the caller's program_id
+    /// matches `B402_POOL_PROGRAM_ID`. Without this gate, anyone watching
+    /// a depositor's privateLend tx can extract `viewing_pub_hash` from
+    /// the action_payload, derive their `owner_pda`, and call
+    /// `kamino_adapter::execute(Withdraw)` directly — bypassing the
+    /// pool's spending_priv proof check. Adapter then signs Kamino's
+    /// withdraw as `owner_pda` (PDAs are signed by their owning program;
+    /// no spending_priv ever touches the adapter), and `out_vault` has
+    /// no owner constraint in this struct, so the attacker passes their
+    /// own USDC token account and drains the user.
+    ///
+    /// `feature = "cpi-only"` enforces:
+    ///   1. `get_stack_height() > 1` — rejects top-level direct calls
+    ///   2. top-level ix's program_id == `B402_POOL_PROGRAM_ID`
+    ///
+    /// Mirrors b402_nullifier's pattern (see programs/b402-nullifier/src/lib.rs).
+    /// CHECK: address constraint pins the canonical sysvar pubkey.
+    #[cfg(feature = "cpi-only")]
+    #[account(address = anchor_lang::solana_program::sysvar::instructions::ID)]
+    pub ix_sysvar: AccountInfo<'info>,
 }
 
 /// Per-user obligation garbage-collection accounts (PRD-33 §5).
@@ -1778,6 +1848,10 @@ pub enum KaminoAdapterError {
     OwnerPdaMismatch = 6010,
     #[msg("first deposit must be at least SETUP_FEE_USDC + MIN_FIRST_DEPOSIT_AFTER_FEE_USDC (PRD-33 §5.4.3)")]
     DepositBelowFirstDepositMinimum = 6011,
+    #[msg("execute may only be invoked via CPI (cpi-only build); rejects direct calls that bypass pool's spending_priv proof gate")]
+    DirectCallRejected = 6012,
+    #[msg("execute caller is not b402_pool (cpi-only build); only the pool routes spending_priv-gated invocations")]
+    CallerNotB402Pool = 6013,
 }
 
 // ---------------------------------------------------------------------------

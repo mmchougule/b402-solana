@@ -555,7 +555,11 @@ async function main() {
     adapterOutTa: adapterOutTa.address,
     alt: altPubkey,
     photonRpc,
-    expectedOut: 0n,
+    // Path A voucher value: kUSDC note value = lendAmount (1:1 against
+    // deposit USDC; Kamino's exchange-rate interest accrues in the
+    // obligation, not the voucher). Pool skips out_vault slippage check
+    // when stateful adapter delivers less than expected (delta=0 here).
+    expectedOut: lendAmount,
     adapterIxData,
     actionPayload: kaminoActionPayload,
     remainingAccounts,
@@ -586,6 +590,156 @@ async function main() {
     process.exit(1);
   }
   console.log('✓ privateLend on mainnet WORKS — per-user obligation created.');
+
+  // ====================================================================
+  // STEP 7: privateRedeem — V1.5 ARCHITECTURAL WORK STILL NEEDED.
+  //
+  // Path A (current pool binary) cleanly handles privateLend: the pool
+  // skips the out_vault delta check when a stateful adapter delivers
+  // less than expected_out_value (Kamino kept the underlying in the
+  // obligation). The user gets a kUSDC voucher note proof-bound to
+  // depositAmount.
+  //
+  // privateRedeem is structurally harder. The standard adapt_execute
+  // path does:
+  //   1. Burn input note (kUSDC voucher value=N)
+  //   2. Transfer N kUSDC from in_vault → adapter_in_ta
+  //   3. Call adapter (Kamino withdraw)
+  //   4. Reshield USDC out-note via dual-note excess minting
+  //
+  // Step 2 fails — the pool's kUSDC vault has 0 kUSDC because the
+  // voucher was never backed by liquid tokens (Path A's whole point).
+  // The fix is one of:
+  //   (a) New `redeem_through_stateful_adapter` pool ix that skips the
+  //       input transfer (V1.5 — pool source change + circuit work).
+  //   (b) Mark in_mint as "synthetic" in token_config and have
+  //       adapt_execute conditionally skip the transfer (V1.5).
+  //
+  // For V1 ship, redeem flows through the kamino-adapter DIRECTLY (see
+  // examples/kamino-adapter-fork-per-user.mjs). Privacy degrades on
+  // the redeem side — owner_pda is publicly linked to the spend — but
+  // the deposit side privacy + per-user obligation isolation remain.
+  //
+  // Set REDEEM=1 to attempt the through-pool path anyway (will fail
+  // until the pool ix lands).
+  // ====================================================================
+  if (process.env.REDEEM !== '1') {
+    console.log('\n=== privateRedeem skipped (V1: direct-adapter; through-pool needs V1.5) ===');
+    console.log('  see examples/kamino-adapter-fork-per-user.mjs for the direct redeem flow');
+    return;
+  }
+
+  console.log('\n▶ privateRedeem — kUSDC -> USDC via kamino-adapter');
+
+  // Pool's adapt_execute requires `fee_ata_sentinel` (the relayer's ATA
+  // for the IN mint) to be initialized — Anchor's `Account<TokenAccount>`
+  // type. For redeem, in_mint flips to kUSDC; the relayer (= admin in
+  // this smoke) doesn't have a kUSDC ATA from the deposit side. Create
+  // it idempotently before the redeem.
+  await getOrCreateAssociatedTokenAccount(conn, admin, outMint /* kUSDC */, admin.publicKey);
+
+  // The kUSDC out-note minted by the lend is the rightmost leaf in the
+  // pool's tree (commitment_out[0]). Pull it from the SDK's note store.
+  const kUsdcMintFr = leToFrReduced(outMint.toBytes());
+  const kUsdcNotes = b402._notes.getSpendable(kUsdcMintFr);
+  if (kUsdcNotes.length === 0) {
+    console.error('❌ no kUSDC notes — privateLend did not reshield (Path A bug?)');
+    process.exit(1);
+  }
+  const sortedKusdc = [...kUsdcNotes].sort((a, b) => Number(BigInt(b.leafIndex) - BigInt(a.leafIndex)));
+  const redeemNote = sortedKusdc[0];
+  const ktIn = redeemNote.value;
+  console.log(`  using kUSDC note (leafIndex=${redeemNote.leafIndex}, value=${ktIn})`);
+
+  // Withdraw flow flips in/out: inMint=kUSDC, outMint=USDC.
+  // adapter_in_ta scratch is now kUSDC, adapter_out_ta scratch is USDC.
+  const wAdapterInTa = await getOrCreateAssociatedTokenAccount(
+    conn, admin, outMint /* kUSDC */, adapterAuthority, true,
+  );
+  const wAdapterOutTa = await getOrCreateAssociatedTokenAccount(
+    conn, admin, inMint /* USDC */, adapterAuthority, true,
+  );
+
+  // ra_withdraw_per_user (20 entries — see adapter source).
+  const wRemainingAccounts = [
+    { pubkey: RESERVE, isSigner: false, isWritable: true },                                   // 0  withdraw_reserve
+    { pubkey: obligation, isSigner: false, isWritable: true },                                // 1  obligation
+    { pubkey: MARKET, isSigner: false, isWritable: false },                                   // 2  lending_market
+    { pubkey: lendingMarketAuthorityPda(MARKET), isSigner: false, isWritable: false },        // 3  lending_market_authority
+    { pubkey: r.collateralReserveDestSupply, isSigner: false, isWritable: true },             // 4  reserve_source_collateral
+    { pubkey: r.collateralMint, isSigner: false, isWritable: true },                          // 5  reserve_collateral_mint
+    { pubkey: r.liquiditySupply, isSigner: false, isWritable: true },                         // 6  reserve_liquidity_supply
+    { pubkey: ownerUsdcAta, isSigner: false, isWritable: true },                              // 7  user_destination = owner_usdc_ata
+    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },                         // 8  collateral token program
+    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },                         // 9  liquidity token program
+    { pubkey: SYSVAR_INSTRUCTIONS, isSigner: false, isWritable: false },                      // 10 instructions sysvar
+    { pubkey: r.liquidityMint, isSigner: false, isWritable: false },                          // 11 reserve_liquidity_mint
+    { pubkey: ownerPda, isSigner: false, isWritable: true },                                  // 12 owner_pda (writable for sweep)
+    { pubkey: r.pyth ?? KLEND, isSigner: false, isWritable: false },                          // 13 oracle_pyth
+    { pubkey: r.switchboardPrice ?? KLEND, isSigner: false, isWritable: false },              // 14 oracle_swb_price
+    { pubkey: r.switchboardTwap ?? KLEND, isSigner: false, isWritable: false },               // 15 oracle_swb_twap
+    { pubkey: r.scope ?? KLEND, isSigner: false, isWritable: false },                         // 16 oracle_scope
+    { pubkey: isFarmAttached ? obligationFarm : KLEND, isSigner: false, isWritable: isFarmAttached }, // 17 obligation_farm
+    { pubkey: isFarmAttached ? r.reserveFarmCollateral : KLEND, isSigner: false, isWritable: isFarmAttached }, // 18 reserve_farm_state
+    { pubkey: FARMS_PROGRAM, isSigner: false, isWritable: false },                            // 19 farms_program
+  ];
+
+  // KaminoAction::Withdraw payload.
+  const wKaminoActionPayload = Buffer.alloc(1 + 32 + 8 + 8);
+  let wOff = 0;
+  wKaminoActionPayload.writeUInt8(1, wOff); wOff += 1; // Withdraw variant
+  RESERVE.toBuffer().copy(wKaminoActionPayload, wOff); wOff += 32;
+  wKaminoActionPayload.writeBigUInt64LE(ktIn, wOff); wOff += 8;
+  wKaminoActionPayload.writeBigUInt64LE(0n, wOff); // min_underlying_out
+
+  const wAdapterIxData = new Uint8Array(Buffer.concat([
+    Buffer.from(EXECUTE_DISC),
+    u64Le(ktIn),
+    u64Le(0n), // min_out
+    u32Le(wKaminoActionPayload.length),
+    wKaminoActionPayload,
+  ]));
+
+  // Pool's USDC vault (where redeemed USDC will land via adapter sweep).
+  const usdcVaultPda = vaultPda(POOL, inMint);
+  const preUsdcInfo = await conn.getAccountInfo(usdcVaultPda);
+  const preUsdc = preUsdcInfo ? BigInt(preUsdcInfo.data.readBigUInt64LE(64)) : 0n;
+
+  const redeemRes = await b402.privateRedeem({
+    inMint: outMint,  // kUSDC (burning the lend out-note)
+    outMint: inMint,  // USDC
+    amount: ktIn,
+    note: redeemNote,
+    adapterProgramId: KAMINO_ADAPTER,
+    adapterInTa: wAdapterInTa.address,
+    adapterOutTa: wAdapterOutTa.address,
+    alt: altPubkey,
+    photonRpc,
+    expectedOut: 0n,  // Path A: pool skips slippage check for stateful adapter on the inbound side too;
+                      // for redeem the actual delta is non-zero (USDC physically arrives), so the standard
+                      // delta check applies. expectedOut=0 means any non-zero delta is acceptable.
+    adapterIxData: wAdapterIxData,
+    actionPayload: wKaminoActionPayload,
+    remainingAccounts: wRemainingAccounts,
+    phase9DualNote: true,
+    pendingInputsMode: true,
+  });
+
+  const postUsdcInfo = await conn.getAccountInfo(usdcVaultPda);
+  const postUsdc = postUsdcInfo ? BigInt(postUsdcInfo.data.readBigUInt64LE(64)) : 0n;
+  const usdcDelta = postUsdc - preUsdc;
+
+  console.log('=========================================');
+  console.log('PRIVATEREDEEM RESULT');
+  console.log('  privateRedeem sig:', redeemRes.signature);
+  console.log('  USDC vault delta:', usdcDelta.toString());
+  console.log('  redeemed:', usdcDelta, 'raw USDC for', ktIn, 'kUSDC');
+  console.log('=========================================');
+  if (usdcDelta <= 0n) {
+    console.error('❌ no USDC redeemed — Kamino withdraw did not credit pool vault');
+    process.exit(1);
+  }
+  console.log('✓ ROUND-TRIP COMPLETE — privateLend + privateRedeem both green');
 }
 
 main().catch((e) => { console.error('\n❌', e); process.exit(1); });

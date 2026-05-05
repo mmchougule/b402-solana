@@ -305,15 +305,23 @@ pub(crate) fn build_adapter_cpi_metas(
     adapter_in_ta: Pubkey,
     adapter_out_ta: Pubkey,
     token_program: Pubkey,
+    // Instructions sysvar — required for stateful (cpi-only) adapters.
+    // Pass `None` for stateless adapters (Jupiter, mock); they don't
+    // declare an `ix_sysvar` named slot and prepending it would shift
+    // all `remaining_accounts` by 1.
+    ix_sysvar: Option<Pubkey>,
     remaining: &[(Pubkey, /*is_writable*/ bool, /*is_signer*/ bool)],
 ) -> Vec<AccountMeta> {
-    let mut m = Vec::with_capacity(6 + remaining.len());
+    let mut m = Vec::with_capacity(7 + remaining.len());
     m.push(AccountMeta::new(adapter_authority, false));
     m.push(AccountMeta::new(in_vault, false));
     m.push(AccountMeta::new(out_vault, false));
     m.push(AccountMeta::new(adapter_in_ta, false));
     m.push(AccountMeta::new(adapter_out_ta, false));
     m.push(AccountMeta::new_readonly(token_program, false));
+    if let Some(ix_sv) = ix_sysvar {
+        m.push(AccountMeta::new_readonly(ix_sv, false));
+    }
     for (key, is_writable, is_signer) in remaining {
         if *is_writable {
             m.push(AccountMeta::new(*key, *is_signer));
@@ -653,21 +661,48 @@ pub fn handler<'info>(
     }
 
     // Pool transfers public_amount_in to adapter_in_ta (pool PDA signs the vault).
+    //
+    // PRD-33 §6.5 — privateRedeem of a synthetic voucher mint: the
+    // voucher (e.g. kUSDC issued by privateLend through the stateful
+    // Kamino adapter) was never backed by liquid tokens in `in_vault`.
+    // The user's claim lives in their per-user Kamino Obligation, owned
+    // by their `owner_pda`. Attempting to transfer N kUSDC out of an
+    // empty `in_vault` would fail with TokenError::InsufficientFunds.
+    //
+    // For (stateful adapter, synthetic in_mint) skip the transfer — the
+    // adapter's withdraw flow doesn't read `adapter_in_ta` (Kamino
+    // debits collateral from the obligation directly). The token-balance
+    // delta the pool's reshield logic needs is on the OUT side
+    // (USDC arriving in `out_vault`); that path is unchanged.
+    //
+    // Stateless adapters AND non-voucher in_mint paths keep the standard
+    // input transfer.
     let pool_config_info = ctx.accounts.pool_config.to_account_info();
     let signer_seeds: &[&[u8]] = &[VERSION_PREFIX, SEED_CONFIG, &[ctx.bumps.pool_config]];
     let signer = &[signer_seeds];
-    token::transfer(
-        CpiContext::new_with_signer(
-            ctx.accounts.token_program.to_account_info(),
-            Transfer {
-                from: ctx.accounts.in_vault.to_account_info(),
-                to: ctx.accounts.adapter_in_ta.to_account_info(),
-                authority: pool_config_info.clone(),
-            },
-            signer,
-        ),
-        pi.public_amount_in,
-    )?;
+    let skip_input_transfer = {
+        #[cfg(feature = "phase_9_dual_note")]
+        {
+            is_stateful_adapter(&adapter_program_key)
+                && is_synthetic_voucher_mint(&in_mint)
+        }
+        #[cfg(not(feature = "phase_9_dual_note"))]
+        { false }
+    };
+    if !skip_input_transfer {
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.in_vault.to_account_info(),
+                    to: ctx.accounts.adapter_in_ta.to_account_info(),
+                    authority: pool_config_info.clone(),
+                },
+                signer,
+            ),
+            pi.public_amount_in,
+        )?;
+    }
 
     // Relayer fee transfer (in IN mint, from in_vault). Circuit binding via
     // pi.relayer_fee_bind = Poseidon(TAG_FEE_BIND, fee, recipient).
@@ -697,6 +732,23 @@ pub fn handler<'info>(
     // `nullifier_remaining_consumed` is forwarded to the adapter.
     let adapter_remaining = &ctx.remaining_accounts[nullifier_remaining_consumed..];
 
+    // PRD-33 §6.4 — stateful (cpi-only) adapters declare an `ix_sysvar`
+    // named slot AFTER token_program in their Execute<'info> layout. Pool
+    // passes its own instructions_sysvar so the adapter can verify the
+    // outer ix's program_id matches B402_POOL_PROGRAM_ID. Stateless
+    // adapters (Jupiter, mock) don't declare the slot and would error
+    // on the unexpected meta — gate the prepend.
+    let stateful_adapter = {
+        #[cfg(feature = "phase_9_dual_note")]
+        { is_stateful_adapter(&adapter_program_key) }
+        #[cfg(not(feature = "phase_9_dual_note"))]
+        { false }
+    };
+    let ix_sysvar_for_adapter = if stateful_adapter {
+        Some(ctx.accounts.instructions_sysvar.key())
+    } else {
+        None
+    };
     let adapter_metas: Vec<AccountMeta> = build_adapter_cpi_metas(
         ctx.accounts.adapter_authority.key(),
         ctx.accounts.in_vault.key(),
@@ -704,6 +756,7 @@ pub fn handler<'info>(
         ctx.accounts.adapter_in_ta.key(),
         ctx.accounts.adapter_out_ta.key(),
         ctx.accounts.token_program.key(),
+        ix_sysvar_for_adapter,
         adapter_remaining
             .iter()
             .map(|a| (*a.key, a.is_writable, a.is_signer))
@@ -711,13 +764,16 @@ pub fn handler<'info>(
             .as_slice(),
     );
     let mut adapter_infos: Vec<AccountInfo<'info>> =
-        Vec::with_capacity(6 + adapter_remaining.len());
+        Vec::with_capacity(7 + adapter_remaining.len());
     adapter_infos.push(ctx.accounts.adapter_authority.to_account_info());
     adapter_infos.push(ctx.accounts.in_vault.to_account_info());
     adapter_infos.push(ctx.accounts.out_vault.to_account_info());
     adapter_infos.push(ctx.accounts.adapter_in_ta.to_account_info());
     adapter_infos.push(ctx.accounts.adapter_out_ta.to_account_info());
     adapter_infos.push(ctx.accounts.token_program.to_account_info());
+    if stateful_adapter {
+        adapter_infos.push(ctx.accounts.instructions_sysvar.clone());
+    }
     for a in adapter_remaining.iter() {
         adapter_infos.push(a.clone());
     }
@@ -768,13 +824,28 @@ pub fn handler<'info>(
     ctx.accounts.out_vault.reload()?;
     let post = ctx.accounts.out_vault.amount;
     let delta = post.saturating_sub(pre);
-    let stateful = {
+    // Path A semantics (PRD-33 §6.2): stateful adapters credit user
+    // claims into protocol state (Kamino Obligation owned by owner_pda),
+    // not into out_vault. On a privateLend deposit the SDK still wants
+    // a useful kUSDC voucher note — it passes expected_out_value = N
+    // (typically deposit amount or quoted kUSDC), but out_vault delta
+    // is 0 because Kamino didn't physically mint kUSDC tokens to us.
+    //
+    // The standard `delta >= expected_out_value` check would fail. Skip
+    // it ONLY when (stateful adapter) AND (delta < expected_out_value)
+    // — interpret the gap as "credited to obligation, not vault".
+    //
+    // privateRedeem path is unaffected: USDC physically arrives in
+    // out_vault via the adapter's owner_usdc_ata sweep, delta = M >= 0,
+    // standard check passes (whether expected_out is 0 with excess-
+    // minting picking up the M, or expected_out is M with no excess).
+    let stateful_voucher_mint = {
         #[cfg(feature = "phase_9_dual_note")]
-        { is_stateful_adapter(&adapter_program_key) }
+        { is_stateful_adapter(&adapter_program_key) && delta < pi.expected_out_value }
         #[cfg(not(feature = "phase_9_dual_note"))]
         { false }
     };
-    if !stateful {
+    if !stateful_voucher_mint {
         require!(
             delta >= pi.expected_out_value,
             PoolError::AdapterReturnedLessThanMin
@@ -841,7 +912,7 @@ pub fn handler<'info>(
         // there's no excess to mint. The slippage gate above already
         // bypassed; the symmetric thing here is to early-out.
         #[cfg(feature = "phase_9_dual_note")]
-        if !stateful {
+        if !stateful_voucher_mint {
         let excess: u64 = delta
             .checked_sub(pi.expected_out_value)
             .ok_or(error!(PoolError::ArithmeticUnderflow))?;
@@ -966,6 +1037,29 @@ fn is_stateful_adapter(program_id: &Pubkey) -> bool {
     const KAMINO_ADAPTER: Pubkey =
         anchor_lang::pubkey!("2enwFgcGKJDqruHpCtvmhtxe3DYcV3k72VTvoGcdt2rX");
     program_id == &KAMINO_ADAPTER
+}
+
+/// PRD-33 §6.5 — voucher mints issued by stateful adapters' privateLend
+/// path. These commitments in the b402 pool's tree represent claims
+/// against a corresponding per-user adapter-side state (e.g. a Kamino
+/// Obligation), NOT liquid tokens in `in_vault`.
+///
+/// On privateRedeem the pool MUST skip the `in_vault → adapter_in_ta`
+/// transfer for these mints — the vault has no liquid balance to send
+/// (the deposit's value went into Kamino's reserve, not into the pool).
+/// The adapter then does Kamino's withdraw, USDC physically arrives in
+/// `out_vault`, and the pool reshields a USDC note against the actual
+/// delta as usual.
+///
+/// Adding a new voucher mint = bump the pool to extend this list. Same
+/// audit + upgrade discipline as `is_stateful_adapter`.
+#[allow(dead_code)]
+fn is_synthetic_voucher_mint(mint: &Pubkey) -> bool {
+    // kUSDC — Kamino USDC main reserve collateral mint. Issued by
+    // the adapter's `privateLend` (Kamino V2 deposit).
+    const KUSDC: Pubkey =
+        anchor_lang::pubkey!("B8V6WVjPxW1UGwVDfxH2d2r8SyT4cqn7dQRK6XneVa7D");
+    mint == &KUSDC
 }
 
 /// Offset in the adapter ix data at which the action_payload's u32 LE
@@ -1633,7 +1727,7 @@ mod adapter_cpi_meta_tests {
         // as Kamino's feePayer in the inner CPI; readonly here surfaces as
         // Anchor ConstraintMut on the kamino-adapter side.
         let (a, ivt, ovt, ita, ota, tok) = fixtures();
-        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, &[]);
+        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, None, &[]);
         assert_eq!(metas[0].pubkey, a);
         assert!(
             metas[0].is_writable,
@@ -1645,7 +1739,7 @@ mod adapter_cpi_meta_tests {
     #[test]
     fn vaults_and_scratch_atas_are_writable() {
         let (a, ivt, ovt, ita, ota, tok) = fixtures();
-        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, &[]);
+        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, None, &[]);
         // Slot 1: in_vault
         assert_eq!(metas[1].pubkey, ivt);
         assert!(metas[1].is_writable, "in_vault MUST be writable — token transfers debit it");
@@ -1663,7 +1757,7 @@ mod adapter_cpi_meta_tests {
     #[test]
     fn token_program_is_readonly_and_not_signer() {
         let (a, ivt, ovt, ita, ota, tok) = fixtures();
-        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, &[]);
+        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, None, &[]);
         assert_eq!(metas[5].pubkey, tok);
         assert!(!metas[5].is_writable, "token_program is a Program account; never written");
         assert!(!metas[5].is_signer);
@@ -1676,7 +1770,7 @@ mod adapter_cpi_meta_tests {
         let r2 = (Pubkey::new_unique(), false, false); // readonly, not signer
         let r3 = (Pubkey::new_unique(), true, true);   // writable, signer
         let r4 = (Pubkey::new_unique(), false, true);  // readonly, signer
-        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, &[r1, r2, r3, r4]);
+        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, None, &[r1, r2, r3, r4]);
 
         // Total = 6 named + 4 forwarded.
         assert_eq!(metas.len(), 10);
@@ -1709,7 +1803,7 @@ mod adapter_cpi_meta_tests {
         // accounts in this exact order. Per-adapter remaining_accounts
         // begin at index 6.
         let (a, ivt, ovt, ita, ota, tok) = fixtures();
-        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, &[]);
+        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, None, &[]);
         assert_eq!(metas.len(), 6);
         assert_eq!(metas[0].pubkey, a, "slot 0: adapter_authority");
         assert_eq!(metas[1].pubkey, ivt, "slot 1: in_vault");
