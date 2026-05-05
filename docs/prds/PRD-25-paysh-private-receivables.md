@@ -166,6 +166,7 @@ PRD-25 is "done" when all of the following hold:
 
 - **PRD-25-A:** rotated stealth ingress (per-payment).
 - **PRD-25-B:** sponsored shield (ingress does not need a keypair; relayer signs).
+- **PRD-25-C:** payer-side sponsored gas. Today's x402 `exact` scheme on Solana makes the payer the tx fee payer, so they need a SOL float just to pay USDC. Solana's tx model allows a separate `fee_payer` from the SPL `authority`; a "sponsored exact" variant could have the server return a partially-built tx with `fee_payer = sponsor`, payer adds their authority signature, server submits. Requires either a new x402 scheme string or `extra:{}` metadata that the `pay` CLI doesn't yet read. Tracked separately.
 - **Upstream RFC:** propose a `scheme: "shielded-solana"` to pay.sh, with `extra.shieldedTo` carrying a viewing-key commitment instead of a pubkey. Tracked outside this repo.
 - **Operator dashboard:** a small Next.js app reading the `@b402ai/solana-mcp` surface. Bonus, not blocking.
 

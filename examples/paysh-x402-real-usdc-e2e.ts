@@ -285,9 +285,10 @@ async function main(): Promise<void> {
 
     console.log('[operator] unshield…');
     const photonRpc = createRpc(RPC_URL, process.env.B402_PHOTON_RPC_URL ?? RPC_URL);
-    // Devnet pool is built with the inline-CPI nullifier feature on; mainnet
-    // is on the v2.1 sibling-ix wire shape (the SDK class default).
-    const inlineCpiNullifier = CLUSTER === 'devnet';
+    // Both deployed pools take the inline-CPI nullifier wire shape on the
+    // current build. Toggleable via env in case a future deployment differs.
+    const inlineCpiNullifier =
+      process.env.B402_INLINE_CPI_NULLIFIER === '0' ? false : true;
     const unshieldRes = await b402.unshield({
       to: recipient.publicKey,
       mint: USDC_MINT,
