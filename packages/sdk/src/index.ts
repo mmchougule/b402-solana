@@ -45,6 +45,17 @@ export { shield, type ShieldParams, type ShieldResult } from './actions/shield.j
 export { unshield, type UnshieldParams, type UnshieldResult } from './actions/unshield.js';
 export { Scanner, parseProgramDataLog, expectedCommitmentForOwner, type ScannerOptions } from './notes/scanner.js';
 
+// Adapter helpers — Kamino lend/redeem.
+export {
+  buildKaminoDepositActionPayload,
+  buildKaminoWithdrawActionPayload,
+  buildKaminoExecuteIxData,
+  buildKaminoDepositRemainingAccounts,
+  buildKaminoWithdrawRemainingAccounts,
+  type KaminoReserveAccounts,
+  type KaminoPerUserAccounts,
+} from './kamino.js';
+
 /** Solana hard tx-size cap. */
 export const MAX_TX_SIZE = 1232;
 /** Soft ceiling for adapter action_payload. Pool recomputes keccak over it. */

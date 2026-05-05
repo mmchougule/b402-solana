@@ -1363,17 +1363,30 @@ export class B402Solana {
     return { signature, outNote, outAmount, excessNote };
   }
 
-  /** Coming soon. Use `examples/kamino-adapter-fork-deposit.ts` for the underlying flow today. */
-  async privateLend(): Promise<never> {
-    throw new B402Error(
-      B402ErrorCode.NotImplemented,
-      'privateLend on B402Solana coming soon — use examples/kamino-adapter-fork-deposit.ts',
-    );
+  /**
+   * Lend underlying tokens into a registered yield protocol via its
+   * adapter. Mechanically a `privateSwap`: burns one note in `inMint`
+   * (the underlying), CPIs the adapter with a Deposit action, and
+   * reshields proceeds in `outMint` (the receipt token, e.g. kUSDC).
+   *
+   * Caller still constructs `adapterIxData` + `remainingAccounts` for
+   * the target adapter. For Kamino, see `buildKaminoDepositIx` in
+   * `@b402ai/solana/kamino`.
+   */
+  async privateLend(req: PrivateSwapRequest): Promise<PrivateSwapResult> {
+    return this.privateSwap(req);
   }
 
-  /** Coming soon. */
-  async redeem(): Promise<never> {
-    throw new B402Error(B402ErrorCode.NotImplemented, 'redeem coming soon');
+  /**
+   * Redeem receipt tokens for the underlying via a registered lending
+   * adapter. Mechanically a `privateSwap`: burns the receipt-token note
+   * created by `privateLend`, CPIs the adapter with a Withdraw action,
+   * and reshields the underlying proceeds.
+   *
+   * For Kamino, see `buildKaminoWithdrawIx` in `@b402ai/solana/kamino`.
+   */
+  async privateRedeem(req: PrivateSwapRequest): Promise<PrivateSwapResult> {
+    return this.privateSwap(req);
   }
 
   get wallet(): Wallet {

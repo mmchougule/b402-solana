@@ -685,6 +685,120 @@ describe('PRD-33 Phase 33.3 — per-user Kamino obligation isolation (mainnet-fo
       // ASSERTION 6 (rent charging) — DEFERRED to V1.5 with the
       // rent_buffer_ta wiring. See test file header.
 
+      // ---- ROUND-TRIP: privateRedeem (Kamino withdraw) for alice ----
+      // PRD-33 §33.3 follow-up + task #129. Proves the per-user obligation
+      // withdraw path runs end-to-end. We exercise alice only — bob/carol
+      // would 3x the runtime without adding signal beyond per-user
+      // isolation already proven above.
+      dbg('---- alice withdraw round-trip starting ----');
+      const alice = users[0];
+      const inVaultPda = vaultPda(POOL_ID, inMint); // USDC vault — destination for redeemed underlying
+
+      // Re-instantiate alice's SDK and pull the kUSDC outNote that
+      // privateLend minted (the same wallet derivation will pick it up
+      // because note-store is per-process; we discover it via the SDK's
+      // own getSpendable — same path a client would use).
+      const aliceB402 = new B402Solana({
+        cluster: SOLANA_RPC.includes('127.0.0.1') ? 'localnet' : 'devnet',
+        rpcUrl: SOLANA_RPC,
+        keypair: alice.signer,
+        relayer: sharedRelayer,
+        inlineCpiNullifier: process.env.INLINE_CPI === '1',
+        proverArtifacts: {
+          wasmPath: path.join(circuits, 'transact_js/transact.wasm'),
+          zkeyPath: path.join(circuits, 'ceremony/transact_final.zkey'),
+        },
+        adaptProverArtifacts: {
+          wasmPath: path.join(circuits, 'adapt_js/adapt.wasm'),
+          zkeyPath: path.join(circuits, 'ceremony/adapt_final.zkey'),
+        },
+      });
+
+      // The kUSDC outNote's value = whatever the pool minted (kUsdcDelta
+      // for alice's lend). privateSwap requires exact-match; pass it
+      // explicitly so we don't rely on the in-process note-store.
+      const ktIn = alice.kUsdcDelta!;
+      expect(ktIn).toBeGreaterThan(0n);
+
+      // Withdraw side: kUSDC → USDC. inMint flips from privateLend's outMint.
+      const wAdapterInTa = await getOrCreateAssociatedTokenAccount(
+        conn, admin, outMint /* kUSDC */, adapterAuthority, true,
+      );
+      const wAdapterOutTa = await getOrCreateAssociatedTokenAccount(
+        conn, admin, inMint /* USDC */, adapterAuthority, true,
+      );
+
+      // ra_withdraw_per_user (13 entries — see programs/b402-kamino-adapter
+      // ::ra_withdraw_per_user). user_destination_liquidity = pool's USDC
+      // vault — Kamino writes redeemed underlying directly there, so the
+      // adapter's post-CPI sweep sees zero delta in adapter_out_ta and
+      // just no-ops; the pool's own out-vault delta check (Phase 9 dual-
+      // note) is what binds actual_out >= expected.
+      const wRemainingAccounts = [
+        { pubkey: RESERVE, isSigner: false, isWritable: true },
+        { pubkey: alice.obligation, isSigner: false, isWritable: true },
+        { pubkey: MARKET, isSigner: false, isWritable: false },
+        { pubkey: MARKET_AUTH, isSigner: false, isWritable: false },
+        { pubkey: r.collateralReserveDestSupply, isSigner: false, isWritable: true },
+        { pubkey: r.collateralMint, isSigner: false, isWritable: true },
+        { pubkey: r.liquiditySupply, isSigner: false, isWritable: true },
+        { pubkey: inVaultPda, isSigner: false, isWritable: true }, // user_destination = pool USDC vault
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: SYSVAR_INSTRUCTIONS, isSigner: false, isWritable: false },
+        { pubkey: r.liquidityMint, isSigner: false, isWritable: false },
+        { pubkey: alice.ownerPda, isSigner: false, isWritable: false },
+      ];
+
+      // KaminoAction::Withdraw payload. min_underlying_out = 0 (slippage
+      // off — fork harness only).
+      const wKaminoActionPayload = Buffer.alloc(1 + 32 + 8 + 8);
+      let wOff = 0;
+      wKaminoActionPayload.writeUInt8(1, wOff); wOff += 1; // Withdraw variant
+      RESERVE.toBuffer().copy(wKaminoActionPayload, wOff); wOff += 32;
+      wKaminoActionPayload.writeBigUInt64LE(ktIn, wOff); wOff += 8;
+      wKaminoActionPayload.writeBigUInt64LE(0n, wOff); // min_underlying_out
+
+      const wU64Le = (v: bigint) => { const b = Buffer.alloc(8); b.writeBigUInt64LE(v, 0); return b; };
+      const wU32Le = (n: number) => { const b = Buffer.alloc(4); b.writeUInt32LE(n, 0); return b; };
+      const wAdapterIxData = new Uint8Array(Buffer.concat([
+        Buffer.from(EXECUTE_DISC),
+        wU64Le(ktIn),
+        wU64Le(0n), // min_out
+        wU32Le(wKaminoActionPayload.length),
+        wKaminoActionPayload,
+      ]));
+
+      const wPreInfo = await conn.getAccountInfo(inVaultPda);
+      const wPreUsdc = wPreInfo ? BigInt(wPreInfo.data.readBigUInt64LE(64)) : 0n;
+
+      // The withdraw flow re-uses the same per-user PDAs already in the
+      // ALT (extended above per-user). Just call privateRedeem.
+      const redeemRes = await aliceB402.privateRedeem({
+        inMint: outMint, // kUSDC
+        outMint: inMint, // USDC
+        amount: ktIn,
+        adapterProgramId: KAMINO_ADAPTER_ID,
+        adapterInTa: wAdapterInTa.address,
+        adapterOutTa: wAdapterOutTa.address,
+        alt: altPubkey,
+        photonRpc,
+        expectedOut: 0n,
+        adapterIxData: wAdapterIxData,
+        actionPayload: wKaminoActionPayload,
+        remainingAccounts: wRemainingAccounts,
+        phase9DualNote: true,
+        pendingInputsMode: true,
+      });
+
+      const wPostInfo = await conn.getAccountInfo(inVaultPda);
+      const wPostUsdc = wPostInfo ? BigInt(wPostInfo.data.readBigUInt64LE(64)) : 0n;
+      const usdcDelta = wPostUsdc - wPreUsdc;
+      dbg(`alice redeem ok USDC_delta=${usdcDelta} ${redeemRes.signature.slice(0, 12)}…`);
+
+      // ASSERTION 7: round-trip yielded a positive USDC delta.
+      expect(usdcDelta).toBeGreaterThan(0n);
+
       // Report.
       console.log('\n=== PRD-33 §33.3 fork report ===');
       for (const u of users) {
@@ -692,6 +806,7 @@ describe('PRD-33 Phase 33.3 — per-user Kamino obligation isolation (mainnet-fo
       }
       const totalDelta = users.reduce((acc, u) => acc + (u.kUsdcDelta ?? 0n), 0n);
       console.log(`total kUSDC minted via per-user obligations: ${totalDelta}`);
+      console.log(`alice round-trip: shielded ${SHIELD_AMT} USDC → ${ktIn} kUSDC → ${usdcDelta} USDC redeemed`);
     },
     900_000,
   );
