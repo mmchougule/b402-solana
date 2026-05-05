@@ -576,7 +576,7 @@ describe('PRD-33 Phase 33.3 — per-user Kamino obligation isolation (mainnet-fo
           { pubkey: SYSVAR_RENT, isSigner: false, isWritable: false },
           // PRD-33 §3.3 — owner PDA (slot 19, only present in the
           // per_user_obligation adapter build).
-          { pubkey: u.ownerPda, isSigner: false, isWritable: false },
+          { pubkey: u.ownerPda, isSigner: false, isWritable: true },
         ];
 
         // Build action_payload: KaminoAction::Deposit. Pool prepends the
@@ -747,7 +747,7 @@ describe('PRD-33 Phase 33.3 — per-user Kamino obligation isolation (mainnet-fo
         { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
         { pubkey: SYSVAR_INSTRUCTIONS, isSigner: false, isWritable: false },
         { pubkey: r.liquidityMint, isSigner: false, isWritable: false },
-        { pubkey: alice.ownerPda, isSigner: false, isWritable: false },
+        { pubkey: alice.ownerPda, isSigner: false, isWritable: true },
       ];
 
       // KaminoAction::Withdraw payload. min_underlying_out = 0 (slippage

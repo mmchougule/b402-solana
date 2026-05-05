@@ -188,7 +188,11 @@ describe('buildKaminoDepositRemainingAccounts (ra_deposit_per_user)', () => {
     expect(a[13].isWritable).toBe(true); // obligation (lazy init)
     expect(a[14].isWritable).toBe(true); // obligation_farm — farm IS attached
     expect(a[15].isWritable).toBe(true); // reserve_farm_state — farm IS attached
-    expect(a[19].isWritable).toBe(false); // owner_pda is read-only forwarded reference
+    // owner_pda must be WRITABLE — kamino-adapter signs via PDA seeds for
+    // Kamino's init_user_metadata + init_obligation, which require the
+    // obligation owner as signer-writable. Caught on mainnet 2026-05-05
+    // as PrivilegeEscalation when this was readonly.
+    expect(a[19].isWritable).toBe(true);
   });
 
   it('no-farm reserve uses klend sentinel + readonly farm slots', () => {

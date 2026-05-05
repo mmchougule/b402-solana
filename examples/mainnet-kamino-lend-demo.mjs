@@ -37,7 +37,7 @@
 import {
   Connection, PublicKey, Keypair, SystemProgram, LAMPORTS_PER_SOL,
   Transaction, TransactionInstruction, ComputeBudgetProgram,
-  AddressLookupTableProgram, sendAndConfirmTransaction,
+  AddressLookupTableProgram, AddressLookupTableAccount, sendAndConfirmTransaction,
 } from '@solana/web3.js';
 import {
   TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID,
@@ -219,30 +219,44 @@ async function main() {
   );
   console.log(`  adapter scratch: in=${adapterInTa.address.toBase58().slice(0, 12)}… out=${adapterOutTa.address.toBase58().slice(0, 12)}…`);
 
-  // 3. Build ALT with all static accounts.
-  console.log('▶ building ALT for tx-size compression');
-  // ALT recentSlot must be in slot_hashes sysvar (last ~512). Use confirmed
-  // since finalized lags too far on mainnet to guarantee the slot lands
-  // within the slot_hashes window by the time the tx executes.
-  // ALT requires recentSlot be IN slot_hashes sysvar (rooted, last ~512).
-  // Going back ~50 slots from the current confirmed tip puts us safely in
-  // the rooted window without being too old.
-  const confirmedSlot = await conn.getSlot('confirmed');
-  const slot = Math.max(1, confirmedSlot - 50);
-  console.log(`  ALT recentSlot: ${slot} (current confirmed: ${confirmedSlot})`);
-  const [createIx, altPubkey] = AddressLookupTableProgram.createLookupTable({
-    authority: admin.publicKey, payer: admin.publicKey, recentSlot: slot,
-  });
-  await sendAndConfirmTransaction(conn, new Transaction().add(createIx), [admin], { commitment: 'finalized' });
-  // Mainnet RPC propagation: poll until the ALT account is visible AND owned
-  // by the AddressLookupTable program. Without this, the first extend can
-  // race the create's finalization on a different RPC node.
+  // 3. Reuse a persisted ALT if one exists; otherwise create + persist.
+  // Each `createLookupTable` allocates ~0.04 SOL of rent — fresh-create per
+  // run burns through the wallet for nothing. Persist the pubkey so the
+  // smoke is incremental: extend with new per-user PDAs as needed, but
+  // keep the static-accounts block once-and-done.
   const ALT_PROGRAM = new PublicKey('AddressLookupTab1e1111111111111111111111111');
-  for (let i = 0; i < 60; i++) {
-    const info = await conn.getAccountInfo(altPubkey, 'finalized');
-    if (info && info.owner.equals(ALT_PROGRAM)) break;
-    if (i === 59) throw new Error('ALT not visible after 60s — check RPC');
-    await new Promise((r) => setTimeout(r, 1000));
+  const ALT_PERSIST = '/tmp/b402-mainnet-kamino-alt.json';
+  let altPubkey;
+  let altIsFresh = false;
+  if (fs.existsSync(ALT_PERSIST)) {
+    altPubkey = new PublicKey(JSON.parse(fs.readFileSync(ALT_PERSIST, 'utf8')).pubkey);
+    const info = await conn.getAccountInfo(altPubkey, 'confirmed');
+    if (!info || !info.owner.equals(ALT_PROGRAM)) {
+      console.warn(`▶ persisted ALT ${altPubkey.toBase58()} no longer valid — creating fresh`);
+      altPubkey = null;
+    } else {
+      console.log(`▶ reusing persisted ALT ${altPubkey.toBase58().slice(0, 12)}…`);
+    }
+  }
+  if (!altPubkey) {
+    console.log('▶ building ALT for tx-size compression');
+    const confirmedSlot = await conn.getSlot('confirmed');
+    const slot = Math.max(1, confirmedSlot - 50);
+    console.log(`  ALT recentSlot: ${slot} (current confirmed: ${confirmedSlot})`);
+    const [createIx, newAltPubkey] = AddressLookupTableProgram.createLookupTable({
+      authority: admin.publicKey, payer: admin.publicKey, recentSlot: slot,
+    });
+    altPubkey = newAltPubkey;
+    altIsFresh = true;
+    await sendAndConfirmTransaction(conn, new Transaction().add(createIx), [admin], { commitment: 'finalized' });
+    for (let i = 0; i < 60; i++) {
+      const info = await conn.getAccountInfo(altPubkey, 'finalized');
+      if (info && info.owner.equals(ALT_PROGRAM)) break;
+      if (i === 59) throw new Error('ALT not visible after 60s — check RPC');
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    fs.writeFileSync(ALT_PERSIST, JSON.stringify({ pubkey: altPubkey.toBase58() }, null, 2));
+    console.log(`  persisted ALT pubkey -> ${ALT_PERSIST}`);
   }
 
   const NULLIFIER_CPI_AUTHORITY = PublicKey.findProgramAddressSync(
@@ -268,16 +282,20 @@ async function main() {
     SYSVAR_INSTRUCTIONS, COMPUTE_BUDGET, TOKEN_PROGRAM_ID,
     SystemProgram.programId, SYSVAR_RENT, KLEND,
   ];
-  const CHUNK = 25;
-  for (let i = 0; i < altShared.length; i += CHUNK) {
-    const ext = AddressLookupTableProgram.extendLookupTable({
-      payer: admin.publicKey, authority: admin.publicKey, lookupTable: altPubkey,
-      addresses: altShared.slice(i, i + CHUNK),
-    });
-    await sendAndConfirmTransaction(conn, new Transaction().add(ext), [admin], { commitment: 'confirmed' });
+  if (altIsFresh) {
+    const CHUNK = 25;
+    for (let i = 0; i < altShared.length; i += CHUNK) {
+      const ext = AddressLookupTableProgram.extendLookupTable({
+        payer: admin.publicKey, authority: admin.publicKey, lookupTable: altPubkey,
+        addresses: altShared.slice(i, i + CHUNK),
+      });
+      await sendAndConfirmTransaction(conn, new Transaction().add(ext), [admin], { commitment: 'confirmed' });
+    }
+    await new Promise((r) => setTimeout(r, 4000));
+    console.log(`✓ ALT ${altPubkey.toBase58().slice(0, 12)}… extended (${altShared.length} entries)`);
+  } else {
+    console.log(`✓ ALT ${altPubkey.toBase58().slice(0, 12)}… reused (skipping ${altShared.length}-entry static extends)`);
   }
-  await new Promise((r) => setTimeout(r, 4000));
-  console.log(`✓ ALT ${altPubkey.toBase58().slice(0, 12)}… extended (${altShared.length} entries)`);
 
   // 4. Setup B402Solana SDK + per-user PDAs.
   const b402 = new B402Solana({
@@ -286,6 +304,12 @@ async function main() {
     keypair: admin,
     relayer: admin,
     inlineCpiNullifier: true,
+    // Indexer-backed Merkle proofs unblock spending NON-rightmost notes —
+    // without this, proveMostRecentLeaf only validates leaves at
+    // tree.leafCount-1, so older shielded notes can't be redeemed in
+    // arbitrary order. SDK falls back to proveMostRecentLeaf if the
+    // indexer is unreachable.
+    indexerUrl: 'https://b402-solana-indexer-api-62092339396.us-central1.run.app',
     proverArtifacts: {
       wasmPath: path.join(CIRCUITS, 'transact_js/transact.wasm'),
       zkeyPath: path.join(CIRCUITS, 'ceremony/transact_final.zkey'),
@@ -309,28 +333,58 @@ async function main() {
   console.log('  ownerPda:', ownerPda.toBase58());
   console.log('  obligation:', obligation.toBase58());
 
-  // Extend ALT with per-user PDAs.
-  const perUserExt = AddressLookupTableProgram.extendLookupTable({
-    payer: admin.publicKey, authority: admin.publicKey, lookupTable: altPubkey,
-    addresses: [
-      admin.publicKey,
-      ownerPda, userMetadata, obligation,
-      ...(isFarmAttached ? [obligationFarm] : []),
-      ...(isFarmAttached && !reserveFarmState.equals(KLEND) ? [reserveFarmState] : []),
-      pendingInputsPda,
-    ],
-  });
-  await sendAndConfirmTransaction(conn, new Transaction().add(perUserExt), [admin], { commitment: 'confirmed' });
-  await new Promise((r) => setTimeout(r, 4000));
-  console.log('✓ ALT extended with per-user PDAs');
+  // Extend ALT with per-user PDAs (only the ones not already in the ALT —
+  // querying the ALT's deserialised addresses to dedupe).
+  const altInfo = await conn.getAccountInfo(altPubkey, 'confirmed');
+  const altDecoded = altInfo
+    ? AddressLookupTableAccount.deserialize(altInfo.data).addresses
+    : [];
+  const haveInAlt = (pk) => altDecoded.some((a) => a.equals(pk));
+  const perUserCandidates = [
+    admin.publicKey,
+    ownerPda, userMetadata, obligation,
+    ...(isFarmAttached ? [obligationFarm] : []),
+    ...(isFarmAttached && !reserveFarmState.equals(KLEND) ? [reserveFarmState] : []),
+    pendingInputsPda,
+  ];
+  const toExtend = perUserCandidates.filter((pk) => !haveInAlt(pk));
+  if (toExtend.length > 0) {
+    const perUserExt = AddressLookupTableProgram.extendLookupTable({
+      payer: admin.publicKey, authority: admin.publicKey, lookupTable: altPubkey,
+      addresses: toExtend,
+    });
+    await sendAndConfirmTransaction(conn, new Transaction().add(perUserExt), [admin], { commitment: 'confirmed' });
+    await new Promise((r) => setTimeout(r, 4000));
+    console.log(`✓ ALT extended with ${toExtend.length} new per-user PDA(s)`);
+  } else {
+    console.log('✓ ALT already contains all per-user PDAs — skipping extend');
+  }
 
-  // 5. Shield 1 USDC.
-  const SHIELD_AMT = 1_000_000n; // 1 USDC
-  console.log(`▶ shield ${SHIELD_AMT} USDC`);
-  const shieldRes = await b402.shield({
-    mint: inMint, amount: SHIELD_AMT, omitEncryptedNotes: true,
-  });
-  console.log(`✓ shield sig: ${shieldRes.signature}`);
+  // 5. Reuse an existing shielded USDC note (prior sessions left several:
+  //    7M, 2M, 2M). Each is already-shielded value, so spending one costs
+  //    nothing extra from the wallet's USDC balance. Pick the smallest to
+  //    minimize at-risk amount on this smoke. Indexer-backed proof handles
+  //    non-rightmost leaves.
+  //
+  //    NOTE: future shields should use `omitEncryptedNotes: false` (the
+  //    SDK default) so the on-chain ciphertext lets later sessions trial-
+  //    decrypt and recover notes. omitEncryptedNotes saves ~120 B of tx
+  //    space at the cost of cross-session recoverability.
+  const { leToFrReduced } = await import('@b402ai/solana-shared');
+  const inMintFr = leToFrReduced(inMint.toBytes());
+  console.log('▶ scanning chain for existing shielded USDC notes (backfill)…');
+  await b402.status({ refresh: true });
+  const usdcNotes = b402._notes.getSpendable(inMintFr);
+  console.log(`  USDC notes on chain: [${usdcNotes.map((n) => n.value.toString()).join(', ')}]`);
+  if (usdcNotes.length === 0) {
+    throw new Error('No discoverable shielded USDC notes — shield with omitEncryptedNotes:false first');
+  }
+  // Pick the smallest note — minimal at-risk amount for this smoke.
+  const sorted = [...usdcNotes].sort((a, b) => Number(a.value - b.value));
+  const noteToSpend = sorted[0];
+  const lendAmount = noteToSpend.value;
+  const shieldRes = null;
+  console.log(`✓ using existing ${lendAmount}-unit USDC note (leafIndex=${noteToSpend.leafIndex})`);
 
   // 6. privateLend.
   const outVaultPda = vaultPda(POOL, outMint);
@@ -357,7 +411,11 @@ async function main() {
     { pubkey: SYSVAR_INSTRUCTIONS, isSigner: false, isWritable: false },
     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     { pubkey: SYSVAR_RENT, isSigner: false, isWritable: false },
-    { pubkey: ownerPda, isSigner: false, isWritable: false },
+    // ownerPda must be WRITABLE — the kamino-adapter's handle_deposit_per_user
+    // uses it as Kamino's obligationOwner (signer-writable role), invoking
+    // signed via PDA seeds. Privilege can't escalate inside a CPI, so the
+    // outer slot must start writable.
+    { pubkey: ownerPda, isSigner: false, isWritable: true },
   ];
 
   const u32Le = (n) => { const b = Buffer.alloc(4); b.writeUInt32LE(n, 0); return b; };
@@ -365,21 +423,22 @@ async function main() {
   const kaminoActionPayload = Buffer.concat([
     Buffer.from([0]), // KaminoAction::Deposit
     RESERVE.toBuffer(),
-    u64Le(SHIELD_AMT),
+    u64Le(lendAmount),
     u64Le(0n), // min_kt_out
   ]);
   const adapterIxData = new Uint8Array(Buffer.concat([
     Buffer.from(EXECUTE_DISC),
-    u64Le(SHIELD_AMT),
+    u64Le(lendAmount),
     u64Le(0n), // expected_out
     u32Le(kaminoActionPayload.length),
     kaminoActionPayload,
   ]));
 
-  console.log(`▶ privateLend ${SHIELD_AMT} USDC -> kUSDC via kamino-adapter`);
+  console.log(`▶ privateLend ${lendAmount} USDC -> kUSDC via kamino-adapter`);
   const lendRes = await b402.privateLend({
     inMint, outMint,
-    amount: SHIELD_AMT,
+    amount: lendAmount,
+    note: noteToSpend,
     adapterProgramId: KAMINO_ADAPTER,
     adapterInTa: adapterInTa.address,
     adapterOutTa: adapterOutTa.address,
@@ -399,7 +458,7 @@ async function main() {
 
   console.log('=========================================');
   console.log('PRIVATELEND RESULT');
-  console.log('  shield sig:    ', shieldRes.signature);
+  console.log('  shield sig:    ', shieldRes ? shieldRes.signature : '(reused existing note — no new shield)');
   console.log('  privateLend sig:', lendRes.signature);
   console.log('  kUSDC delta:   ', kUsdcDelta.toString());
   console.log('  obligation:    ', obligation.toBase58());

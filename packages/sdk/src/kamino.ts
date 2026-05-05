@@ -184,7 +184,12 @@ export function buildKaminoDepositRemainingAccounts(
     { pubkey: SYSVAR_INSTRUCTIONS, isSigner: false, isWritable: false },
     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     { pubkey: SYSVAR_RENT, isSigner: false, isWritable: false },
-    { pubkey: perUser.ownerPda, isSigner: false, isWritable: false },
+    // ownerPda must be WRITABLE — the kamino-adapter's
+    // handle_deposit_per_user invokes signed CPIs into Kamino's
+    // init_user_metadata + init_obligation, which require the obligation
+    // owner as Anchor role-3 (signer + writable). Privilege can't escalate
+    // inside a CPI, so the outer slot must start writable.
+    { pubkey: perUser.ownerPda, isSigner: false, isWritable: true },
   ];
 }
 
