@@ -24,3 +24,7 @@ export { InMemoryBridgeStore } from './store.js';
 export { Reconciler } from './reconciler.js';
 export { parseUsdcTransfersToIngress } from './parse.js';
 export type { ParsedTxLike, ParsedInstruction } from './parse.js';
+export { makeSdkShieldFn } from './sdk-shield.js';
+export type { B402SolanaShield } from './sdk-shield.js';
+export { PayshBridge } from './bridge.js';
+export type { PayshBridgeConfig, BridgeConnection } from './bridge.js';

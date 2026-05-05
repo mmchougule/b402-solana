@@ -68,6 +68,9 @@ importers:
 
   examples:
     dependencies:
+      '@b402ai/paysh-bridge':
+        specifier: workspace:*
+        version: link:../packages/paysh-bridge
       '@b402ai/solana':
         specifier: workspace:*
         version: link:../packages/sdk
