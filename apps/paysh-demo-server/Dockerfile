@@ -48,8 +48,10 @@ ENV NODE_ENV=production
 # App code + pruned node_modules
 COPY --from=builder /out /app
 
-# Circuit artifacts — required by the SDK's Groth16 prover
-COPY --from=builder /repo/circuits/build /app/circuits/build
+# Circuit artifacts — required by the SDK's Groth16 prover. Sourced
+# directly from the build context (the monorepo root) instead of from
+# the builder stage, since the builder doesn't process or rebuild them.
+COPY circuits/build /app/circuits/build
 ENV B402_CIRCUITS_ROOT=/app/circuits/build
 
 # Drop privileges
