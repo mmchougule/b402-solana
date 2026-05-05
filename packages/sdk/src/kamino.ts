@@ -147,6 +147,12 @@ export interface KaminoPerUserAccounts {
   obligationFarm: PublicKey;
   /** owner_pda — derived from the user's b402 spending pubkey hash. */
   ownerPda: PublicKey;
+  /** Per-user USDC ATA owned by `ownerPda`. Kamino requires
+   *  `userSourceLiquidity.owner == obligationOwner` on deposit, so the
+   *  adapter routes USDC through this ATA. Caller MUST pre-create via
+   *  `createAssociatedTokenAccountIdempotent` (rent ~0.002 SOL, charged
+   *  on first deposit). */
+  ownerUsdcAta: PublicKey;
 }
 
 /**
@@ -190,35 +196,62 @@ export function buildKaminoDepositRemainingAccounts(
     // owner as Anchor role-3 (signer + writable). Privilege can't escalate
     // inside a CPI, so the outer slot must start writable.
     { pubkey: perUser.ownerPda, isSigner: false, isWritable: true },
+    // Per-user USDC ATA owned by ownerPda. Kamino's
+    // DepositReserveLiquidityAndObligationCollateralV2 enforces
+    // `userSourceLiquidity.owner == obligationOwner`; the adapter
+    // SPL-transfers adapter_in_ta → this ATA pre-CPI. Caller MUST
+    // pre-create via `createAssociatedTokenAccountIdempotent` before
+    // submitting the lend.
+    { pubkey: perUser.ownerUsdcAta, isSigner: false, isWritable: true },
   ];
 }
 
 /**
- * Build `ra_withdraw_per_user` (13 entries) for the Kamino adapter.
+ * Build `ra_withdraw_per_user` (20 entries) for the Kamino adapter.
  * Order MUST match `programs/b402-kamino-adapter/src/lib.rs::ra_withdraw_per_user`.
  *
- * `userDestinationLiquidity` is the pool's USDC vault — the post-CPI
- * sweep already lives in `adapt_execute`'s account list, so the adapter
- * sets up Kamino's destination = the same vault; no extra hop needed.
+ * Slots 0-12: Kamino's `withdrawObligationCollateralAndRedeemReserveCollateral_v2`
+ * V1 sub-account list. Slot 7 (`userDestinationLiquidity`) MUST be a USDC
+ * ATA owned by `ownerPda` — Kamino enforces `token::authority == owner`.
+ * Caller passes `perUser.ownerUsdcAta`. The adapter sweeps from there into
+ * `adapter_out_ta` post-CPI so the pool's existing actual-out delta logic
+ * sees the redeemed USDC.
+ *
+ * Slots 13-16: oracle accounts for `refresh_reserve` (KLEND program ID
+ * sentinel for absent oracles).
+ *
+ * Slots 17-19: farm accounts for the `_v2` ix (CPI-callable variant of
+ * the withdraw). Use KLEND sentinel for slots 17/18 when no farm.
  */
 export function buildKaminoWithdrawRemainingAccounts(
   reserveAccts: KaminoReserveAccounts,
-  perUser: Pick<KaminoPerUserAccounts, 'obligation' | 'ownerPda'>,
-  userDestinationLiquidity: PublicKey,
+  perUser: KaminoPerUserAccounts,
 ): AccountMeta[] {
+  const isFarmAttached = !reserveAccts.reserveFarmCollateral.equals(PublicKey.default);
+  const obligationFarmSlot = isFarmAttached ? perUser.obligationFarm : reserveAccts.klendProgram;
+  const reserveFarmStateSlot = isFarmAttached ? reserveAccts.reserveFarmCollateral : reserveAccts.klendProgram;
   return [
-    { pubkey: reserveAccts.reserve, isSigner: false, isWritable: true },
-    { pubkey: perUser.obligation, isSigner: false, isWritable: true },
-    { pubkey: reserveAccts.lendingMarket, isSigner: false, isWritable: false },
-    { pubkey: reserveAccts.lendingMarketAuthority, isSigner: false, isWritable: false },
-    { pubkey: reserveAccts.reserveCollateralReserveDestSupply, isSigner: false, isWritable: true },
-    { pubkey: reserveAccts.reserveCollateralMint, isSigner: false, isWritable: true },
-    { pubkey: reserveAccts.reserveLiquiditySupply, isSigner: false, isWritable: true },
-    { pubkey: userDestinationLiquidity, isSigner: false, isWritable: true },
-    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }, // collateral token program
-    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }, // liquidity token program
-    { pubkey: SYSVAR_INSTRUCTIONS, isSigner: false, isWritable: false },
-    { pubkey: reserveAccts.reserveLiquidityMint, isSigner: false, isWritable: false },
-    { pubkey: perUser.ownerPda, isSigner: false, isWritable: false },
+    { pubkey: reserveAccts.reserve, isSigner: false, isWritable: true },                          // 0
+    { pubkey: perUser.obligation, isSigner: false, isWritable: true },                            // 1
+    { pubkey: reserveAccts.lendingMarket, isSigner: false, isWritable: false },                   // 2
+    { pubkey: reserveAccts.lendingMarketAuthority, isSigner: false, isWritable: false },          // 3
+    { pubkey: reserveAccts.reserveCollateralReserveDestSupply, isSigner: false, isWritable: true },// 4
+    { pubkey: reserveAccts.reserveCollateralMint, isSigner: false, isWritable: true },            // 5
+    { pubkey: reserveAccts.reserveLiquiditySupply, isSigner: false, isWritable: true },           // 6
+    { pubkey: perUser.ownerUsdcAta, isSigner: false, isWritable: true },                          // 7  user_destination_liquidity
+    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }, // collateral token program  // 8
+    { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false }, // liquidity token program   // 9
+    { pubkey: SYSVAR_INSTRUCTIONS, isSigner: false, isWritable: false },                          // 10
+    { pubkey: reserveAccts.reserveLiquidityMint, isSigner: false, isWritable: false },            // 11
+    { pubkey: perUser.ownerPda, isSigner: false, isWritable: true },                              // 12  must be writable for owner_seeds-signed sweep
+    // Oracle slots (KLEND sentinel for absent).
+    { pubkey: reserveAccts.oracles.pyth ?? reserveAccts.klendProgram, isSigner: false, isWritable: false },             // 13
+    { pubkey: reserveAccts.oracles.switchboardPrice ?? reserveAccts.klendProgram, isSigner: false, isWritable: false }, // 14
+    { pubkey: reserveAccts.oracles.switchboardTwap ?? reserveAccts.klendProgram, isSigner: false, isWritable: false },  // 15
+    { pubkey: reserveAccts.oracles.scope ?? reserveAccts.klendProgram, isSigner: false, isWritable: false },            // 16
+    // Farm slots for V2 ix (KLEND sentinel for no-farm reserves).
+    { pubkey: obligationFarmSlot, isSigner: false, isWritable: isFarmAttached },                  // 17
+    { pubkey: reserveFarmStateSlot, isSigner: false, isWritable: isFarmAttached },                // 18
+    { pubkey: reserveAccts.farmsProgram, isSigner: false, isWritable: false },                    // 19
   ];
 }

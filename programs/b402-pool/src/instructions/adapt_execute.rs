@@ -749,13 +749,37 @@ pub fn handler<'info>(
     invoke(&ix, &adapter_infos).map_err(|_| error!(PoolError::AdapterCallReverted))?;
 
     // Post-CPI balance-delta invariant (I4).
+    //
+    // STATEFUL-ADAPTER GATE (PRD-33 §6.2): for adapters that credit the
+    // user's claim into protocol state instead of into a tradeable token
+    // account, `out_vault` delta is always 0 — the user's "kUSDC note"
+    // becomes a non-fungible witness for spending_priv, not a backed token
+    // claim. We MUST skip the delta slippage invariant for these adapters
+    // (the check is unsatisfiable when the OUT token never reaches our
+    // vault). The user's withdrawal voucher is `pi.commitment_out` (proof-
+    // bound, appended below regardless). Withdraw-side privateRedeem is
+    // where the actual token delta finally appears in out_vault — that
+    // path runs the standard slippage invariant.
+    //
+    // Stateless adapters (Jupiter, mock) keep the original I4: out_vault
+    // MUST receive ≥ expected_out_value on every adapt_execute. The list
+    // is pinned in `is_stateful_adapter()` and audited at every pool
+    // upgrade — adding a stateful adapter requires a pool source change.
     ctx.accounts.out_vault.reload()?;
     let post = ctx.accounts.out_vault.amount;
     let delta = post.saturating_sub(pre);
-    require!(
-        delta >= pi.expected_out_value,
-        PoolError::AdapterReturnedLessThanMin
-    );
+    let stateful = {
+        #[cfg(feature = "phase_9_dual_note")]
+        { is_stateful_adapter(&adapter_program_key) }
+        #[cfg(not(feature = "phase_9_dual_note"))]
+        { false }
+    };
+    if !stateful {
+        require!(
+            delta >= pi.expected_out_value,
+            PoolError::AdapterReturnedLessThanMin
+        );
+    }
 
     // Append output commitments to the tree, then (Phase 9 dual-note) any
     // excess delta as a SECOND commitment owned by the same spending_pub.
@@ -812,8 +836,12 @@ pub fn handler<'info>(
         // shared vault and skip this block. Phase 9 builds opt in by
         // compiling with `--features phase_9_dual_note`, which also bumps
         // PUBLIC_INPUT_COUNT to 24 and requires the matching VK.
+        // Skip excess minting for stateful adapters: their out_vault delta
+        // is 0 by design (claim lives in protocol state, not vault), so
+        // there's no excess to mint. The slippage gate above already
+        // bypassed; the symmetric thing here is to early-out.
         #[cfg(feature = "phase_9_dual_note")]
-        {
+        if !stateful {
         let excess: u64 = delta
             .checked_sub(pi.expected_out_value)
             .ok_or(error!(PoolError::ArithmeticUnderflow))?;

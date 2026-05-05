@@ -50,6 +50,7 @@ function fixturePerUser(): KaminoPerUserAccounts {
   return {
     userMetadata: new PublicKey('FwYRdpV1J1nwKcuw2VcmCgFJfUqxK2ohMjEkkuyMa42n'),
     obligation: new PublicKey('39PZ1HPWZ1pAoGYUhPDBRYXbGxzNVoauDhHasyJy1Wxk'),
+    ownerUsdcAta: new PublicKey('ADGD9S1HkPc8VxPqUvubD1xbE6kuxs9pZE3Z2gxUNRiU'),
     obligationFarm: new PublicKey('CFinwCcN5z3hKwoaiqFEvjsQRTzcJTYAzQXHzSCvm6Hv'),
     ownerPda: new PublicKey('9tbxTfaB8jShgFwtHtK6iTvjRQLCRRG61TEyWY9yyJV1'),
   };
@@ -126,10 +127,9 @@ describe('buildKaminoExecuteIxData', () => {
 });
 
 describe('buildKaminoDepositRemainingAccounts (ra_deposit_per_user)', () => {
-  it('has exactly 20 entries — matches MIN_LEN+1 in the adapter', () => {
+  it('has exactly 21 entries — MIN_LEN=21 in the adapter (slot 20 = OWNER_USDC_ATA)', () => {
     const accts = buildKaminoDepositRemainingAccounts(fixtureReserve(), fixturePerUser());
-    // adapter's ra_deposit_per_user::MIN_LEN = 20 (slot 19 = OWNER_PDA)
-    expect(accts.length).toBe(20);
+    expect(accts.length).toBe(21);
   });
 
   it('positional order matches programs/b402-kamino-adapter::ra_deposit_per_user', () => {
@@ -174,6 +174,7 @@ describe('buildKaminoDepositRemainingAccounts (ra_deposit_per_user)', () => {
     expect(a[17].pubkey).toEqual(SystemProgram.programId);
     expect(a[18].pubkey).toEqual(SYSVAR_RENT);
     expect(a[19].pubkey).toEqual(u.ownerPda);
+    expect(a[20].pubkey).toEqual(u.ownerUsdcAta); // slot 20 — OWNER_USDC_ATA, the per-user source liquidity
   });
 
   it('writable flags match adapter expectations', () => {
@@ -193,6 +194,9 @@ describe('buildKaminoDepositRemainingAccounts (ra_deposit_per_user)', () => {
     // obligation owner as signer-writable. Caught on mainnet 2026-05-05
     // as PrivilegeEscalation when this was readonly.
     expect(a[19].isWritable).toBe(true);
+    // owner_usdc_ata must be WRITABLE — adapter SPL-transfers FROM
+    // adapter_in_ta INTO this ATA pre-CPI. Kamino then debits it.
+    expect(a[20].isWritable).toBe(true);
   });
 
   it('no-farm reserve uses klend sentinel + readonly farm slots', () => {
@@ -224,48 +228,66 @@ describe('buildKaminoDepositRemainingAccounts (ra_deposit_per_user)', () => {
 });
 
 describe('buildKaminoWithdrawRemainingAccounts (ra_withdraw_per_user)', () => {
-  it('has exactly 13 entries — matches MIN_LEN in the adapter', () => {
+  it('has exactly 20 entries — MIN_LEN=20 (V2 ix wraps V1 + 4 oracles + 3 farm)', () => {
     const accts = buildKaminoWithdrawRemainingAccounts(
-      fixtureReserve(), fixturePerUser(),
-      new PublicKey('9HuTo266r1PdEWWALGE6gp3mkPeYqyLdrbdhbcdaxKq7'),
+      fixtureReserve({ farmAttached: true }), fixturePerUser(),
     );
-    expect(accts.length).toBe(13);
+    expect(accts.length).toBe(20);
   });
 
   it('positional order matches programs/b402-kamino-adapter::ra_withdraw_per_user', () => {
-    const r = fixtureReserve();
+    const r = fixtureReserve({ farmAttached: true });
     const u = fixturePerUser();
-    const userDest = new PublicKey('9HuTo266r1PdEWWALGE6gp3mkPeYqyLdrbdhbcdaxKq7');
-    const a = buildKaminoWithdrawRemainingAccounts(r, u, userDest);
-    expect(a[0].pubkey).toEqual(r.reserve);                         // 0  withdraw_reserve
-    expect(a[1].pubkey).toEqual(u.obligation);                      // 1  obligation
-    expect(a[2].pubkey).toEqual(r.lendingMarket);                   // 2  lending_market
-    expect(a[3].pubkey).toEqual(r.lendingMarketAuthority);          // 3  lending_market_authority
-    expect(a[4].pubkey).toEqual(r.reserveCollateralReserveDestSupply); // 4 reserve_source_collateral
-    expect(a[5].pubkey).toEqual(r.reserveCollateralMint);           // 5  reserve_collateral_mint
-    expect(a[6].pubkey).toEqual(r.reserveLiquiditySupply);          // 6  reserve_liquidity_supply
-    expect(a[7].pubkey).toEqual(userDest);                          // 7  user_destination_liquidity
-    expect(a[8].pubkey).toEqual(TOKEN_PROGRAM_ID);                  // 8  collateral_token_program
-    expect(a[9].pubkey).toEqual(TOKEN_PROGRAM_ID);                  // 9  liquidity_token_program
-    expect(a[10].pubkey).toEqual(SYSVAR_INSTRUCTIONS);              // 10 instructions_sysvar
-    expect(a[11].pubkey).toEqual(r.reserveLiquidityMint);           // 11 reserve_liquidity_mint
-    expect(a[12].pubkey).toEqual(u.ownerPda);                       // 12 owner_pda
+    const a = buildKaminoWithdrawRemainingAccounts(r, u);
+    expect(a[0].pubkey).toEqual(r.reserve);                            // 0  withdraw_reserve
+    expect(a[1].pubkey).toEqual(u.obligation);                         // 1  obligation
+    expect(a[2].pubkey).toEqual(r.lendingMarket);                      // 2  lending_market
+    expect(a[3].pubkey).toEqual(r.lendingMarketAuthority);             // 3  lending_market_authority
+    expect(a[4].pubkey).toEqual(r.reserveCollateralReserveDestSupply); // 4  reserve_source_collateral
+    expect(a[5].pubkey).toEqual(r.reserveCollateralMint);              // 5  reserve_collateral_mint
+    expect(a[6].pubkey).toEqual(r.reserveLiquiditySupply);             // 6  reserve_liquidity_supply
+    expect(a[7].pubkey).toEqual(u.ownerUsdcAta);                       // 7  user_destination_liquidity = ownerUsdcAta
+    expect(a[8].pubkey).toEqual(TOKEN_PROGRAM_ID);                     // 8  collateral_token_program
+    expect(a[9].pubkey).toEqual(TOKEN_PROGRAM_ID);                     // 9  liquidity_token_program
+    expect(a[10].pubkey).toEqual(SYSVAR_INSTRUCTIONS);                 // 10 instructions_sysvar
+    expect(a[11].pubkey).toEqual(r.reserveLiquidityMint);              // 11 reserve_liquidity_mint
+    expect(a[12].pubkey).toEqual(u.ownerPda);                          // 12 owner_pda
+    expect(a[13].pubkey).toEqual(r.oracles.pyth);                      // 13 oracle_pyth
+    expect(a[16].pubkey).toEqual(r.oracles.scope);                     // 16 oracle_scope
+    expect(a[17].pubkey).toEqual(u.obligationFarm);                    // 17 obligation_farm
+    expect(a[18].pubkey).toEqual(r.reserveFarmCollateral);             // 18 reserve_farm_state
+    expect(a[19].pubkey).toEqual(r.farmsProgram);                      // 19 farms_program
   });
 
   it('writable flags match adapter expectations', () => {
-    const r = fixtureReserve();
-    const userDest = new PublicKey('9HuTo266r1PdEWWALGE6gp3mkPeYqyLdrbdhbcdaxKq7');
-    const a = buildKaminoWithdrawRemainingAccounts(r, fixturePerUser(), userDest);
-    expect(a[0].isWritable).toBe(true);  // reserve
-    expect(a[1].isWritable).toBe(true);  // obligation
-    expect(a[2].isWritable).toBe(false); // market
-    expect(a[3].isWritable).toBe(false); // market authority
-    expect(a[4].isWritable).toBe(true);  // reserve source collateral
-    expect(a[5].isWritable).toBe(true);  // collateral mint
-    expect(a[6].isWritable).toBe(true);  // liquidity supply
-    expect(a[7].isWritable).toBe(true);  // user destination — Kamino writes underlying here
-    expect(a[8].isWritable).toBe(false); // token programs
+    const r = fixtureReserve({ farmAttached: true });
+    const a = buildKaminoWithdrawRemainingAccounts(r, fixturePerUser());
+    expect(a[0].isWritable).toBe(true);   // reserve
+    expect(a[1].isWritable).toBe(true);   // obligation
+    expect(a[2].isWritable).toBe(false);  // market
+    expect(a[3].isWritable).toBe(false);  // market authority
+    expect(a[4].isWritable).toBe(true);   // reserve source collateral
+    expect(a[5].isWritable).toBe(true);   // collateral mint
+    expect(a[6].isWritable).toBe(true);   // liquidity supply
+    expect(a[7].isWritable).toBe(true);   // user_destination = ownerUsdcAta — Kamino credits USDC here
+    expect(a[8].isWritable).toBe(false);  // token programs
     expect(a[9].isWritable).toBe(false);
-    expect(a[12].isWritable).toBe(false); // owner_pda
+    // owner_pda must be WRITABLE — adapter signs FROM ownerUsdcAta to
+    // sweep into adapter_out_ta post-CPI. Caught on surfpool 2026-05-05
+    // when initially passed readonly.
+    expect(a[12].isWritable).toBe(true);
+    expect(a[13].isWritable).toBe(false); // oracles read-only
+    expect(a[17].isWritable).toBe(true);  // obligation_farm — farm IS attached
+    expect(a[18].isWritable).toBe(true);
+    expect(a[19].isWritable).toBe(false); // farms_program is a program
+  });
+
+  it('no-farm reserve uses klend sentinel + readonly farm slots', () => {
+    const r = fixtureReserve({ farmAttached: false });
+    const a = buildKaminoWithdrawRemainingAccounts(r, fixturePerUser());
+    expect(a[17].pubkey).toEqual(r.klendProgram);
+    expect(a[17].isWritable).toBe(false);
+    expect(a[18].pubkey).toEqual(r.klendProgram);
+    expect(a[18].isWritable).toBe(false);
   });
 });
