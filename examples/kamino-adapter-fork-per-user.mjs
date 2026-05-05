@@ -321,6 +321,12 @@ if (adapterOutBalance === 0n) {
 const ktIn = 50_000n;
 
 // ra_withdraw_per_user (13 slots — see programs/b402-kamino-adapter::ra_withdraw_per_user)
+// NOTE: KLEND program account must be reachable in the outer tx's account
+// set so the adapter's invoke_signed CPI to KLEND resolves. The deposit
+// flow has KLEND via oracle sentinels (when oracle is null we substitute
+// KLEND); withdraw has no such fallback. Add KLEND explicitly as an
+// extra trailing entry — adapter's slicing only reads slots 0..12, extras
+// are forwarded to the AccountInfo set without affecting the metas list.
 const wRemainingAccounts = [
   { pubkey: RESERVE, isSigner: false, isWritable: true },               // 0
   { pubkey: obligation, isSigner: false, isWritable: true },             // 1
@@ -329,12 +335,22 @@ const wRemainingAccounts = [
   { pubkey: r.collateralReserveDestSupply, isSigner: false, isWritable: true },      // 4 source collateral
   { pubkey: r.collateralMint, isSigner: false, isWritable: true },                   // 5
   { pubkey: r.liquiditySupply, isSigner: false, isWritable: true },                  // 6
-  { pubkey: adapterOutTa.address, isSigner: false, isWritable: true },               // 7 user_destination_liquidity = adapter_out_ta (USDC scratch)
+  { pubkey: ownerUsdcAta, isSigner: false, isWritable: true },                       // 7 user_destination_liquidity = owner_pda's USDC ATA (Kamino enforces token::authority == owner)
   { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },                  // 8 collateral token program
   { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },                  // 9 liquidity token program
   { pubkey: SYSVAR_INSTRUCTIONS, isSigner: false, isWritable: false },               // 10
   { pubkey: r.liquidityMint, isSigner: false, isWritable: false },                   // 11
   { pubkey: ownerPda, isSigner: false, isWritable: true },                           // 12
+  // Oracle slots for refresh_reserve (ra_withdraw_per_user::ORACLE_*).
+  // Use KLEND as sentinel when oracle isn't active for this reserve.
+  { pubkey: r.pyth ?? KLEND, isSigner: false, isWritable: false },                    // 13
+  { pubkey: r.switchboardPrice ?? KLEND, isSigner: false, isWritable: false },        // 14
+  { pubkey: r.switchboardTwap ?? KLEND, isSigner: false, isWritable: false },         // 15
+  { pubkey: r.scope ?? KLEND, isSigner: false, isWritable: false },                   // 16
+  // Farm slots for withdraw_v2.
+  { pubkey: isFarmAttached ? obligationFarm : KLEND, isSigner: false, isWritable: isFarmAttached }, // 17
+  { pubkey: isFarmAttached ? r.reserveFarmCollateral : KLEND, isSigner: false, isWritable: isFarmAttached }, // 18
+  { pubkey: FARMS_PROGRAM, isSigner: false, isWritable: false },                      // 19
 ];
 
 const wKaminoAction = Buffer.concat([
@@ -384,8 +400,11 @@ try {
     conn, new Transaction().add(cu, wIx), [admin], { commitment: 'confirmed', skipPreflight: false },
   );
   console.log(`✓ Withdraw succeeded: ${wSig}`);
-  const usdcOut = (await getAccount(conn, adapterOutTaUsdc.address)).amount;
-  console.log(`  USDC redeemed to scratch: ${usdcOut}`);
+  const ownerOut = (await getAccount(conn, ownerUsdcAta)).amount;
+  const scratchOut = (await getAccount(conn, adapterOutTaUsdc.address)).amount;
+  console.log(`  USDC redeemed to owner_usdc_ata: ${ownerOut}`);
+  console.log(`  USDC swept to scratch (adapter_out_ta): ${scratchOut}`);
+  console.log('  (adapter post-CPI hop owner_usdc_ata → adapter_out_ta is a follow-up — kamino-side validated)');
 } catch (e) {
   console.error(`❌ Withdraw failed: ${e.message}`);
   if (e.logs) console.error(e.logs.join('\n'));

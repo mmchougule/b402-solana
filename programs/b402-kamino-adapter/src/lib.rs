@@ -98,9 +98,19 @@ pub const KAMINO_IX_DEPOSIT_RESERVE_LIQUIDITY_AND_OBLIGATION_COLLATERAL: [u8; 8]
 pub const KAMINO_IX_DEPOSIT_RESERVE_LIQUIDITY_AND_OBLIGATION_COLLATERAL_V2: [u8; 8] =
     [216, 224, 191, 27, 204, 151, 102, 175];
 
-/// `withdraw_obligation_collateral_and_redeem_reserve_collateral` (v1).
-pub const KAMINO_IX_WITHDRAW_OBLIGATION_COLLATERAL_AND_REDEEM_RESERVE_COLLATERAL: [u8; 8] =
+/// `withdraw_obligation_collateral_and_redeem_reserve_collateral` (v1) —
+/// kept for reference / non-CPI tools. NOT callable from a CPI; klend
+/// rejects with `CpiDisabled` (refresh_ix_utils.rs:65). Use V2 for CPI.
+#[allow(dead_code)]
+pub const KAMINO_IX_WITHDRAW_OBLIGATION_COLLATERAL_AND_REDEEM_RESERVE_COLLATERAL_V1: [u8; 8] =
     [75, 93, 93, 220, 34, 150, 218, 196];
+
+/// `withdraw_obligation_collateral_and_redeem_reserve_collateral_v2` —
+/// CPI-callable variant. Wraps the V1 account list + adds farm accounts
+/// inline (mirroring `deposit_v2`). Required for the b402 adapter path.
+/// Discriminator: sha256("global:withdraw_obligation_collateral_and_redeem_reserve_collateral_v2")[..8].
+pub const KAMINO_IX_WITHDRAW_OBLIGATION_COLLATERAL_AND_REDEEM_RESERVE_COLLATERAL: [u8; 8] =
+    [235, 52, 119, 152, 149, 197, 20, 7];
 
 /// `borrow_obligation_liquidity` (v1).
 pub const KAMINO_IX_BORROW_OBLIGATION_LIQUIDITY: [u8; 8] = [121, 127, 18, 204, 73, 245, 225, 65];
@@ -250,7 +260,22 @@ mod ra_withdraw_per_user {
     pub const SYSVAR_INSTRUCTIONS: usize = 10;
     pub const RESERVE_LIQUIDITY_MINT: usize = 11;
     pub const OWNER_PDA: usize = 12;
-    pub const MIN_LEN: usize = 13;
+    /// Oracle accounts for refresh_reserve. KLEND program ID is the
+    /// sentinel for "no oracle of this type". Slot 13–16 mirror the
+    /// `ra_deposit_per_user` ORACLE_* slots; refresh_reserve consumes them
+    /// to pull current price data.
+    pub const ORACLE_PYTH_OR_SENTINEL: usize = 13;
+    pub const ORACLE_SWITCHBOARD_PRICE_OR_SENTINEL: usize = 14;
+    pub const ORACLE_SWITCHBOARD_TWAP_OR_SENTINEL: usize = 15;
+    pub const ORACLE_SCOPE_OR_SENTINEL: usize = 16;
+    /// Farm accounts for withdraw_v2 (V2 ix wraps V1 + farm accounts
+    /// inline; mirrors deposit_v2's farm-slot pattern). Use KLEND program
+    /// ID as the sentinel for "no farm" — Kamino's Optional account fields
+    /// treat the sentinel as None.
+    pub const OBLIGATION_FARM_OR_SENTINEL: usize = 17;
+    pub const RESERVE_FARM_STATE_OR_SENTINEL: usize = 18;
+    pub const FARMS_PROGRAM: usize = 19;
+    pub const MIN_LEN: usize = 20;
 }
 
 /// Action variants the adapter exposes. Borsh-encoded inside `action_payload`.
@@ -299,10 +324,6 @@ pub mod b402_kamino_adapter {
     ) -> Result<()> {
         // ABI sanity. Mirrors b402-jupiter-adapter.
         require!(in_amount > 0, KaminoAdapterError::InvalidAmount);
-        require!(
-            ctx.accounts.adapter_in_ta.amount >= in_amount,
-            KaminoAdapterError::InsufficientInput
-        );
 
         // Decode action. The `per_user_obligation` build expects the
         // action_payload to start with a 32-B `viewing_pub_hash` (PRD-33
@@ -314,6 +335,22 @@ pub mod b402_kamino_adapter {
         #[cfg(not(feature = "per_user_obligation"))]
         let action = KaminoAction::try_from_slice(&action_payload)
             .map_err(|_| error!(KaminoAdapterError::InvalidActionPayload))?;
+
+        // Input balance check applies only to actions that physically pull
+        // tokens from `adapter_in_ta` (Deposit, Repay). Withdraw and Borrow
+        // debit from Kamino state directly — the obligation's collateral
+        // (Withdraw) or the reserve's available liquidity (Borrow), not
+        // the scratch ATA. Enforce per-action.
+        let adapter_in_ta_pulls = matches!(
+            action,
+            KaminoAction::Deposit { .. } | KaminoAction::Repay { .. }
+        );
+        if adapter_in_ta_pulls {
+            require!(
+                ctx.accounts.adapter_in_ta.amount >= in_amount,
+                KaminoAdapterError::InsufficientInput
+            );
+        }
 
         // Snapshot adapter scratch balances pre-CPI so the post-CPI sweep
         // moves only the delta produced by this call.
@@ -610,6 +647,50 @@ fn forward_infos<'info>(
 
 fn account_exists(ai: &AccountInfo) -> bool {
     ai.lamports() > 0 && !ai.data_is_empty()
+}
+
+/// Read whether a Kamino `Obligation` account currently has any deposit
+/// for the given reserve. Klend's obligation layout (verified against klend
+/// master 2026-04-26):
+///   [0..8)   anchor disc
+///   [8..16)  tag (u64)
+///   [16..32) last_update (16 B)
+///   [32..64) lending_market (Pubkey)
+///   [64..96) owner (Pubkey)
+///   [96..)   deposits: [ObligationCollateral; 8], each 136 B
+///   ...
+///
+/// Each `ObligationCollateral` starts with `deposit_reserve: Pubkey`. An
+/// "active" deposit is one whose `deposit_reserve != Pubkey::default()`.
+/// Klend's `RefreshObligation` expects one remaining_account per active
+/// deposit_reserve; a stale obligation with an active deposit and no
+/// reserve passed trips `expected_remaining_accounts=N, actual=0`.
+///
+/// Returns true if the obligation account exists AND has the given
+/// reserve in any deposits[i].deposit_reserve slot.
+#[cfg(feature = "per_user_obligation")]
+fn obligation_has_reserve(obligation_info: &AccountInfo, reserve: &Pubkey) -> bool {
+    if !account_exists(obligation_info) {
+        return false;
+    }
+    let data = match obligation_info.try_borrow_data() {
+        Ok(d) => d,
+        Err(_) => return false,
+    };
+    const DEPOSITS_OFFSET: usize = 96;
+    const COLLATERAL_SIZE: usize = 136;
+    const NUM_DEPOSITS: usize = 8;
+    if data.len() < DEPOSITS_OFFSET + NUM_DEPOSITS * COLLATERAL_SIZE {
+        return false;
+    }
+    let target = reserve.to_bytes();
+    for i in 0..NUM_DEPOSITS {
+        let off = DEPOSITS_OFFSET + i * COLLATERAL_SIZE;
+        if data[off..off + 32] == target {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg_attr(feature = "per_user_obligation", allow(dead_code))]
@@ -1188,11 +1269,31 @@ fn handle_deposit_per_user<'info>(
     }
 
     // --- 5. refresh_obligation ---------------------------------------------
+    // klend account list: lendingMarket, obligation, [deposit_reserves...].
+    // Each reserve in remaining_accounts must be WRITABLE — klend mutates
+    // its accumulator during refresh (lending_operations.rs:1577 calls
+    // `deposit_reserve.get_mut()`). Empty obligation needs no remaining;
+    // re-deposits or any subsequent call where obligation has positions
+    // MUST include the reserve. Pass it unconditionally — klend tolerates
+    // an extra reserve on a fresh obligation (the count check is
+    // `remaining.len() == reserves_count + (referrer ? borrow_count : 0)`,
+    // and a fresh obligation has reserves_count=0 → expected=0; passing 1
+    // extra account would error). So we gate on whether the obligation
+    // already had this reserve.
     {
-        let metas = [
-            KaminoMeta { key: market.key(), is_writable: false },
-            KaminoMeta { key: obligation.key(), is_writable: true },
-        ];
+        let needs_reserve = account_exists(&obligation) && obligation_has_reserve(&obligation, &reserve.key());
+        let metas: Vec<KaminoMeta> = if needs_reserve {
+            vec![
+                KaminoMeta { key: market.key(), is_writable: false },
+                KaminoMeta { key: obligation.key(), is_writable: true },
+                KaminoMeta { key: reserve.key(), is_writable: true },
+            ]
+        } else {
+            vec![
+                KaminoMeta { key: market.key(), is_writable: false },
+                KaminoMeta { key: obligation.key(), is_writable: true },
+            ]
+        };
         let ix = build_kamino_ix(&[], &metas, KAMINO_IX_REFRESH_OBLIGATION, &[]);
         invoke_signed(&ix, &infos, signer_seeds)
             .map_err(|_| error!(KaminoAdapterError::KaminoCpiFailed))?;
@@ -1329,15 +1430,21 @@ fn handle_withdraw_per_user<'info>(
     infos.push(owner_pda_info);
 
     // --- 1. refresh_reserve ----------------------------------------------
-    // klend account list: reserve, lendingMarket, pythOracle?, switchboardOracle?, scopePrices?
-    // We only have the reserve+market in our RA layout; if oracles are
-    // needed they should be pre-staged at the BACK of remaining_accounts
-    // (klend tolerates extras). For V1, refresh_reserve via market+reserve
-    // is sufficient against a freshly-cloned fork.
+    // klend account list: reserve, lendingMarket, pyth, switchboard_price,
+    // switchboard_twap, scope. SDK passes klend program ID as sentinel for
+    // any oracle that's not active for this reserve.
+    let oracle_pyth = ra[ra_withdraw_per_user::ORACLE_PYTH_OR_SENTINEL].clone();
+    let oracle_swb_price = ra[ra_withdraw_per_user::ORACLE_SWITCHBOARD_PRICE_OR_SENTINEL].clone();
+    let oracle_swb_twap = ra[ra_withdraw_per_user::ORACLE_SWITCHBOARD_TWAP_OR_SENTINEL].clone();
+    let oracle_scope = ra[ra_withdraw_per_user::ORACLE_SCOPE_OR_SENTINEL].clone();
     {
         let metas = [
             KaminoMeta { key: withdraw_reserve.key(), is_writable: true },
             KaminoMeta { key: market.key(), is_writable: false },
+            KaminoMeta { key: oracle_pyth.key(), is_writable: false },
+            KaminoMeta { key: oracle_swb_price.key(), is_writable: false },
+            KaminoMeta { key: oracle_swb_twap.key(), is_writable: false },
+            KaminoMeta { key: oracle_scope.key(), is_writable: false },
         ];
         let ix = build_kamino_ix(&[], &metas, KAMINO_IX_REFRESH_RESERVE, &[]);
         invoke_signed(&ix, &infos, signer_seeds)
@@ -1345,39 +1452,59 @@ fn handle_withdraw_per_user<'info>(
     }
 
     // --- 2. refresh_obligation -------------------------------------------
-    // klend account list: lendingMarket, obligation, [reserves...]
+    // klend account list: lendingMarket, obligation, [deposit_reserves...].
+    // For withdraw the obligation MUST have at least one deposit (else
+    // there's nothing to withdraw), so reserves_count >= 1. Pass the
+    // reserve as a writable remaining_account — klend's
+    // lending_operations.rs:1577 calls `get_mut()` on it.
     {
-        let metas = [
-            KaminoMeta { key: market.key(), is_writable: false },
-            KaminoMeta { key: obligation.key(), is_writable: true },
-            KaminoMeta { key: withdraw_reserve.key(), is_writable: false },
-        ];
+        let needs_reserve = obligation_has_reserve(&obligation, &withdraw_reserve.key());
+        let metas: Vec<KaminoMeta> = if needs_reserve {
+            vec![
+                KaminoMeta { key: market.key(), is_writable: false },
+                KaminoMeta { key: obligation.key(), is_writable: true },
+                KaminoMeta { key: withdraw_reserve.key(), is_writable: true },
+            ]
+        } else {
+            vec![
+                KaminoMeta { key: market.key(), is_writable: false },
+                KaminoMeta { key: obligation.key(), is_writable: true },
+            ]
+        };
         let ix = build_kamino_ix(&[], &metas, KAMINO_IX_REFRESH_OBLIGATION, &[]);
         invoke_signed(&ix, &infos, signer_seeds)
             .map_err(|_| error!(KaminoAdapterError::KaminoCpiFailed))?;
     }
 
-    // --- 3. withdraw_obligation_collateral_and_redeem_reserve_collateral --
-    // klend v1 account list (per klend-sdk@7.3.x):
-    //   owner(signer,w) obligation(w) lendingMarket lendingMarketAuthority
-    //   withdrawReserve(w) reserveSourceCollateral(w) userDestinationLiquidity(w)
-    //   reserveCollateralMint(w) reserveLiquiditySupply(w)
-    //   tokenProgram(coll) tokenProgramLiq instructionsSysvar
+    // --- 3. withdraw_obligation_collateral_and_redeem_reserve_collateral_v2
+    // klend V2 struct (CPI-callable; V1 errors with CpiDisabled):
+    //    [V1 accounts: 14 entries]
+    //    14 obligation_farm_user_state (Option, w)
+    //    15 reserve_farm_state (Option, w)
+    //    16 farms_program
+    let obligation_farm_or_sentinel = ra[ra_withdraw_per_user::OBLIGATION_FARM_OR_SENTINEL].clone();
+    let reserve_farm_state_or_sentinel = ra[ra_withdraw_per_user::RESERVE_FARM_STATE_OR_SENTINEL].clone();
+    let farms_program = ra[ra_withdraw_per_user::FARMS_PROGRAM].clone();
+    let reserve_has_farm = reserve_farm_state_or_sentinel.key() != KAMINO_LEND_PROGRAM_ID;
     {
         let metas = [
-            KaminoMeta { key: owner_key, is_writable: true },          // owner (signed via owner_seeds)
-            KaminoMeta { key: obligation.key(), is_writable: true },
-            KaminoMeta { key: market.key(), is_writable: false },
-            KaminoMeta { key: market_authority.key(), is_writable: false },
-            KaminoMeta { key: withdraw_reserve.key(), is_writable: true },
-            KaminoMeta { key: reserve_source_collateral.key(), is_writable: true },
-            KaminoMeta { key: user_destination.key(), is_writable: true },
-            KaminoMeta { key: reserve_collateral_mint.key(), is_writable: true },
-            KaminoMeta { key: reserve_liquidity_supply.key(), is_writable: true },
-            KaminoMeta { key: reserve_liq_mint.key(), is_writable: false },
-            KaminoMeta { key: coll_token_program.key(), is_writable: false },
-            KaminoMeta { key: liq_token_program.key(), is_writable: false },
-            KaminoMeta { key: sysvar_ix.key(), is_writable: false },
+            KaminoMeta { key: owner_key, is_writable: true },                          // 0
+            KaminoMeta { key: obligation.key(), is_writable: true },                   // 1
+            KaminoMeta { key: market.key(), is_writable: false },                      // 2
+            KaminoMeta { key: market_authority.key(), is_writable: false },            // 3
+            KaminoMeta { key: withdraw_reserve.key(), is_writable: true },             // 4
+            KaminoMeta { key: reserve_liq_mint.key(), is_writable: false },            // 5
+            KaminoMeta { key: reserve_source_collateral.key(), is_writable: true },    // 6
+            KaminoMeta { key: reserve_collateral_mint.key(), is_writable: true },      // 7
+            KaminoMeta { key: reserve_liquidity_supply.key(), is_writable: true },     // 8
+            KaminoMeta { key: user_destination.key(), is_writable: true },             // 9
+            KaminoMeta { key: KAMINO_LEND_PROGRAM_ID, is_writable: false },            // 10 placeholder = None sentinel
+            KaminoMeta { key: coll_token_program.key(), is_writable: false },          // 11
+            KaminoMeta { key: liq_token_program.key(), is_writable: false },           // 12
+            KaminoMeta { key: sysvar_ix.key(), is_writable: false },                   // 13
+            KaminoMeta { key: obligation_farm_or_sentinel.key(), is_writable: reserve_has_farm }, // 14
+            KaminoMeta { key: reserve_farm_state_or_sentinel.key(), is_writable: reserve_has_farm }, // 15
+            KaminoMeta { key: farms_program.key(), is_writable: false },               // 16
         ];
         let mut data = Vec::with_capacity(8);
         data.extend_from_slice(&kt_in.to_le_bytes());
@@ -1389,6 +1516,39 @@ fn handle_withdraw_per_user<'info>(
         );
         invoke_signed(&ix, &infos, signer_seeds)
             .map_err(|_| error!(KaminoAdapterError::KaminoCpiFailed))?;
+    }
+
+    // --- 4. Sweep owner_usdc_ata → adapter_out_ta -------------------------
+    // Kamino credits the redeemed underlying into `user_destination`, which
+    // is `owner_usdc_ata` (Kamino requires `token::authority == owner` =
+    // owner_pda). For the pool's existing post-CPI sweep to see the delta
+    // and forward it into out_vault, the adapter moves the redeemed USDC
+    // from owner_usdc_ata → adapter_out_ta. Signed via owner_seeds since
+    // owner_pda is the authority on owner_usdc_ata.
+    {
+        let owner_usdc_ata = ra[ra_withdraw_per_user::USER_DESTINATION_LIQUIDITY].clone();
+        let token_program = ctx.accounts.token_program.to_account_info();
+        let adapter_out_ta = ctx.accounts.adapter_out_ta.to_account_info();
+        // Read post-CPI balance to know how much to sweep.
+        let owner_acct_data = owner_usdc_ata.try_borrow_data()?;
+        // SPL TokenAccount layout: amount at offset 64 (u64 LE).
+        let owner_amount = u64::from_le_bytes(
+            owner_acct_data[64..72].try_into().unwrap_or([0u8; 8]),
+        );
+        drop(owner_acct_data);
+        if owner_amount > 0 {
+            let signer_owner: &[&[&[u8]]] = &[owner_seeds];
+            let cpi_ctx = CpiContext::new_with_signer(
+                token_program,
+                Transfer {
+                    from: owner_usdc_ata,
+                    to: adapter_out_ta,
+                    authority: ra[ra_withdraw_per_user::OWNER_PDA].clone(),
+                },
+                signer_owner,
+            );
+            token::transfer(cpi_ctx, owner_amount)?;
+        }
     }
 
     Ok(())
