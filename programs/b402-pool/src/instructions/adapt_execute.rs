@@ -269,6 +269,61 @@ pub struct AdaptExecuteV2Args {
 /// synthesizes the legacy `AdaptExecuteArgs` shape, and delegates to the
 /// shared `handler`. End result is byte-identical to a v1 call with the
 /// same pi — just ~320 B smaller on the wire.
+///
+/// Build the `AccountMeta` list for the pool's CPI into the registered
+/// adapter's `execute` ix.
+///
+/// **Writability contract** — these flags are runtime-checked by Anchor on
+/// the adapter side via `#[account(mut, ...)]` constraints. A regression
+/// here surfaces as a `ConstraintMut` (Anchor error 2000) failure on the
+/// adapter side, which only fires inside the Solana runtime — host unit
+/// tests can't simulate that without a full validator. So we test this
+/// builder directly: the adjacent `adapter_cpi_meta_tests` module enforces
+/// every flag below as a host invariant.
+///
+///   - adapter_authority: WRITABLE
+///       Per-user adapters (Kamino's `per_user_obligation` build) use it
+///       as the Kamino obligationOwner / feePayer for `init_user_metadata`
+///       and `init_obligation`, both of which require Anchor role-3
+///       (signer, writable). Privilege can only DEMOTE inside a CPI, so
+///       the outer slot must start writable. Read-only is also fine for
+///       Jupiter / mock — they declare `pub adapter_authority:
+///       UncheckedAccount` with no mut constraint and tolerate either.
+///   - in_vault, out_vault: WRITABLE
+///       Adapter swaps in/out tokens; both vaults shift balance.
+///   - adapter_in_ta, adapter_out_ta: WRITABLE
+///       Adapter scratch ATAs. SPL Token transfers debit/credit them.
+///   - token_program: READONLY
+///       Program account; never written to.
+///   - remaining[..]: passthrough — preserve the SDK's per-account
+///       writable + signer flags. Writable status of remaining accounts
+///       (e.g. Kamino reserve, obligation) is adapter-specific.
+pub(crate) fn build_adapter_cpi_metas(
+    adapter_authority: Pubkey,
+    in_vault: Pubkey,
+    out_vault: Pubkey,
+    adapter_in_ta: Pubkey,
+    adapter_out_ta: Pubkey,
+    token_program: Pubkey,
+    remaining: &[(Pubkey, /*is_writable*/ bool, /*is_signer*/ bool)],
+) -> Vec<AccountMeta> {
+    let mut m = Vec::with_capacity(6 + remaining.len());
+    m.push(AccountMeta::new(adapter_authority, false));
+    m.push(AccountMeta::new(in_vault, false));
+    m.push(AccountMeta::new(out_vault, false));
+    m.push(AccountMeta::new(adapter_in_ta, false));
+    m.push(AccountMeta::new(adapter_out_ta, false));
+    m.push(AccountMeta::new_readonly(token_program, false));
+    for (key, is_writable, is_signer) in remaining {
+        if *is_writable {
+            m.push(AccountMeta::new(*key, *is_signer));
+        } else {
+            m.push(AccountMeta::new_readonly(*key, *is_signer));
+        }
+    }
+    m
+}
+
 #[cfg(feature = "prd_35_pending_inputs")]
 #[inline(never)]
 pub fn handler_v2<'info>(
@@ -642,29 +697,19 @@ pub fn handler<'info>(
     // `nullifier_remaining_consumed` is forwarded to the adapter.
     let adapter_remaining = &ctx.remaining_accounts[nullifier_remaining_consumed..];
 
-    let adapter_metas: Vec<AccountMeta> = {
-        let mut m = Vec::with_capacity(6 + adapter_remaining.len());
-        m.push(AccountMeta::new_readonly(
-            ctx.accounts.adapter_authority.key(),
-            false,
-        ));
-        m.push(AccountMeta::new(ctx.accounts.in_vault.key(), false));
-        m.push(AccountMeta::new(ctx.accounts.out_vault.key(), false));
-        m.push(AccountMeta::new(ctx.accounts.adapter_in_ta.key(), false));
-        m.push(AccountMeta::new(ctx.accounts.adapter_out_ta.key(), false));
-        m.push(AccountMeta::new_readonly(
-            ctx.accounts.token_program.key(),
-            false,
-        ));
-        for a in adapter_remaining.iter() {
-            if a.is_writable {
-                m.push(AccountMeta::new(*a.key, a.is_signer));
-            } else {
-                m.push(AccountMeta::new_readonly(*a.key, a.is_signer));
-            }
-        }
-        m
-    };
+    let adapter_metas: Vec<AccountMeta> = build_adapter_cpi_metas(
+        ctx.accounts.adapter_authority.key(),
+        ctx.accounts.in_vault.key(),
+        ctx.accounts.out_vault.key(),
+        ctx.accounts.adapter_in_ta.key(),
+        ctx.accounts.adapter_out_ta.key(),
+        ctx.accounts.token_program.key(),
+        adapter_remaining
+            .iter()
+            .map(|a| (*a.key, a.is_writable, a.is_signer))
+            .collect::<Vec<_>>()
+            .as_slice(),
+    );
     let mut adapter_infos: Vec<AccountInfo<'info>> =
         Vec::with_capacity(6 + adapter_remaining.len());
     adapter_infos.push(ctx.accounts.adapter_authority.to_account_info());
@@ -1527,3 +1572,123 @@ mod prd_35_pi_parser_tests {
         assert_eq!(parsed.out_spending_pub, pi.out_spending_pub);
     }
 }
+
+#[cfg(test)]
+mod adapter_cpi_meta_tests {
+    //! Host-side guard for the pool's CPI `AccountMeta` flags. A regression
+    //! in any of these manifests as an Anchor `ConstraintMut` (error 2000)
+    //! at runtime — the adapter side enforces `#[account(mut, ...)]` on
+    //! the slots the pool must pass writable.
+    //!
+    //! Bug regression captured: 2026-05-05, kamino-adapter
+    //! `per_user_obligation` deploy. The pool was hardcoding
+    //! `adapter_authority` as readonly; Kamino's `init_user_metadata` CPI
+    //! requires it writable as feePayer, so the kamino lend deposit failed
+    //! `ConstraintMut` on mainnet (recoverable but cost a redeploy). This
+    //! module's first test would have caught that as a unit-time failure.
+    use super::*;
+
+    fn fixtures() -> (Pubkey, Pubkey, Pubkey, Pubkey, Pubkey, Pubkey) {
+        (
+            Pubkey::new_unique(), // adapter_authority
+            Pubkey::new_unique(), // in_vault
+            Pubkey::new_unique(), // out_vault
+            Pubkey::new_unique(), // adapter_in_ta
+            Pubkey::new_unique(), // adapter_out_ta
+            anchor_spl::token::ID, // token_program (matches runtime)
+        )
+    }
+
+    #[test]
+    fn adapter_authority_is_writable() {
+        // The bug fix. Kamino's per_user_obligation uses adapter_authority
+        // as Kamino's feePayer in the inner CPI; readonly here surfaces as
+        // Anchor ConstraintMut on the kamino-adapter side.
+        let (a, ivt, ovt, ita, ota, tok) = fixtures();
+        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, &[]);
+        assert_eq!(metas[0].pubkey, a);
+        assert!(
+            metas[0].is_writable,
+            "adapter_authority MUST be writable — see PRD-33 V1 Kamino integration"
+        );
+        assert!(!metas[0].is_signer, "adapter_authority is signed by the adapter via invoke_signed, not the outer tx");
+    }
+
+    #[test]
+    fn vaults_and_scratch_atas_are_writable() {
+        let (a, ivt, ovt, ita, ota, tok) = fixtures();
+        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, &[]);
+        // Slot 1: in_vault
+        assert_eq!(metas[1].pubkey, ivt);
+        assert!(metas[1].is_writable, "in_vault MUST be writable — token transfers debit it");
+        // Slot 2: out_vault
+        assert_eq!(metas[2].pubkey, ovt);
+        assert!(metas[2].is_writable, "out_vault MUST be writable — token transfers credit it");
+        // Slot 3: adapter_in_ta
+        assert_eq!(metas[3].pubkey, ita);
+        assert!(metas[3].is_writable, "adapter_in_ta MUST be writable — pool transfers tokens here for the adapter");
+        // Slot 4: adapter_out_ta
+        assert_eq!(metas[4].pubkey, ota);
+        assert!(metas[4].is_writable, "adapter_out_ta MUST be writable — adapter post-CPI sweep moves tokens out");
+    }
+
+    #[test]
+    fn token_program_is_readonly_and_not_signer() {
+        let (a, ivt, ovt, ita, ota, tok) = fixtures();
+        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, &[]);
+        assert_eq!(metas[5].pubkey, tok);
+        assert!(!metas[5].is_writable, "token_program is a Program account; never written");
+        assert!(!metas[5].is_signer);
+    }
+
+    #[test]
+    fn remaining_accounts_writable_flag_is_preserved() {
+        let (a, ivt, ovt, ita, ota, tok) = fixtures();
+        let r1 = (Pubkey::new_unique(), true, false);  // writable, not signer
+        let r2 = (Pubkey::new_unique(), false, false); // readonly, not signer
+        let r3 = (Pubkey::new_unique(), true, true);   // writable, signer
+        let r4 = (Pubkey::new_unique(), false, true);  // readonly, signer
+        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, &[r1, r2, r3, r4]);
+
+        // Total = 6 named + 4 forwarded.
+        assert_eq!(metas.len(), 10);
+
+        // r1 -> writable, not signer
+        assert_eq!(metas[6].pubkey, r1.0);
+        assert!(metas[6].is_writable);
+        assert!(!metas[6].is_signer);
+
+        // r2 -> readonly, not signer
+        assert_eq!(metas[7].pubkey, r2.0);
+        assert!(!metas[7].is_writable);
+        assert!(!metas[7].is_signer);
+
+        // r3 -> writable, signer (e.g. Jupiter's userTransferAuthority)
+        assert_eq!(metas[8].pubkey, r3.0);
+        assert!(metas[8].is_writable);
+        assert!(metas[8].is_signer);
+
+        // r4 -> readonly, signer
+        assert_eq!(metas[9].pubkey, r4.0);
+        assert!(!metas[9].is_writable);
+        assert!(metas[9].is_signer);
+    }
+
+    #[test]
+    fn first_six_are_named_slots_in_order() {
+        // Adapter ABI contract: the first 6 slots of remaining_accounts (as
+        // seen by the adapter's `Execute<'info>`) are the named pool-managed
+        // accounts in this exact order. Per-adapter remaining_accounts
+        // begin at index 6.
+        let (a, ivt, ovt, ita, ota, tok) = fixtures();
+        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, &[]);
+        assert_eq!(metas.len(), 6);
+        assert_eq!(metas[0].pubkey, a, "slot 0: adapter_authority");
+        assert_eq!(metas[1].pubkey, ivt, "slot 1: in_vault");
+        assert_eq!(metas[2].pubkey, ovt, "slot 2: out_vault");
+        assert_eq!(metas[3].pubkey, ita, "slot 3: adapter_in_ta");
+        assert_eq!(metas[4].pubkey, ota, "slot 4: adapter_out_ta");
+        assert_eq!(metas[5].pubkey, tok, "slot 5: token_program");
+    }
+}
+

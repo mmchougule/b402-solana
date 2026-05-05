@@ -1153,7 +1153,14 @@ export class B402Solana {
       { pubkey: treeStatePda(poolProgramId), isSigner: false, isWritable: true },
       { pubkey: new PublicKey(this.programIds.b402VerifierAdapt), isSigner: false, isWritable: false },
       { pubkey: adapterProgramId, isSigner: false, isWritable: false },
-      { pubkey: adapterAuthority, isSigner: false, isWritable: false },
+      // adapter_authority MUST be writable: per-user adapters (Kamino's
+      // per_user_obligation build) use it as Kamino's `obligationOwner` /
+      // feePayer for init_user_metadata + init_obligation, which Anchor
+      // role-3 requires writable. Privilege can't escalate inside a CPI,
+      // so the outer slot has to start writable. Read-only is safe for
+      // adapters that don't init Kamino accounts (Jupiter, mock), but
+      // we standardise on writable here so per-user adapters work.
+      { pubkey: adapterAuthority, isSigner: false, isWritable: true },
       { pubkey: req.adapterInTa, isSigner: false, isWritable: true },
       { pubkey: req.adapterOutTa, isSigner: false, isWritable: true },
       { pubkey: feeAtaSentinel, isSigner: false, isWritable: true },

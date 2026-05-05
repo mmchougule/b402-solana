@@ -158,9 +158,12 @@ export function buildKaminoDepositRemainingAccounts(
   perUser: KaminoPerUserAccounts,
 ): AccountMeta[] {
   const isFarmAttached = !reserveAccts.reserveFarmCollateral.equals(PublicKey.default);
-  const farmStateOrSentinel = isFarmAttached
-    ? reserveAccts.reserveFarmCollateral
-    : reserveAccts.klendProgram;
+  // When no farm is attached, BOTH the obligation_farm slot (14) and the
+  // reserve_farm_state slot (15) get the klend program as a sentinel —
+  // the adapter's `handle_deposit_per_user` skips the obligation_farms
+  // ix entirely in that case but still expects two account slots.
+  const obligationFarmSlot = isFarmAttached ? perUser.obligationFarm : reserveAccts.klendProgram;
+  const reserveFarmStateSlot = isFarmAttached ? reserveAccts.reserveFarmCollateral : reserveAccts.klendProgram;
   return [
     { pubkey: reserveAccts.reserve, isSigner: false, isWritable: true },
     { pubkey: reserveAccts.lendingMarket, isSigner: false, isWritable: false },
@@ -176,8 +179,8 @@ export function buildKaminoDepositRemainingAccounts(
     { pubkey: reserveAccts.farmsProgram, isSigner: false, isWritable: false },
     { pubkey: perUser.userMetadata, isSigner: false, isWritable: true },
     { pubkey: perUser.obligation, isSigner: false, isWritable: true },
-    { pubkey: perUser.obligationFarm, isSigner: false, isWritable: isFarmAttached },
-    { pubkey: farmStateOrSentinel, isSigner: false, isWritable: isFarmAttached },
+    { pubkey: obligationFarmSlot, isSigner: false, isWritable: isFarmAttached },
+    { pubkey: reserveFarmStateSlot, isSigner: false, isWritable: isFarmAttached },
     { pubkey: SYSVAR_INSTRUCTIONS, isSigner: false, isWritable: false },
     { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     { pubkey: SYSVAR_RENT, isSigner: false, isWritable: false },
