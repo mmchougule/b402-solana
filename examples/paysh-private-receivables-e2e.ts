@@ -228,7 +228,7 @@ async function main(): Promise<void> {
   // ── 7. Privacy summary ──────────────────────────────────────────────
   console.log('\n━━━ privacy summary ━━━');
   console.log(`payer    → ingress ATA   (visible on-chain: ${paymentSig.slice(0, 12)}…)`);
-  console.log(`ingress  → shielded note (commitment ${evt.commitment.slice(0, 18)}…)`);
+  console.log(`ingress  → shielded note (commitment ${(evt.commitment ?? '').slice(0, 18)}…)`);
   console.log('   the commitment is a Poseidon hash of (mint, amount, randomness, owner-pub).');
   console.log('   no on-chain field reveals the amount, the owner, or any link to the payer.');
   if (unshieldSig) {

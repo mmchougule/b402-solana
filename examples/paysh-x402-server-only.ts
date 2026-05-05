@@ -50,10 +50,12 @@ import {
 } from '@b402ai/paysh-bridge';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const RPC_URL = process.env.RPC_URL;
-if (!RPC_URL) {
-  throw new Error('RPC_URL is required (Photon-enabled provider).');
+function requireEnv(name: string, hint = ''): string {
+  const v = process.env[name];
+  if (!v) throw new Error(`${name} is required. ${hint}`.trim());
+  return v;
 }
+const RPC_URL = requireEnv('RPC_URL', 'Use a Photon-enabled provider (Helius/Triton).');
 const USDC_MINT = new PublicKey(
   process.env.B402_USDC_MINT ?? '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',
 );

@@ -99,14 +99,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // ─── config ──────────────────────────────────────────────────────────
 const CLUSTER = (process.env.CLUSTER ?? 'devnet') as 'devnet' | 'mainnet';
-const RPC_URL = process.env.RPC_URL;
-if (!RPC_URL) {
-  throw new Error(
-    'RPC_URL is required. Use a Photon-enabled provider (Helius/Triton).\n' +
-      '  devnet:  RPC_URL=https://devnet.helius-rpc.com/?api-key=<key>\n' +
-      '  mainnet: RPC_URL=https://mainnet.helius-rpc.com/?api-key=<key>',
-  );
-}
+const RPC_URL = requireEnv(
+  'RPC_URL',
+  'Use a Photon-enabled provider (Helius/Triton).\n' +
+    '  devnet:  RPC_URL=https://devnet.helius-rpc.com/?api-key=<key>\n' +
+    '  mainnet: RPC_URL=https://mainnet.helius-rpc.com/?api-key=<key>',
+);
 const USDC_MINT = new PublicKey(
   process.env.B402_USDC_MINT ??
     (CLUSTER === 'devnet'
@@ -373,6 +371,12 @@ async function handleRequest(
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────
+function requireEnv(name: string, hint = ''): string {
+  const v = process.env[name];
+  if (!v) throw new Error(`${name} is required. ${hint}`.trim());
+  return v;
+}
+
 function loadKeypair(p: string): Keypair {
   const raw = JSON.parse(fs.readFileSync(p, 'utf8'));
   return Keypair.fromSecretKey(new Uint8Array(raw));
