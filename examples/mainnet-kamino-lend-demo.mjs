@@ -58,11 +58,54 @@ import { randomBytes } from 'node:crypto';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CIRCUITS = path.resolve(__dirname, '../circuits/build');
 
+// =====================================================================
+// Configuration — env-driven, no hardcoded credentials.
+// =====================================================================
 const RPC_URL = process.env.B402_RPC_URL;
 if (!RPC_URL) {
-  console.error('Set B402_RPC_URL to a mainnet RPC that supports getProgramAccounts + Photon (e.g. Helius). Public RPCs will not work.');
+  console.error('FAIL: B402_RPC_URL required (e.g. Helius mainnet URL with API key).');
   process.exit(1);
 }
+// Photon-compatible RPC (defaults to RPC_URL — same Helius endpoint serves
+// both compressed-account methods and standard Solana RPC). Override when
+// pointing at a local Photon (`http://127.0.0.1:8784`) or paid Triton.
+const PHOTON_URL = process.env.B402_PHOTON_URL ?? RPC_URL;
+// Indexer URL (b402's own Cloud Run service for non-rightmost Merkle proofs).
+// Override for local-development against a self-hosted indexer.
+const INDEXER_URL = process.env.B402_INDEXER_URL
+  ?? 'https://b402-solana-indexer-api-62092339396.us-central1.run.app';
+// Wallet keypair path. Default = standard Solana CLI location.
+const KEYPAIR_PATH = process.env.B402_KEYPAIR ?? path.join(os.homedir(), '.config/solana/id.json');
+// Persisted ALT location across runs (saves ~0.04 SOL/run on fresh ALT alloc).
+const ALT_PERSIST = process.env.B402_ALT_PERSIST ?? '/tmp/b402-mainnet-kamino-alt.json';
+
+// Step gating — run only the parts you need:
+//   STEP=setup  — reserve discovery + adapter scratch ATAs + ALT (no shield, no lend)
+//   STEP=shield — setup + shield only
+//   STEP=lend   — setup + use existing note (or REUSE_NOTE=1 to pick smallest) + lend
+//   STEP=all    — setup + shield + lend (default)
+const STEP = process.env.STEP ?? 'all';
+if (!['setup', 'shield', 'lend', 'all'].includes(STEP)) {
+  console.error(`FAIL: STEP=${STEP} invalid; must be one of: setup, shield, lend, all`);
+  process.exit(1);
+}
+
+// Lend amount (raw token units; USDC has 6 decimals).
+//   default 100_000 = 0.1 USDC — minimal at-risk for smoke
+const SHIELD_AMT = BigInt(process.env.SHIELD_AMT ?? '100000');
+
+// REUSE_NOTE=1 → pick smallest existing note instead of shielding fresh.
+//   Useful once a note's nullifier-address Photon state is healthy.
+const REUSE_NOTE = process.env.REUSE_NOTE === '1';
+
+console.log('=== config ===');
+console.log(`  STEP=${STEP}  SHIELD_AMT=${SHIELD_AMT}  REUSE_NOTE=${REUSE_NOTE}`);
+console.log(`  RPC=${RPC_URL.slice(0, 40)}…`);
+console.log(`  PHOTON=${PHOTON_URL === RPC_URL ? '(same as RPC)' : PHOTON_URL.slice(0, 40) + '…'}`);
+console.log(`  INDEXER=${INDEXER_URL.slice(0, 40)}…`);
+console.log(`  KEYPAIR=${KEYPAIR_PATH}`);
+console.log(`  ALT_PERSIST=${ALT_PERSIST}`);
+console.log('==============\n');
 
 const POOL = new PublicKey('42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y');
 const NULLIFIER = new PublicKey('2AnRZwWu6CTurZs1yQpqrcJWo4yRYL1xpeV78b2siweq');
@@ -173,8 +216,8 @@ function parseReserve(data) {
 
 async function main() {
   const conn = new Connection(RPC_URL, 'confirmed');
-  const photonRpc = createRpc(RPC_URL, RPC_URL);
-  const admin = loadKp(path.join(os.homedir(), '.config/solana/id.json'));
+  const photonRpc = createRpc(RPC_URL, PHOTON_URL);
+  const admin = loadKp(KEYPAIR_PATH);
   console.log('admin:', admin.publicKey.toBase58());
 
   // 1. Read Kamino USDC reserve.
@@ -225,7 +268,6 @@ async function main() {
   // smoke is incremental: extend with new per-user PDAs as needed, but
   // keep the static-accounts block once-and-done.
   const ALT_PROGRAM = new PublicKey('AddressLookupTab1e1111111111111111111111111');
-  const ALT_PERSIST = '/tmp/b402-mainnet-kamino-alt.json';
   let altPubkey;
   let altIsFresh = false;
   if (fs.existsSync(ALT_PERSIST)) {
@@ -309,7 +351,7 @@ async function main() {
     // tree.leafCount-1, so older shielded notes can't be redeemed in
     // arbitrary order. SDK falls back to proveMostRecentLeaf if the
     // indexer is unreachable.
-    indexerUrl: 'https://b402-solana-indexer-api-62092339396.us-central1.run.app',
+    indexerUrl: INDEXER_URL,
     proverArtifacts: {
       wasmPath: path.join(CIRCUITS, 'transact_js/transact.wasm'),
       zkeyPath: path.join(CIRCUITS, 'ceremony/transact_final.zkey'),
@@ -360,31 +402,76 @@ async function main() {
     console.log('✓ ALT already contains all per-user PDAs — skipping extend');
   }
 
-  // 5. Reuse an existing shielded USDC note (prior sessions left several:
-  //    7M, 2M, 2M). Each is already-shielded value, so spending one costs
-  //    nothing extra from the wallet's USDC balance. Pick the smallest to
-  //    minimize at-risk amount on this smoke. Indexer-backed proof handles
-  //    non-rightmost leaves.
+  if (STEP === 'setup') {
+    console.log('\n=== STEP=setup complete ===');
+    console.log(`  ALT: ${altPubkey.toBase58()}`);
+    console.log(`  ownerPda: ${ownerPda.toBase58()}`);
+    console.log(`  obligation: ${obligation.toBase58()}`);
+    console.log('  next: STEP=shield pnpm exec node ./mainnet-kamino-lend-demo.mjs');
+    return;
+  }
+
+  // 5. Strategy: shield a FRESH small note for this run.
+  //    Why fresh: existing on-chain notes (7M/2M/2M) have nullifier addresses
+  //    that prior failed runs queried — Photon's index appears poisoned for
+  //    those specific addresses (returns 500 for getValidityProofV0). A
+  //    fresh shield mints a brand-new nullifier address Photon has never
+  //    seen, so its proof query is clean.
   //
-  //    NOTE: future shields should use `omitEncryptedNotes: false` (the
-  //    SDK default) so the on-chain ciphertext lets later sessions trial-
-  //    decrypt and recover notes. omitEncryptedNotes saves ~120 B of tx
-  //    space at the cost of cross-session recoverability.
+  //    Cost: SHIELD_AMT moves from wallet → pool. We use 100_000 (0.1 USDC)
+  //    to keep at-risk low. omitEncryptedNotes is FALSE (SDK default) so
+  //    the on-chain ciphertext lets future sessions trial-decrypt + recover.
+  //
+  //    Set REUSE_NOTE=1 to override and pick the smallest existing note
+  //    (only useful once Photon recovers for that note's address).
   const { leToFrReduced } = await import('@b402ai/solana-shared');
   const inMintFr = leToFrReduced(inMint.toBytes());
   console.log('▶ scanning chain for existing shielded USDC notes (backfill)…');
   await b402.status({ refresh: true });
-  const usdcNotes = b402._notes.getSpendable(inMintFr);
+  let usdcNotes = b402._notes.getSpendable(inMintFr);
   console.log(`  USDC notes on chain: [${usdcNotes.map((n) => n.value.toString()).join(', ')}]`);
-  if (usdcNotes.length === 0) {
-    throw new Error('No discoverable shielded USDC notes — shield with omitEncryptedNotes:false first');
+
+  let noteToSpend;
+  let lendAmount;
+  let shieldRes = null;
+  if (REUSE_NOTE && usdcNotes.length > 0) {
+    const sorted = [...usdcNotes].sort((a, b) => Number(a.value - b.value));
+    noteToSpend = sorted[0];
+    lendAmount = noteToSpend.value;
+    console.log(`✓ REUSE_NOTE=1 — using existing ${lendAmount}-unit note (leafIndex=${noteToSpend.leafIndex})`);
+  } else if (STEP === 'lend' && usdcNotes.length > 0) {
+    // STEP=lend without REUSE_NOTE: pick the most-recently-shielded note
+    // (highest leafIndex) — that's the one the most recent shield run
+    // produced, regardless of value.
+    const sorted = [...usdcNotes].sort((a, b) => Number(BigInt(b.leafIndex) - BigInt(a.leafIndex)));
+    noteToSpend = sorted[0];
+    lendAmount = noteToSpend.value;
+    console.log(`✓ STEP=lend — using most-recent note (leafIndex=${noteToSpend.leafIndex}, value=${lendAmount})`);
+  } else if (STEP === 'lend') {
+    throw new Error('STEP=lend requires an existing discoverable shielded note (or set REUSE_NOTE=1)');
+  } else {
+    console.log(`▶ shielding fresh ${SHIELD_AMT} USDC (with on-chain ciphertext for cross-session recovery)`);
+    shieldRes = await b402.shield({
+      mint: inMint, amount: SHIELD_AMT,
+      // omitEncryptedNotes left at SDK default (false) — future sessions
+      // can trial-decrypt + recover this note via backfill.
+    });
+    console.log(`✓ shield sig: ${shieldRes.signature}`);
+    await b402.status({ refresh: true });
+    usdcNotes = b402._notes.getSpendable(inMintFr);
+    const sorted = [...usdcNotes].sort((a, b) => Number(BigInt(b.leafIndex) - BigInt(a.leafIndex)));
+    noteToSpend = sorted.find((n) => n.value === SHIELD_AMT);
+    if (!noteToSpend) throw new Error('fresh shield landed but matching note not visible');
+    lendAmount = noteToSpend.value;
+    console.log(`  using fresh note (leafIndex=${noteToSpend.leafIndex}, value=${lendAmount})`);
+    if (STEP === 'shield') {
+      console.log('\n=== STEP=shield complete — lend skipped ===');
+      console.log(`  shield sig: ${shieldRes.signature}`);
+      console.log(`  fresh note: leafIndex=${noteToSpend.leafIndex}, value=${lendAmount}`);
+      console.log('  next: STEP=lend pnpm exec node ./mainnet-kamino-lend-demo.mjs');
+      return;
+    }
   }
-  // Pick the smallest note — minimal at-risk amount for this smoke.
-  const sorted = [...usdcNotes].sort((a, b) => Number(a.value - b.value));
-  const noteToSpend = sorted[0];
-  const lendAmount = noteToSpend.value;
-  const shieldRes = null;
-  console.log(`✓ using existing ${lendAmount}-unit USDC note (leafIndex=${noteToSpend.leafIndex})`);
 
   // 6. privateLend.
   const outVaultPda = vaultPda(POOL, outMint);

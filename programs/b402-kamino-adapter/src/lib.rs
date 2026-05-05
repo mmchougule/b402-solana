@@ -200,8 +200,18 @@ mod ra_deposit {
 #[allow(dead_code)]
 mod ra_deposit_per_user {
     pub const OWNER_PDA: usize = 19;
-    pub const MIN_LEN: usize = 20;
-    // RENT_BUFFER_TA at slot 20 reserved for V1.5 — deferred per
+    /// Per-user USDC ATA owned by `owner_pda`. Required by Kamino's
+    /// `DepositReserveLiquidityAndObligationCollateralV2`, which enforces
+    /// `userSourceLiquidity.owner == obligationOwner` (a Kamino Anchor
+    /// constraint). Pre-CPI, the adapter SPL-transfers the funds from
+    /// `adapter_in_ta` → this ATA (signed by adapter_authority), then
+    /// passes this ATA in slot 9 of the deposit ix. After Kamino debits,
+    /// the ATA stays open at zero balance; subsequent deposits reuse it.
+    /// Caller (SDK) is responsible for ATA init via
+    /// `create_associated_token_account_idempotent` before the lend.
+    pub const OWNER_USDC_ATA: usize = 20;
+    pub const MIN_LEN: usize = 21;
+    // RENT_BUFFER_TA at slot 21 reserved for V1.5 — deferred per
     // handle_deposit_per_user's V1 comment block.
 }
 
@@ -1042,10 +1052,18 @@ fn handle_deposit_per_user<'info>(
 
     let token_program = ctx.accounts.token_program.to_account_info();
     let adapter_in_ta = ctx.accounts.adapter_in_ta.to_account_info();
+    // PRD-33 §3.3 fix: per-user owner USDC ATA. Kamino's
+    // DepositReserveLiquidityAndObligationCollateralV2 enforces
+    // `userSourceLiquidity.owner == obligationOwner` (Anchor
+    // ConstraintTokenOwner). In the per-user path obligationOwner =
+    // owner_pda, so the source liquidity must be owned by owner_pda — NOT
+    // adapter_authority (which owns adapter_in_ta). Adapter SPL-transfers
+    // adapter_in_ta → owner_usdc_ata pre-CPI, then passes owner_usdc_ata
+    // as slot 9 of the deposit_v2 ix.
+    let owner_usdc_ata = ra[ra_deposit_per_user::OWNER_USDC_ATA].clone();
     let mut infos = forward_infos(ctx);
-    // forward_infos doesn't include owner_pda — append explicitly so the
-    // CPI sees an AccountInfo for it.
     infos.push(owner_pda_info);
+    infos.push(owner_usdc_ata.clone());
 
     // --- V1: rent comes from adapter_authority's pre-funded SOL ------------
     //
@@ -1180,9 +1198,28 @@ fn handle_deposit_per_user<'info>(
             .map_err(|_| error!(KaminoAdapterError::KaminoCpiFailed))?;
     }
 
-    // --- 6. deposit_v2 ------------------------------------------------------
-    // owner = owner_pda. userSourceLiquidity stays as adapter_in_ta (the
-    // pool moved tokens here in adapt_execute prior to CPI).
+    // --- 6a. SPL transfer adapter_in_ta → owner_usdc_ata --------------------
+    // Hop required because Kamino enforces userSourceLiquidity.owner ==
+    // obligationOwner (== owner_pda); adapter_in_ta is owned by
+    // adapter_authority. Caller (SDK) is responsible for ATA init via
+    // create_associated_token_account_idempotent before invoking the lend.
+    {
+        let signer_auth: &[&[&[u8]]] = &[auth_seeds];
+        let cpi_ctx = CpiContext::new_with_signer(
+            token_program.clone(),
+            Transfer {
+                from: adapter_in_ta.clone(),
+                to: owner_usdc_ata.clone(),
+                authority: ctx.accounts.adapter_authority.to_account_info(),
+            },
+            signer_auth,
+        );
+        token::transfer(cpi_ctx, kamino_in_amount)?;
+    }
+
+    // --- 6b. deposit_v2 -----------------------------------------------------
+    // owner = owner_pda. userSourceLiquidity = owner_usdc_ata (the ATA we
+    // just funded above), so Kamino's owner-match check passes.
     let coll_token_program = token_program.key();
     let liq_token_program = token_program.key();
     let metas = [
@@ -1195,7 +1232,7 @@ fn handle_deposit_per_user<'info>(
         KaminoMeta { key: reserve_liq_supply.key(), is_writable: true }, // 6
         KaminoMeta { key: reserve_coll_mint.key(), is_writable: true }, // 7
         KaminoMeta { key: reserve_coll_supply.key(), is_writable: true }, // 8
-        KaminoMeta { key: adapter_in_ta.key(), is_writable: true }, // 9
+        KaminoMeta { key: owner_usdc_ata.key(), is_writable: true }, // 9 — was adapter_in_ta; now per-user ATA owned by owner_pda
         KaminoMeta { key: KAMINO_LEND_PROGRAM_ID, is_writable: false }, // 10 placeholder
         KaminoMeta { key: coll_token_program, is_writable: false }, // 11
         KaminoMeta { key: liq_token_program, is_writable: false }, // 12
