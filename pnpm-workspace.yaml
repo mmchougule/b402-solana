@@ -6,6 +6,7 @@ packages:
   - 'packages/mcp-server'
   - 'packages/create-agent'
   - 'packages/paysh-bridge'
+  - 'apps/paysh-demo-server'
   - 'apps/playground'
   - 'circuits'
   - 'examples'
