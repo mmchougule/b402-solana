@@ -10,6 +10,8 @@
     "build-deps": "pnpm --filter='@b402ai/solana-shared' --filter='@b402ai/solana-prover' --filter='@b402ai/solana' --filter='@b402ai/paysh-bridge' build",
     "e2e": "pnpm build-deps && tsx e2e.ts",
     "paysh-e2e": "pnpm build-deps && tsx paysh-private-receivables-e2e.ts",
+    "paysh-x402": "pnpm build-deps && tsx paysh-x402-real-usdc-e2e.ts",
+    "paysh-x402-server": "pnpm build-deps && tsx paysh-x402-server-only.ts",
     "sdk-quick": "pnpm build-deps && tsx sdk-quick.ts",
     "sdk-quick-swap": "pnpm build-deps && tsx sdk-quick-swap.ts",
     "swap-e2e": "pnpm build-deps && tsx swap-e2e.ts",

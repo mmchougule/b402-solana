@@ -28,3 +28,17 @@ export { makeSdkShieldFn } from './sdk-shield.js';
 export type { B402SolanaShield } from './sdk-shield.js';
 export { PayshBridge } from './bridge.js';
 export type { PayshBridgeConfig, BridgeConnection } from './bridge.js';
+export {
+  buildPaymentRequired,
+  decodePaymentHeader,
+  encodePaymentHeader,
+  SOLANA_NETWORKS,
+} from './x402.js';
+export type {
+  Network,
+  PaymentRequirement,
+  PaymentRequiredBody,
+  PaymentPayload,
+} from './x402.js';
+export { verifyPayment } from './x402-server.js';
+export type { VerifyOpts, VerifyResult } from './x402-server.js';
