@@ -1,4 +1,8 @@
-//! `ClosePosition` action handler — argument validation slice (slice 2).
+//! `ClosePosition` action handler — argument validation slice (slice 2)
+//! plus a slice-3a-β placeholder `handle_close` that returns
+//! `Unimplemented` until slice 3b lands the close path. The validator
+//! is fully exercised; the dispatcher path compiles cleanly so the
+//! open path can be merged independently.
 //!
 //! The full handler (slice 3) will:
 //!   1. Look up `user_idx` from the perp-mapping account; require it exists
@@ -15,8 +19,27 @@
 //! into the adapter, so `in_amount` MUST be zero. The action is otherwise
 //! parameter-light — only `limit_price_e6` (the close-side slippage bound).
 
+use anchor_lang::prelude::*;
+
 use crate::error::PercolatorAdapterError;
 use crate::payload::PercolatorAction;
+use crate::Execute;
+
+/// Slice-3a-β placeholder. Slice 3b implements the body:
+///   1. Decode payload (per-user prefix); validate args
+///   2. Look up `user_idx` in mapping; require it exists as live
+///   3. Stale-entry guard via `slab::verify_owner_at_idx`
+///   4. Read `position_basis_q` from slab; invoke TradeCpi(-current_size)
+///   5. Read `capital` from slab; invoke WithdrawCollateral(amount=all)
+///   6. Token transfer user_pcl_ata → adapter_out_ta
+///   7. mapping.record_close
+pub fn handle_close<'info>(
+    _ctx: &Context<'_, '_, '_, 'info, Execute<'info>>,
+    _in_amount: u64,
+    _action_payload: &[u8],
+) -> Result<()> {
+    err!(PercolatorAdapterError::CloseNotYetImplemented)
+}
 
 /// Validate the `ClosePosition` variant's args. Returns the inner
 /// `limit_price_e6`.
@@ -27,7 +50,7 @@ use crate::payload::PercolatorAction;
 pub fn validate_close_args(
     action: &PercolatorAction,
     in_amount: u64,
-) -> Result<u64, PercolatorAdapterError> {
+) -> core::result::Result<u64, PercolatorAdapterError> {
     let limit_price_e6 = match action {
         PercolatorAction::ClosePosition { limit_price_e6 } => *limit_price_e6,
         _ => return Err(PercolatorAdapterError::WrongActionVariant),

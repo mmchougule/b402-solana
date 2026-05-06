@@ -64,6 +64,14 @@ pub enum PercolatorAction {
 /// leaving headroom for future variants.
 pub const PAYLOAD_MAX_LEN: usize = 350;
 
+/// Length of the `viewing_pub_hash` prefix the pool prepends to
+/// stateful adapters' action payloads (PRD-33 §6.1, mirrors
+/// `b402_kamino_adapter::decode_per_user_payload`). The pool fills it
+/// from `pi.out_spending_pub` (Phase-9 public input). Verified by the
+/// proof, so handler code can trust the bytes match the user's
+/// shielded identity.
+pub const VIEWING_PUB_HASH_PREFIX_LEN: usize = 32;
+
 /// Discriminant tags. Stable wire format; never reorder.
 pub mod tag {
     pub const OPEN_POSITION: u8 = 0;
@@ -98,6 +106,47 @@ impl PercolatorAction {
         self.serialize(&mut buf).expect("borsh encode infallible");
         buf
     }
+}
+
+/// Split a stateful-adapter action payload into its `viewing_pub_hash`
+/// prefix and the inner `PercolatorAction`.
+///
+/// Wire format: `[viewing_pub_hash: [u8; 32], borsh(PercolatorAction)]`.
+/// The pool prepends the hash for adapters whose `adapter_registry`
+/// entry has `stateful_adapter = true`. Mirrors
+/// `b402_kamino_adapter::decode_per_user_payload`.
+///
+/// Errors:
+///   * `Empty` if `bytes.len() <= 32` (need at least 33 B)
+///   * `TooLarge` if oversized per the pool's hard cap
+///   * `Truncated` / `TrailingBytes` propagate from inner Borsh decode
+pub fn decode_per_user_payload(
+    bytes: &[u8],
+) -> core::result::Result<([u8; 32], PercolatorAction), PayloadDecodeError> {
+    if bytes.len() <= VIEWING_PUB_HASH_PREFIX_LEN {
+        return Err(PayloadDecodeError::Empty);
+    }
+    if bytes.len() > PAYLOAD_MAX_LEN {
+        return Err(PayloadDecodeError::TooLarge);
+    }
+    let mut viewing_pub_hash = [0u8; VIEWING_PUB_HASH_PREFIX_LEN];
+    viewing_pub_hash.copy_from_slice(&bytes[..VIEWING_PUB_HASH_PREFIX_LEN]);
+    let action = PercolatorAction::try_decode(&bytes[VIEWING_PUB_HASH_PREFIX_LEN..])?;
+    Ok((viewing_pub_hash, action))
+}
+
+/// Helper: build a stateful-adapter payload by prepending the
+/// `viewing_pub_hash` to a Borsh-encoded `PercolatorAction`. Used by
+/// the SDK side (slice 4) and by tests.
+pub fn encode_per_user_payload(
+    viewing_pub_hash: &[u8; 32],
+    action: &PercolatorAction,
+) -> Vec<u8> {
+    let inner = action.encode();
+    let mut buf = Vec::with_capacity(VIEWING_PUB_HASH_PREFIX_LEN + inner.len());
+    buf.extend_from_slice(viewing_pub_hash);
+    buf.extend_from_slice(&inner);
+    buf
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -216,5 +265,66 @@ mod tests {
         };
         let bytes = a.encode();
         assert_eq!(PercolatorAction::try_decode(&bytes).unwrap(), a);
+    }
+
+    // ─── per-user payload tests ───
+    #[test]
+    fn per_user_payload_roundtrip() {
+        let hash = [7u8; 32];
+        let inner = open_sample();
+        let bytes = encode_per_user_payload(&hash, &inner);
+        let (decoded_hash, decoded_action) = decode_per_user_payload(&bytes).unwrap();
+        assert_eq!(decoded_hash, hash);
+        assert_eq!(decoded_action, inner);
+    }
+
+    #[test]
+    fn per_user_payload_close_roundtrip() {
+        let hash = [0xab; 32];
+        let inner = close_sample();
+        let bytes = encode_per_user_payload(&hash, &inner);
+        let (h, a) = decode_per_user_payload(&bytes).unwrap();
+        assert_eq!(h, hash);
+        assert_eq!(a, inner);
+    }
+
+    #[test]
+    fn per_user_payload_rejects_only_prefix() {
+        // 32 bytes is exactly the prefix; missing inner action.
+        let bytes = vec![0u8; 32];
+        assert_eq!(decode_per_user_payload(&bytes), Err(PayloadDecodeError::Empty));
+    }
+
+    #[test]
+    fn per_user_payload_rejects_short_prefix() {
+        // 16 bytes: less than even the prefix.
+        let bytes = vec![0u8; 16];
+        assert_eq!(decode_per_user_payload(&bytes), Err(PayloadDecodeError::Empty));
+    }
+
+    #[test]
+    fn per_user_payload_rejects_truncated_inner() {
+        let hash = [1u8; 32];
+        let mut bytes = encode_per_user_payload(&hash, &open_sample());
+        bytes.truncate(33); // prefix + only the discriminant byte
+        assert_eq!(
+            decode_per_user_payload(&bytes),
+            Err(PayloadDecodeError::Truncated),
+        );
+    }
+
+    #[test]
+    fn per_user_payload_rejects_oversized() {
+        let bytes = vec![0u8; PAYLOAD_MAX_LEN + 1];
+        assert_eq!(
+            decode_per_user_payload(&bytes),
+            Err(PayloadDecodeError::TooLarge),
+        );
+    }
+
+    #[test]
+    fn per_user_prefix_pinned_to_32() {
+        // Pin: any drift here breaks pool ↔ adapter wire compat.
+        assert_eq!(VIEWING_PUB_HASH_PREFIX_LEN, 32);
     }
 }

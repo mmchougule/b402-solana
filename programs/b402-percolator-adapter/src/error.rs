@@ -45,4 +45,7 @@ pub enum PercolatorAdapterError {
 
     #[msg("execute() outer caller is not the b402 pool program")]
     CallerNotB402Pool,
+
+    #[msg("close path is not yet implemented (slice 3b)")]
+    CloseNotYetImplemented,
 }

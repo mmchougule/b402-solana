@@ -25,6 +25,7 @@ use anchor_spl::token::{Token, TokenAccount};
 declare_id!("Brp48gh1WcS6EtuKYFmK49Ldd55F9cdDkrYbfvh6RCq6");
 
 pub mod actions;
+pub mod cpi;
 pub mod error;
 pub mod mapping;
 pub mod payload;
@@ -72,6 +73,10 @@ pub mod b402_percolator_adapter {
         _min_out_amount: u64,
         action_payload: Vec<u8>,
     ) -> Result<()> {
+        // Top-level dispatch peeks the variant tag from the per-user
+        // payload (cheaper than a full Borsh decode); per-action
+        // handlers re-decode the payload to extract their own fields
+        // alongside the viewing_pub_hash.
         // PRD-33 §6.4 / PRD-36 §6.5 #1: cpi-only enforcement. Without
         // this gate, anyone can call `execute(ClosePosition)` directly
         // with another user's `viewing_pub_hash` (which is public in
@@ -102,23 +107,14 @@ pub mod b402_percolator_adapter {
             );
         }
 
-        let action = PercolatorAction::try_decode(&action_payload)
-            .map_err(|_| error!(PercolatorAdapterError::InvalidActionPayload))?;
-
-        match action {
-            PercolatorAction::OpenPosition { .. } => {
-                let _validated = actions::validate_open_args(&action, in_amount)
-                    .map_err(|e| error!(e))?;
-                // Slice 3: invoke_signed InitUser / DepositCollateral / TradeCpi
-                msg!("[slice-2] open_position validated; CPI plumbing in slice 3");
-                Ok(())
+        match actions::peek_variant_tag(&action_payload)
+            .map_err(|_| error!(PercolatorAdapterError::InvalidActionPayload))?
+        {
+            actions::ActionTag::Open => {
+                actions::handle_open(&_ctx, in_amount, &action_payload)
             }
-            PercolatorAction::ClosePosition { .. } => {
-                let _validated = actions::validate_close_args(&action, in_amount)
-                    .map_err(|e| error!(e))?;
-                // Slice 3: invoke_signed TradeCpi(flatten) / WithdrawCollateral
-                msg!("[slice-2] close_position validated; CPI plumbing in slice 3");
-                Ok(())
+            actions::ActionTag::Close => {
+                actions::handle_close(&_ctx, in_amount, &action_payload)
             }
         }
     }
