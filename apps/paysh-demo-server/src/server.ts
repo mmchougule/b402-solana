@@ -328,6 +328,10 @@ function buildOpenApi(): object {
                     },
                   },
                 },
+                example: {
+                  to: '11111111111111111111111111111112',
+                  amount: '10000',
+                },
               },
             },
           },
