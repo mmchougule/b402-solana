@@ -337,4 +337,112 @@ mod tests {
         // Pin: any drift here breaks pool ↔ adapter wire compat.
         assert_eq!(VIEWING_PUB_HASH_PREFIX_LEN, 32);
     }
+
+    // ─── parity fixtures: byte-level wire format pins ───
+    //
+    // These hex strings are reproduced verbatim in the SDK's TS test
+    // suite (`packages/sdk/src/__tests__/percolator.test.ts`). If either
+    // encoder drifts from the other, both sides break loudly here.
+    //
+    // To regenerate after an intentional wire-format change:
+    //   1. Update the fixture inputs below + assertion strings.
+    //   2. Mirror the changes in `percolator.test.ts::PARITY_FIXTURES`.
+    //   3. Bump the discriminants in `tag` and add a wire-version bump in
+    //      PRD-36 so on-chain proofs that bound an older payload's keccak
+    //      remain valid only against the older adapter build.
+
+    fn fixture_open_a() -> PercolatorAction {
+        // small lp_idx, mid magnitudes, init payment present
+        PercolatorAction::OpenPosition {
+            lp_idx: 7,
+            size_e6: 1_500_000,
+            limit_price_e6: 200_000_000,
+            fee_payment_if_init: 100_000,
+        }
+    }
+
+    fn fixture_open_b() -> PercolatorAction {
+        // negative size (short position), zero init payment
+        PercolatorAction::OpenPosition {
+            lp_idx: 0,
+            size_e6: -1_000_000,
+            limit_price_e6: 100_000_000,
+            fee_payment_if_init: 0,
+        }
+    }
+
+    fn fixture_close_a() -> PercolatorAction {
+        PercolatorAction::ClosePosition {
+            lp_idx: 3,
+            limit_price_e6: 199_000_000,
+        }
+    }
+
+    /// Pinned hex for `fixture_open_a().encode()`.
+    /// Layout: tag(00) | lp_idx=7 (07 00) | size_e6=1_500_000 (16 LE bytes)
+    ///       | limit_price_e6=200_000_000 (8 LE bytes) | fee=100_000 (8 LE bytes)
+    /// Total: 1 + 2 + 16 + 8 + 8 = 35 bytes.
+    const FIXTURE_OPEN_A_HEX: &str =
+        "000700\
+         60e31600000000000000000000000000\
+         00c2eb0b00000000\
+         a086010000000000";
+
+    /// Pinned hex for `fixture_open_b().encode()`.
+    /// size_e6 = -1_000_000 → two's-complement i128 LE.
+    /// -1_000_000 = -0xF4240; 2^128 - 0xF4240 = 0xFF...FF0BDC0 (16 bytes LE).
+    const FIXTURE_OPEN_B_HEX: &str =
+        "000000\
+         c0bdf0ffffffffffffffffffffffffff\
+         00e1f50500000000\
+         0000000000000000";
+
+    /// Pinned hex for `fixture_close_a().encode()`.
+    /// Layout: tag(01) | lp_idx=3 (03 00) | limit_price_e6=199_000_000 (8 LE bytes).
+    /// Total: 1 + 2 + 8 = 11 bytes.
+    const FIXTURE_CLOSE_A_HEX: &str =
+        "010300\
+         c07fdc0b00000000";
+
+    fn hex_no_ws(s: &str) -> Vec<u8> {
+        let cleaned: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+        (0..cleaned.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&cleaned[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn fixture_open_a_byte_pin() {
+        let bytes = fixture_open_a().encode();
+        let expected = hex_no_ws(FIXTURE_OPEN_A_HEX);
+        assert_eq!(bytes, expected);
+        assert_eq!(bytes.len(), 35);
+    }
+
+    #[test]
+    fn fixture_open_b_byte_pin() {
+        let bytes = fixture_open_b().encode();
+        let expected = hex_no_ws(FIXTURE_OPEN_B_HEX);
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn fixture_close_a_byte_pin() {
+        let bytes = fixture_close_a().encode();
+        let expected = hex_no_ws(FIXTURE_CLOSE_A_HEX);
+        assert_eq!(bytes, expected);
+        assert_eq!(bytes.len(), 11);
+    }
+
+    #[test]
+    fn fixture_per_user_payload_byte_pin() {
+        // Sanity check the per-user wrapper: 32B hash + inner.
+        let hash = [0xab_u8; 32];
+        let inner = fixture_close_a();
+        let bytes = encode_per_user_payload(&hash, &inner);
+        assert_eq!(bytes.len(), 32 + 11);
+        assert_eq!(&bytes[..32], &hash);
+        assert_eq!(&bytes[32..], &hex_no_ws(FIXTURE_CLOSE_A_HEX));
+    }
 }

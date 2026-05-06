@@ -56,6 +56,22 @@ export {
   type KaminoPerUserAccounts,
 } from './kamino.js';
 
+// Adapter helpers — Percolator perp open/close.
+export {
+  buildPercolatorOpenActionPayload,
+  buildPercolatorCloseActionPayload,
+  buildPercolatorPerUserPayload,
+  buildPercolatorExecuteIxData,
+  buildPercolatorPerUserRemainingAccounts,
+  derivePercolatorAdapterAuthority,
+  derivePercolatorOwnerPda,
+  derivePercolatorPerpMapping,
+  type PercolatorOpenArgs,
+  type PercolatorCloseArgs,
+  type PercolatorPerUserAccounts,
+  PERCOLATOR_MAX_ACCOUNTS_DEFAULT,
+} from './percolator.js';
+
 /** Solana hard tx-size cap. */
 export const MAX_TX_SIZE = 1232;
 /** Soft ceiling for adapter action_payload. Pool recomputes keccak over it. */
