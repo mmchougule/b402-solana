@@ -30,6 +30,7 @@ pub mod mapping;
 pub mod payload;
 pub mod pda;
 pub mod percolator_ix;
+pub mod slab;
 
 pub use error::PercolatorAdapterError;
 pub use mapping::{

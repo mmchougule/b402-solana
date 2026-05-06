@@ -24,6 +24,13 @@ cpi-only = []
 [dependencies]
 anchor-lang.workspace = true
 anchor-spl.workspace = true
+# Percolator perp risk-engine library (Toly's repo). Pinned to a specific
+# commit hash so layout/ABI drift forces an explicit bump here. Used at
+# compile time for `size_of` / `offset_of` introspection of the slab's
+# Account table and MarketConfig fields; the lib is no_std + no runtime
+# deps and embeds cleanly into the BPF binary.
+percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "a946e5508fcfe1bc250845a98a85ef614fdebb99" }
+bytemuck = { workspace = true }
 
 [dev-dependencies]
 proptest = "1.4"
