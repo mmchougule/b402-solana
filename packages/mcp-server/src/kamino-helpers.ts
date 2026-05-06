@@ -136,9 +136,13 @@ export function obligationFarmPda(farm: PublicKey, obligation: PublicKey): Publi
   )[0];
 }
 
-export function deriveOwnerPda(adapter: PublicKey, hash: Buffer): PublicKey {
+/** Per-(viewing_key, mint) PDA — matches the adapter's `derive_owner_pda`
+ *  in programs/b402-kamino-adapter/src/lib.rs. Each lending position
+ *  keyed by liquidity mint gets its own Kamino UserMetadata + Obligation,
+ *  so positions across mints are structurally independent. */
+export function deriveOwnerPda(adapter: PublicKey, hash: Buffer, mint: PublicKey): PublicKey {
   return PublicKey.findProgramAddressSync(
-    [Buffer.from('b402/v1'), Buffer.from('adapter-owner'), hash], adapter,
+    [Buffer.from('b402/v1'), Buffer.from('adapter-owner'), hash, mint.toBuffer()], adapter,
   )[0];
 }
 
@@ -218,7 +222,7 @@ export function deriveAllPerUser(
   market: PublicKey,
 ): PerUserAccounts {
   const hash = spendingPubToHashBytes(spendingPub);
-  const ownerPda = deriveOwnerPda(KAMINO_ADAPTER, hash);
+  const ownerPda = deriveOwnerPda(KAMINO_ADAPTER, hash, reserve.liquidityMint);
   const isFarmAttached = !reserve.reserveFarmCollateral.equals(PublicKey.default);
   const obl = obligationPda(ownerPda, market);
   return {
