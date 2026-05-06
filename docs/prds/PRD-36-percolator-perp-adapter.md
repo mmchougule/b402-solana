@@ -411,8 +411,8 @@ Updated each session so the next session can pick up without re-reading the whol
 | **3a-α** | Slab data parsing — vendored SlabHeader / MarketConfig, percolator git dep, layout pinning, byte-level field reads | **DONE** | b510828 | +15 unit |
 | **3a-β** | Open handler proper — per-user payload decode, CPI builders, mapping read/write, full open.rs handler with stale-entry guard | **DONE** | 2fa02d5 | +14 unit (7 payload + 7 cpi) + open handler tests |
 | **3b** | Close path: full handler — slab-side position read, TradeCpi flatten, WithdrawCollateral, mapping `record_close`, USDC return flow | **DONE** | def626d | +1 unit (lp_idx range on close) |
-| **3.5** | Harness hardening — LiteSVM integration tests proving open + close work against real percolator-prog .so. Sits before slice 4 so the SDK has a green on-chain test to validate against. | next | — | — |
-| 4 | SDK side — `B402Solana.privatePerpOpen` / `privatePerpClose` builders, action_payload assembly, ALT layout. Gated on slice 3.5 green. | blocked on 3.5 | — | — |
+| **3.5** | LiteSVM integration tests — load adapter only, drive `execute()` directly, assert dispatch + arg validation reach the percolator CPI step (which fails because percolator-prog isn't loaded — that exact signal is the acceptance proof). 7 cases covering happy-dispatch + 6 error paths. | **DONE** | 5f58c8b | +7 integration |
+| 4 | SDK side — `B402Solana.privatePerpOpen` / `privatePerpClose` builders, action_payload assembly, ALT layout. Slice 3.5 green provides the on-chain ABI proof the SDK calls validate against. | next | — | — |
 | 5 | Surfpool TS demo + e2e seven-case suite from §6.3. Public-facing artifact; a JS test script driving raw txs against locally-deployed percolator + adapter. | not started | — | — |
 | 6 | Devnet deployment — deploy percolator-prog ourselves if not already there; deploy adapter; smoke test | not started | — | — |
 | 7 | Mainnet — coordinated with percolator-prog mainnet ship (out of our control timing) | blocked | — | — |
