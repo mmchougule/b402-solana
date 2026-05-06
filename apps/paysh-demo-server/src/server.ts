@@ -127,13 +127,15 @@ async function main(): Promise<void> {
 
   const openapi = buildOpenApi();
   const mutex = new Mutex();
+  const stats = newStats();
 
   const server = http.createServer((req, res) => {
     void route(req, res, {
-      conn, b402, photonRpc, operator, ata, openapi, mutex,
+      conn, b402, photonRpc, operator, ata, openapi, mutex, stats,
     }).catch((err) => {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[err] ${req.method} ${req.url}: ${msg}`);
+      stats.sendInternal500++;
       if (!res.headersSent) {
         res.statusCode = 500;
         res.setHeader('content-type', 'application/json');
@@ -160,6 +162,68 @@ interface RouteCtx {
   ata: PublicKey;
   openapi: object;
   mutex: Mutex;
+  stats: Stats;
+}
+
+class BodyTooLargeError extends Error {
+  constructor() { super('body too large'); this.name = 'BodyTooLargeError'; }
+}
+
+interface Stats {
+  startedAt: number;
+  sendRequests: number;          // total POST /send entries
+  sendChallenges402: number;     // returned 402 (no X-PAYMENT)
+  sendBadRequest400: number;     // returned 400
+  sendPayloadTooLarge413: number;// returned 413
+  sendVerifyFailures: number;    // verifyPayment !ok
+  sendSettlements200: number;    // full success
+  sendProcessFailures502: number;// post-payment processing failed
+  sendInternal500: number;       // unexpected route handler errors
+  totalPrincipalSettledMicro: bigint;
+  totalFeeCollectedMicro: bigint;
+  lastSettlementAt: number | null;
+  lastSettlementSig: string | null;
+}
+
+function newStats(): Stats {
+  return {
+    startedAt: Date.now(),
+    sendRequests: 0,
+    sendChallenges402: 0,
+    sendBadRequest400: 0,
+    sendPayloadTooLarge413: 0,
+    sendVerifyFailures: 0,
+    sendSettlements200: 0,
+    sendProcessFailures502: 0,
+    sendInternal500: 0,
+    totalPrincipalSettledMicro: 0n,
+    totalFeeCollectedMicro: 0n,
+    lastSettlementAt: null,
+    lastSettlementSig: null,
+  };
+}
+
+function statsSnapshot(s: Stats): Record<string, unknown> {
+  return {
+    uptimeSec: Math.floor((Date.now() - s.startedAt) / 1000),
+    requests: {
+      total: s.sendRequests,
+      challenges402: s.sendChallenges402,
+      settlements200: s.sendSettlements200,
+      badRequest400: s.sendBadRequest400,
+      payloadTooLarge413: s.sendPayloadTooLarge413,
+      verifyFailures: s.sendVerifyFailures,
+      processFailures502: s.sendProcessFailures502,
+      internal500: s.sendInternal500,
+    },
+    volume: {
+      totalPrincipalSettled: s.totalPrincipalSettledMicro.toString(),
+      totalFeeCollected: s.totalFeeCollectedMicro.toString(),
+    },
+    lastSettlement: s.lastSettlementSig
+      ? { sig: s.lastSettlementSig, at: new Date(s.lastSettlementAt!).toISOString() }
+      : null,
+  };
 }
 
 async function route(
@@ -181,9 +245,14 @@ async function route(
     return jsonRes(res, 200, {
       service: 'paysh-send',
       description: 'Private USDC transfer over x402.',
-      endpoints: { send: 'POST /send', spec: 'GET /openapi.json', health: 'GET /healthz' },
+      endpoints: {
+        send: 'POST /send', spec: 'GET /openapi.json', health: 'GET /healthz', stats: 'GET /stats',
+      },
       operator: ctx.operator.publicKey.toBase58(),
     });
+  }
+  if (req.method === 'GET' && req.url === '/stats') {
+    return jsonRes(res, 200, statsSnapshot(ctx.stats));
   }
   if (req.method === 'POST' && req.url === '/send') {
     return handleSend(req, res, ctx);
@@ -196,7 +265,18 @@ async function handleSend(
   res: http.ServerResponse,
   ctx: RouteCtx,
 ): Promise<void> {
-  const raw = await readBody(req);
+  ctx.stats.sendRequests++;
+  let raw: string;
+  try {
+    raw = await readBody(req);
+  } catch (err) {
+    if (err instanceof BodyTooLargeError) {
+      ctx.stats.sendPayloadTooLarge413++;
+      return jsonRes(res, 413, { error: err.message });
+    }
+    ctx.stats.sendBadRequest400++;
+    return jsonRes(res, 400, { error: err instanceof Error ? err.message : String(err) });
+  }
   let to: PublicKey;
   let principal: bigint;
   try {
@@ -207,14 +287,17 @@ async function handleSend(
     to = new PublicKey(j.to);
     principal = BigInt(j.amount);
   } catch (err) {
+    ctx.stats.sendBadRequest400++;
     return jsonRes(res, 400, { error: err instanceof Error ? err.message : String(err) });
   }
   if (principal < MIN_PRINCIPAL_MICRO) {
+    ctx.stats.sendBadRequest400++;
     return jsonRes(res, 400, {
       error: `amount below minimum (${MIN_PRINCIPAL_MICRO.toString()} micro-USDC = 0.01 USDC)`,
     });
   }
   if (principal > MAX_PRINCIPAL_MICRO) {
+    ctx.stats.sendBadRequest400++;
     return jsonRes(res, 400, {
       error: `amount above maximum (${MAX_PRINCIPAL_MICRO.toString()} micro-USDC).`,
     });
@@ -238,6 +321,7 @@ async function handleSend(
 
   const xpay = req.headers['x-payment'];
   if (typeof xpay !== 'string' || !xpay) {
+    ctx.stats.sendChallenges402++;
     return jsonRes(res, 402, buildPaymentRequired([requirement]));
   }
 
@@ -245,6 +329,7 @@ async function handleSend(
   try {
     payload = decodePaymentHeader(xpay);
   } catch (err) {
+    ctx.stats.sendBadRequest400++;
     return jsonRes(res, 400, { error: err instanceof Error ? err.message : String(err) });
   }
 
@@ -255,6 +340,7 @@ async function handleSend(
     expectedAmount: total,
   });
   if (!verify.ok) {
+    ctx.stats.sendVerifyFailures++;
     return jsonRes(res, verify.status, { error: verify.error });
   }
 
@@ -271,6 +357,11 @@ async function handleSend(
       inlineCpiNullifier: true,
     });
     console.log(`[send] unshielded ${unshieldRes.signature.slice(0, 12)}… → ${to.toBase58().slice(0, 12)}…`);
+    ctx.stats.sendSettlements200++;
+    ctx.stats.totalPrincipalSettledMicro += principal;
+    ctx.stats.totalFeeCollectedMicro += fee;
+    ctx.stats.lastSettlementAt = Date.now();
+    ctx.stats.lastSettlementSig = unshieldRes.signature;
     return jsonRes(res, 200, {
       paymentSig: verify.txSig,
       shieldSig: shieldRes.signature,
@@ -282,6 +373,7 @@ async function handleSend(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[send] FAILED post-payment ${verify.txSig}: ${msg}`);
+    ctx.stats.sendProcessFailures502++;
     return jsonRes(res, 502, {
       error: `payment received but processing failed: ${msg}`,
       paymentSig: verify.txSig,
@@ -382,7 +474,7 @@ function readBody(req: http.IncomingMessage): Promise<string> {
     let total = 0;
     req.on('data', (c) => {
       total += (c as Buffer).length;
-      if (total > 8192) reject(new Error('body too large'));
+      if (total > 8192) reject(new BodyTooLargeError());
       else chunks.push(c as Buffer);
     });
     req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
