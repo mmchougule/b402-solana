@@ -12,6 +12,8 @@
     "paysh-e2e": "pnpm build-deps && tsx paysh-private-receivables-e2e.ts",
     "paysh-x402": "pnpm build-deps && tsx paysh-x402-real-usdc-e2e.ts",
     "paysh-x402-server": "pnpm build-deps && tsx paysh-x402-server-only.ts",
+    "paysh-x402-client": "pnpm build-deps && tsx paysh-x402-client-only.ts",
+    "paysh-send-client": "pnpm build-deps && tsx paysh-send-client.ts",
     "sdk-quick": "pnpm build-deps && tsx sdk-quick.ts",
     "sdk-quick-swap": "pnpm build-deps && tsx sdk-quick-swap.ts",
     "swap-e2e": "pnpm build-deps && tsx swap-e2e.ts",
