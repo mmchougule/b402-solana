@@ -1,9 +1,9 @@
 # PRD-35 — Move Groth16 public inputs from ix data to account data
 
-Status: drafted 2026-05-03. Author: mayur. Owner: protocol.
-Blocks: PRD-33 §11 q0 (per-user kamino mainnet flip), every future
+Status: shipped mainnet @ slot 417871785 (PR #46, commit f588410). Pool `42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y` carries `commit_inputs` + the `pending_inputs` PDA pattern; `args.public_inputs` removed from the `adapt_execute` wire shape. `private_lend` / `private_redeem` mainnet runs (`4PVuzkJmFF2x...qoCR`, `279hTmsJ2y...c457`) confirm the 2-tx commit-then-verify path under the 1232 B v0 cap. Author: mayur. Owner: protocol.
+Unblocks: PRD-33 per-user Kamino on mainnet (now live), every future
 adapter that touches a stateful protocol (Drift, Marginfi, Adrena,
-Sanctum LST, Orca whirlpool, pump.fun if/when integrated).
+Sanctum LST, Orca whirlpool).
 
 ## 1. The architectural ceiling we're hitting
 
