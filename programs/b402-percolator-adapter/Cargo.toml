@@ -5,10 +5,7 @@ edition.workspace = true
 description = "b402 Percolator perp adapter (per PRD-36, Option B: shielded user / private positions)"
 
 [lib]
-# Slice 1 ships pure-logic primitives only (payload codec, mapping
-# table, PDA derivations). cdylib is added when the `execute` ix
-# handler lands on a subsequent commit on this branch.
-crate-type = ["lib"]
+crate-type = ["cdylib", "lib"]
 name = "b402_percolator_adapter"
 
 [features]
