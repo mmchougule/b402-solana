@@ -20,7 +20,7 @@ export interface RelayerHttpClient {
   pubkey: PublicKey;
   /** Submit an assembled instruction via the relayer service. */
   submit(opts: {
-    label: 'shield' | 'unshield' | 'transact' | 'adapt';
+    label: 'shield' | 'unshield' | 'transact' | 'adapt' | 'pool-ix';
     ix: TransactionInstruction;
     altAddresses?: PublicKey[];
     computeUnitLimit?: number;

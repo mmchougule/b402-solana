@@ -93,6 +93,19 @@ export const watchIncomingInput = z
   })
   .strict();
 
+export const privateLendInput = z
+  .object({
+    amount: U64String.describe('USDC amount to lend, in raw units (6 decimals — e.g. 100000 = 0.10 USDC, 1000000 = 1.00 USDC). Mainnet only. The caller must already hold a spendable shielded USDC note ≥ this amount; if a note matching the exact amount exists, it will be used, otherwise the most-recent spendable USDC note is selected. First call by a viewing key pays a one-time ~0.04 SOL for Kamino UserMetadata + Obligation rent (charged to adapter authority pre-funded by the user).'),
+    leafIndex: z.number().int().nonnegative().optional().describe('Optional Merkle leaf index of the specific USDC note to spend. Omit to auto-pick (exact-amount match → most-recent fallback).'),
+  })
+  .strict();
+
+export const privateRedeemInput = z
+  .object({
+    leafIndex: z.number().int().nonnegative().optional().describe('Optional Merkle leaf index of the specific kUSDC voucher note to burn. Omit to use the most-recent. Each prior `private_lend` mints a kUSDC voucher commitment of value == lend amount; redeem burns one and unlocks the deposited USDC plus accrued interest from the per-user obligation.'),
+  })
+  .strict();
+
 export type ShieldInput = z.infer<typeof shieldInput>;
 export type UnshieldInput = z.infer<typeof unshieldInput>;
 export type PrivateSwapInput = z.infer<typeof privateSwapInput>;
@@ -102,3 +115,5 @@ export type HoldingsInput = z.infer<typeof holdingsInput>;
 export type BalanceInput = z.infer<typeof balanceInput>;
 export type QuoteSwapInput = z.infer<typeof quoteSwapInput>;
 export type WatchIncomingInput = z.infer<typeof watchIncomingInput>;
+export type PrivateLendInput = z.infer<typeof privateLendInput>;
+export type PrivateRedeemInput = z.infer<typeof privateRedeemInput>;

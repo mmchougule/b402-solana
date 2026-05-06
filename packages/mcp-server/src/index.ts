@@ -49,6 +49,8 @@ import {
   balanceInput,
   quoteSwapInput,
   watchIncomingInput,
+  privateLendInput,
+  privateRedeemInput,
 } from './schemas.js';
 import { handleShield } from './tools/shield.js';
 import { handleUnshield } from './tools/unshield.js';
@@ -59,6 +61,8 @@ import { handleHoldings } from './tools/holdings.js';
 import { handleBalance } from './tools/balance.js';
 import { handleQuoteSwap } from './tools/quote_swap.js';
 import { handleWatchIncoming } from './tools/watch_incoming.js';
+import { handlePrivateLend } from './tools/private_lend.js';
+import { handlePrivateRedeem } from './tools/private_redeem.js';
 import { createLogger, type Logger } from './logger.js';
 
 import { zodToJsonSchema } from 'zod-to-json-schema';
@@ -166,6 +170,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         'WRITE: private → private (atomic). Swap one shielded mint for another via a registered adapter. INPUT: { inMint, outMint, amount }. CRITICAL CONSTRAINT: amount must EXACTLY match a deposit value — privateSwap spends the whole deposit, partial spends are not supported in v1. Call `holdings { mint: inMint }` first to read available deposit sizes, then pass one of them as amount. Adapter, ALT, scratch ATAs, expectedOut auto-resolved from cluster (Jupiter mainnet; mock devnet). RETURNS: { signature, outAmount, outDepositId }. CALL `quote_swap` FIRST on mainnet to bound slippage. PRIVACY: relayer signs/pays; user wallet absent from tx.',
       inputSchema: zodToJsonSchema(privateSwapInput),
     },
+    {
+      name: 'private_lend',
+      description:
+        'WRITE: private → Kamino V2 USDC reserve (atomic, mainnet only). Spends a shielded USDC note + deposits into Kamino + mints a kUSDC voucher commitment in one tx. Each viewing key gets its own Kamino Obligation (PRD-33 per-user obligation, derived from owner_pda) — independent positions, no shared state across users. INPUT: { amount (raw USDC, 6 decimals), leafIndex? }. amount must match a spendable USDC note value (auto-picks exact-match → most-recent fallback). FIRST CALL pays a one-time ~0.04 SOL for Kamino UserMetadata + Obligation account rent (charged to adapter authority, pre-funded by user). Subsequent calls are ~$0.003 in tx fees. RETURNS: { signature, voucherDepositId, obligationPda, ownerPda, inAmount, outVaultDelta (=0 for stateful adapter), setupTxs }. PRECONDITION: caller must hold a spendable shielded USDC note ≥ amount. Call `shield` first if not. The voucher is redeemed via `private_redeem`.',
+      inputSchema: zodToJsonSchema(privateLendInput),
+    },
+    {
+      name: 'private_redeem',
+      description:
+        'WRITE: Kamino V2 → private USDC (atomic, mainnet only). Burns a kUSDC voucher commitment minted by a prior `private_lend` + withdraws the underlying USDC from the per-user Kamino obligation + reshields the proceeds as a fresh USDC note. INPUT: { leafIndex? } — defaults to most-recent kUSDC voucher in the SDK note store. PRECONDITION: caller must have at least one kUSDC voucher note from a prior private_lend with the SAME viewing key. RETURNS: { signature, redeemedDepositId, obligationPda, usdcVaultDelta, redeemedAmount }. Slippage is typically 1 raw unit (Kamino reserve rounding); for $1 deposits that\'s 0.0001%.',
+      inputSchema: zodToJsonSchema(privateRedeemInput),
+    },
   ],
 }));
 
@@ -221,6 +237,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case 'watch_incoming':
         result = await handleWatchIncoming(ctx(), watchIncomingInput.parse(args));
         break;
+      case 'private_lend':
+        result = await handlePrivateLend(ctx(), privateLendInput.parse(args));
+        break;
+      case 'private_redeem':
+        result = await handlePrivateRedeem(ctx(), privateRedeemInput.parse(args));
+        break;
       default:
         throw new Error(`unknown tool: ${name}`);
     }
@@ -229,10 +251,23 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     // the right pane). The result shape varies per tool; we just sniff for
     // known fields and only emit the ones present.
     const r = result && typeof result === 'object' ? (result as Record<string, unknown>) : {};
-    const extras: Record<string, string> = {};
+    const extras: Record<string, string | number> = {};
     if (typeof r.signature === 'string') extras.sig = r.signature;
     if (typeof r.commitment === 'string') extras.commitment = r.commitment;
     if (typeof r.leafIndex === 'string') extras.leafIndex = r.leafIndex;
+    // private_swap-specific telemetry: quote vs settlement, dual-note split,
+    // slippage envelope. Without these the operator can't tell whether a
+    // weird outAmount came from quote/route mismatch, slippage burn, or a
+    // genuine on-chain divergence — every diagnosis requires reconstructing
+    // from the explorer.
+    if (typeof r.outAmount === 'string') extras.outAmount = r.outAmount;
+    if (typeof r.quoteOutAmount === 'string') extras.quoteOutAmount = r.quoteOutAmount;
+    if (typeof r.expectedOut === 'string') extras.expectedOut = r.expectedOut;
+    if (typeof r.slippageBps === 'number') extras.slippageBps = r.slippageBps;
+    if (typeof r.routeHops === 'number') extras.routeHops = r.routeHops;
+    if (typeof r.outDepositId === 'string') extras.outDepositId = r.outDepositId;
+    if (typeof r.excessOutAmount === 'string') extras.excessOutAmount = r.excessOutAmount;
+    if (typeof r.excessDepositId === 'string') extras.excessDepositId = r.excessDepositId;
     logger.info('tool.ok', {
       tool: name,
       ms: Date.now() - t0,
@@ -243,13 +278,22 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    // Classify the error without logging its payload — error messages from
-    // RPC / Anchor / on-chain often embed pubkeys (recipient ATAs, mint
-    // accounts) that we treat as private metadata. Caller still gets the
-    // full message in the tool response; the file log only records the
-    // category so an admin can see frequency without leakage.
+    const stack = err instanceof Error && err.stack ? err.stack.split('\n').slice(0, 8).join('\n') : undefined;
+    // Classify for the histogram + ALSO log the full message and a top-of-
+    // stack snapshot. Earlier we logged only `kind` to avoid pubkey leakage,
+    // which made debugging "Cannot read properties of undefined" impossible
+    // — the operator sees a category, no source-line pointer, and gives up.
+    // Privacy concern remains: messages can embed mint/ATA addresses. But a
+    // self-host operator who runs this on their own machine should see
+    // their own data; we trade per-instance log privacy for debuggability.
     const kind = classifyError(msg);
-    logger.error('tool.err', { tool: name, ms: Date.now() - t0, kind });
+    logger.error('tool.err', {
+      tool: name,
+      ms: Date.now() - t0,
+      kind,
+      msg,
+      stack,
+    });
     return {
       isError: true,
       content: [{ type: 'text', text: msg }],

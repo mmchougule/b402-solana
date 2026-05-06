@@ -40,6 +40,14 @@ circuits/build/**/witness_calculator.js
 circuits/build/test_artifacts/
 circuits/build/ceremony/*_0000.zkey
 circuits/build/ceremony/*_0001.zkey
+
+# Runtime state from ops/phase9-*.sh — buffer pubkeys, deploy markers,
+# step recovery info. Specific to a single deploy attempt; never product.
+ops/state/
+# Per-ceremony backups created by phase9-ceremony.sh before overwriting
+# adapt_final.zkey / adapt_verification_key.json. Local recovery only,
+# never product artifacts.
+circuits/build/ceremony/archive-*/
 circuits/build/ceremony/*.zkey.tmp
 circuits/build/ceremony/*.ptau
 # adapt_v2 is on a feature branch; keep its build artifacts local-only.
@@ -101,8 +109,14 @@ examples/mainnet-jupiter-swap-demo.ts
 examples/mainnet-phase7-smoke.ts
 examples/mainnet-end-to-end-demo.ts
 examples/mainnet-swap-matrix.ts
+examples/probe-*.mjs
+examples/surfpool-bench.mjs
 examples/devnet-phase7-smoke.ts
 examples/check-bal.ts
 examples/check-tree*.mjs
 examples/snapshot.ts
 examples/vaults.mjs
+
+# Mainnet redeploy harness — embeds program IDs, deploy authority assumptions,
+# and the deploy/extend sequence. Private to the upgrade-authority operator.
+scripts/redeploy-mainnet-dry-run.sh

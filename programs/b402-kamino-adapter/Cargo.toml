@@ -14,6 +14,23 @@ no-idl = []
 no-log-ix-name = []
 cpi = ["no-entrypoint"]
 default = []
+# PRD-33 Phase 33.2: per-user Kamino obligation. When enabled, the action
+# payload's leading 32 B are interpreted as the user's viewing_pub_hash
+# (= bytes_le(outSpendingPub) from the Phase 9 adapt proof). The adapter
+# derives `owner_pda = PDA(["b402/v1", "adapter-owner", viewing_pub_hash],
+# adapter_program_id)` and uses it as the Kamino obligation owner via
+# dual-signer-seed invoke_signed. Default OFF — the v0.1 mainnet alpha
+# binary still uses adapter_authority as the single shared obligation
+# owner. Default flips after fork-test sign-off + mainnet redeploy
+# (PRD-33 Phase 33.4).
+per_user_obligation = []
+# PRD-33 §6.4 — restricts execute() to CPI calls from b402_pool only.
+# Without this, anyone with a depositor's public viewing_pub_hash can
+# call execute(Withdraw) directly and drain the user's obligation
+# (out_vault has no owner constraint). Production deploys MUST include
+# this feature; default off only for unit tests that don't simulate the
+# pool wrapper.
+cpi-only = []
 
 [dependencies]
 anchor-lang.workspace = true

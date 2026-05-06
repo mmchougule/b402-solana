@@ -23,6 +23,7 @@ import { registerShield } from './routes/shield.js';
 import { registerUnshield } from './routes/unshield.js';
 import { registerTransact } from './routes/transact.js';
 import { registerAdapt } from './routes/adapt.js';
+import { registerPoolIx } from './routes/pool-ix.js';
 
 export async function buildServer() {
   const cfg = loadConfig();
@@ -65,6 +66,7 @@ export async function buildServer() {
   registerUnshield(fastify, { cfg, auth, submitter });
   registerTransact(fastify, { cfg, auth, submitter });
   registerAdapt(fastify, { cfg, auth, submitter });
+  registerPoolIx(fastify, { cfg, auth, submitter });
 
   fastify.log.info(
     {

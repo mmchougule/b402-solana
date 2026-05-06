@@ -36,6 +36,14 @@ inline_cpi_nullifier = []
 # pool without redeploying the verifier with a regenerated VK rejects
 # every adapt proof.
 phase_9_dual_note = []
+# PRD-35: read Groth16 public inputs from per-user pending_inputs PDA
+# instead of carrying them inline in the verifier ix data. Saves
+# ~700-735 B per privateSwap/privateLend tx, lifting the v0-tx 1232 B
+# ceiling. Pairs with `b402-verifier-adapt --features phase_9_dual_note`
+# (the new ix variant lives in the same verifier crate). Default OFF
+# while the new path is being smoked; flip default ON in a follow-up
+# commit once fork e2e is green.
+prd_35_pending_inputs = []
 
 [dependencies]
 anchor-lang = { workspace = true, features = ["init-if-needed"] }

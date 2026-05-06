@@ -40,6 +40,7 @@ import { instructionDiscriminator, concat, u32Le, u64Le, vecU8 } from '../progra
 import { commitmentHash, spendingPub, feeBindHash, poseidonTagged } from '../poseidon.js';
 import { buildZeroCache } from '../merkle.js';
 import { encryptNote, type EncryptedNote } from '../note-encryption.js';
+import type { B402Signer } from '../signer.js';
 import type { Wallet } from '../wallet.js';
 import type { SpendableNote } from '@b402ai/solana-shared';
 
@@ -53,8 +54,10 @@ export interface ShieldParams {
   mint: PublicKey;
   /** Source ATA for `mint`, owned by `depositor`. */
   depositorAta: PublicKey;
-  /** Signer authorizing the SPL transfer out of `depositorAta`. */
-  depositor: Keypair;
+  /** Signer authorizing the SPL transfer out of `depositorAta`. Accepts
+   *  KeypairSigner (Node / MCP) or WalletAdapterSigner (Phantom / Solflare
+   *  in browser) — anything implementing B402Signer. */
+  depositor: B402Signer;
   /** Pays SOL fee + lamports for any new accounts. */
   relayer: Keypair;
   /** u64 amount of `mint` smallest-units to shield. */
@@ -253,9 +256,7 @@ export async function shield(params: ShieldParams): Promise<ShieldResult> {
   // tx with an Address Lookup Table to compress account references.
   const omit = params.omitEncryptedNotes === true;
   const blockhash = (await connection.getLatestBlockhash('confirmed')).blockhash;
-  const signers = relayer.publicKey.equals(depositor.publicKey)
-    ? [relayer]
-    : [relayer, depositor];
+  const sameSigner = relayer.publicKey.equals(depositor.publicKey);
 
   let sig: string;
   if (params.alt) {
@@ -267,8 +268,12 @@ export async function shield(params: ShieldParams): Promise<ShieldResult> {
       recentBlockhash: blockhash,
       instructions: [cuIx, shieldIx],
     }).compileToV0Message([lookupTable]);
-    const vtx = new VersionedTransaction(msg);
-    vtx.sign(signers);
+    let vtx = new VersionedTransaction(msg);
+    // Depositor signs first (Phantom prompt for browser, no-op for
+    // KeypairSigner). VersionedTransaction.signatures slots are addressed
+    // by signer pubkey, so order between depositor + relayer is safe.
+    vtx = await depositor.signTransaction(vtx);
+    if (!sameSigner) vtx.sign([relayer]);
     sig = await connection.sendRawTransaction(vtx.serialize(), { skipPreflight: false });
   } else {
     if (!omit) {
@@ -276,10 +281,11 @@ export async function shield(params: ShieldParams): Promise<ShieldResult> {
         'shield: ciphertext publication requires an Address Lookup Table — pass `alt` or set omitEncryptedNotes: true',
       );
     }
-    const tx = new Transaction().add(cuIx, shieldIx);
+    let tx = new Transaction().add(cuIx, shieldIx);
     tx.feePayer = relayer.publicKey;
     tx.recentBlockhash = blockhash;
-    tx.sign(...signers);
+    tx = await depositor.signTransaction(tx);
+    if (!sameSigner) tx.partialSign(relayer);
     sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
   }
   await connection.confirmTransaction(sig, 'confirmed');

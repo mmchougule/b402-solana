@@ -119,8 +119,16 @@ pub struct AdaptExecuteArgs {
     pub nullifier_cpi_payloads: Vec<[u8; 134]>,
 }
 
+// PRD-35.9: no `#[instruction(args: ...)]` tag.
+//
+// The dispatcher already deserializes the typed args (V1 = AdaptExecuteArgs,
+// V2 = AdaptExecuteV2Args) before calling `try_accounts`. The tag would force
+// `try_accounts` to RE-deserialize __ix_data as V1 args, which fails on V2
+// wire shape (no public_inputs block). Removing it lets the same Accounts
+// struct serve both ix variants cleanly. None of the constraints reference
+// `args.*`, so the tag was vestigial — the only cost was the wasted
+// V1-deserialize on every adapt_execute call.
 #[derive(Accounts)]
-#[instruction(args: AdaptExecuteArgs)]
 pub struct AdaptExecute<'info> {
     #[account(mut)]
     pub relayer: Signer<'info>,
@@ -214,8 +222,139 @@ pub struct AdaptExecute<'info> {
     #[account(address = anchor_lang::solana_program::sysvar::instructions::ID)]
     pub instructions_sysvar: AccountInfo<'info>,
 
+    /// PRD-35 §5.3 — per-user pending-inputs PDA. Pool validates it's
+    /// the canonical PDA derived from `pi.out_spending_pub` (the same
+    /// 32 B that appear as Phase 9's outSpendingPub[0] public input),
+    /// reads the inputs through verifier-adapt's new ix variant, and
+    /// zeroes `version` after successful verify (replay protection).
+    /// Only required under `prd_35_pending_inputs`. Default builds use
+    /// the inline-inputs verify path and ignore this account.
+    /// CHECK: handler validates seeds + version field.
+    #[cfg(feature = "prd_35_pending_inputs")]
+    #[account(mut)]
+    pub pending_inputs: UncheckedAccount<'info>,
+
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
+}
+
+/// PRD-35.9 — lean args for `adapt_execute_v2`.
+///
+/// Identical to `AdaptExecuteArgs` minus `public_inputs`. Pool reads
+/// the public-input vector from the per-user `pending_inputs` PDA
+/// instead and reconstructs a synthetic `AdaptPublicInputs` via
+/// `parse_adapt_public_inputs_from_pda`. Saves ~320 B on the wire by
+/// dropping the embedded struct.
+///
+/// SDK callers under `pendingInputsMode: true` build this shape +
+/// dispatch to the v2 ix discriminator. Pre-PRD-35 callers keep using
+/// the legacy `adapt_execute` ix unchanged.
+#[cfg(feature = "prd_35_pending_inputs")]
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
+pub struct AdaptExecuteV2Args {
+    pub proof: Vec<u8>, // must be 256 bytes
+    pub encrypted_notes: Vec<EncryptedNote>, // 0..=2 entries
+    pub in_dummy_mask: u8,
+    pub out_dummy_mask: u8,
+    pub relayer_fee_recipient: Pubkey,
+    pub raw_adapter_ix_data: Vec<u8>,
+    pub action_payload: Vec<u8>,
+    #[cfg(feature = "inline_cpi_nullifier")]
+    pub nullifier_cpi_payloads: Vec<[u8; 134]>,
+}
+
+/// PRD-35.9 — `adapt_execute_v2` entry point.
+///
+/// Reads `pi: AdaptPublicInputs` from the per-user `pending_inputs` PDA,
+/// synthesizes the legacy `AdaptExecuteArgs` shape, and delegates to the
+/// shared `handler`. End result is byte-identical to a v1 call with the
+/// same pi — just ~320 B smaller on the wire.
+///
+/// Build the `AccountMeta` list for the pool's CPI into the registered
+/// adapter's `execute` ix.
+///
+/// **Writability contract** — these flags are runtime-checked by Anchor on
+/// the adapter side via `#[account(mut, ...)]` constraints. A regression
+/// here surfaces as a `ConstraintMut` (Anchor error 2000) failure on the
+/// adapter side, which only fires inside the Solana runtime — host unit
+/// tests can't simulate that without a full validator. So we test this
+/// builder directly: the adjacent `adapter_cpi_meta_tests` module enforces
+/// every flag below as a host invariant.
+///
+///   - adapter_authority: WRITABLE
+///       Per-user adapters (Kamino's `per_user_obligation` build) use it
+///       as the Kamino obligationOwner / feePayer for `init_user_metadata`
+///       and `init_obligation`, both of which require Anchor role-3
+///       (signer, writable). Privilege can only DEMOTE inside a CPI, so
+///       the outer slot must start writable. Read-only is also fine for
+///       Jupiter / mock — they declare `pub adapter_authority:
+///       UncheckedAccount` with no mut constraint and tolerate either.
+///   - in_vault, out_vault: WRITABLE
+///       Adapter swaps in/out tokens; both vaults shift balance.
+///   - adapter_in_ta, adapter_out_ta: WRITABLE
+///       Adapter scratch ATAs. SPL Token transfers debit/credit them.
+///   - token_program: READONLY
+///       Program account; never written to.
+///   - remaining[..]: passthrough — preserve the SDK's per-account
+///       writable + signer flags. Writable status of remaining accounts
+///       (e.g. Kamino reserve, obligation) is adapter-specific.
+pub(crate) fn build_adapter_cpi_metas(
+    adapter_authority: Pubkey,
+    in_vault: Pubkey,
+    out_vault: Pubkey,
+    adapter_in_ta: Pubkey,
+    adapter_out_ta: Pubkey,
+    token_program: Pubkey,
+    // Instructions sysvar — required for stateful (cpi-only) adapters.
+    // Pass `None` for stateless adapters (Jupiter, mock); they don't
+    // declare an `ix_sysvar` named slot and prepending it would shift
+    // all `remaining_accounts` by 1.
+    ix_sysvar: Option<Pubkey>,
+    remaining: &[(Pubkey, /*is_writable*/ bool, /*is_signer*/ bool)],
+) -> Vec<AccountMeta> {
+    let mut m = Vec::with_capacity(7 + remaining.len());
+    m.push(AccountMeta::new(adapter_authority, false));
+    m.push(AccountMeta::new(in_vault, false));
+    m.push(AccountMeta::new(out_vault, false));
+    m.push(AccountMeta::new(adapter_in_ta, false));
+    m.push(AccountMeta::new(adapter_out_ta, false));
+    m.push(AccountMeta::new_readonly(token_program, false));
+    if let Some(ix_sv) = ix_sysvar {
+        m.push(AccountMeta::new_readonly(ix_sv, false));
+    }
+    for (key, is_writable, is_signer) in remaining {
+        if *is_writable {
+            m.push(AccountMeta::new(*key, *is_signer));
+        } else {
+            m.push(AccountMeta::new_readonly(*key, *is_signer));
+        }
+    }
+    m
+}
+
+#[cfg(feature = "prd_35_pending_inputs")]
+#[inline(never)]
+pub fn handler_v2<'info>(
+    ctx: Context<'_, '_, '_, 'info, AdaptExecute<'info>>,
+    args_v2: Box<AdaptExecuteV2Args>,
+) -> Result<()> {
+    let pi: AdaptPublicInputs = {
+        let acct_data = ctx.accounts.pending_inputs.try_borrow_data()?;
+        parse_adapt_public_inputs_from_pda(&acct_data)?
+    };
+    let args = Box::new(AdaptExecuteArgs {
+        proof: args_v2.proof,
+        public_inputs: pi,
+        encrypted_notes: args_v2.encrypted_notes,
+        in_dummy_mask: args_v2.in_dummy_mask,
+        out_dummy_mask: args_v2.out_dummy_mask,
+        relayer_fee_recipient: args_v2.relayer_fee_recipient,
+        raw_adapter_ix_data: args_v2.raw_adapter_ix_data,
+        action_payload: args_v2.action_payload,
+        #[cfg(feature = "inline_cpi_nullifier")]
+        nullifier_cpi_payloads: args_v2.nullifier_cpi_payloads,
+    });
+    handler(ctx, args)
 }
 
 #[inline(never)]
@@ -337,9 +476,80 @@ pub fn handler<'info>(
     }
 
     // Verify proof.
+    //
+    // PRD-35 §5.3 — pending_inputs path. Pool validates the per-user
+    // pending_inputs PDA matches the canonical derivation from
+    // pi.out_spending_pub, then asks verifier-adapt to read the inputs
+    // from account.data instead of carrying them inline. Saves ~768 B of
+    // ix data, lifting the v0-tx 1232 B ceiling for per-user adapters.
+    //
+    // The pool ALSO recomputes the inputs vector via build_public_inputs_
+    // for_adapt and asserts it matches the bytes the verifier will see.
+    // Otherwise a malicious caller could write OTHER inputs to a different
+    // PDA and pass that PDA in. Defence-in-depth: PDA derivation pins
+    // who-owns-the-inputs; byte-equality pins what-they-are.
     let public_inputs: Vec<[u8; 32]> = build_public_inputs_for_adapt(pi, &in_mint, &out_mint, &adapter_program_key, &computed_action_hash);
     let mut proof_bytes = [0u8; 256];
     proof_bytes.copy_from_slice(&args.proof);
+
+    #[cfg(feature = "prd_35_pending_inputs")]
+    {
+        // Phase 9 outSpendingPub is the per-user identifier. Pre-Phase-9
+        // builds don't carry this input; the prd_35 path requires Phase 9.
+        #[cfg(not(feature = "phase_9_dual_note"))]
+        compile_error!("prd_35_pending_inputs requires phase_9_dual_note (out_spending_pub is the PDA-scoping input)");
+
+        #[cfg(feature = "phase_9_dual_note")]
+        {
+            use crate::instructions::commit_inputs::{
+                PendingInputs, PENDING_INPUTS_SEED, VERSION_PREFIX,
+            };
+            let pending_acct = &ctx.accounts.pending_inputs;
+            // (1) Validate PDA derivation. Seeds match commit_inputs.rs.
+            let spending_pub_le = pi.out_spending_pub;
+            let (expected_pda, _bump) = Pubkey::find_program_address(
+                &[VERSION_PREFIX, PENDING_INPUTS_SEED, spending_pub_le.as_ref()],
+                &crate::ID,
+            );
+            require_keys_eq!(
+                pending_acct.key(),
+                expected_pda,
+                PoolError::ProofVerificationFailed
+            );
+            // (2) Validate the bytes match what we computed. Pool refuses to
+            // verify against an account whose contents disagree with the
+            // pool's recomputed pi vector — defends against PDA-hijack /
+            // wrong-inputs-substitution.
+            {
+                let acct_data = pending_acct.try_borrow_data()?;
+                require!(
+                    acct_data.len() >= 8 + PendingInputs::LEN,
+                    PoolError::ProofVerificationFailed
+                );
+                require!(acct_data[8] == 1, PoolError::ProofVerificationFailed);
+                for (i, want) in public_inputs.iter().enumerate() {
+                    let off = 8 + 1 + i * 32;
+                    let on_chain = &acct_data[off..off + 32];
+                    require!(on_chain == want.as_slice(), PoolError::ProofVerificationFailed);
+                }
+            }
+            // (3) Verify via account-inputs CPI.
+            verifier_cpi::invoke_verify_adapt_with_account_inputs(
+                &ctx.accounts.verifier_program,
+                &pending_acct.to_account_info(),
+                &proof_bytes,
+            )?;
+            // (4) Replay protection: zero the version byte. Subsequent
+            // verify attempts against this PDA fail (PendingInputsNotCommitted).
+            // We zero ONLY the version (1 byte) instead of the full 768 B
+            // inputs region — saves ~10k CU and is sufficient for replay
+            // protection (verifier requires version == 1 to read).
+            let mut acct_data = pending_acct.try_borrow_mut_data()?;
+            acct_data[8] = 0;
+        }
+    }
+
+    #[cfg(not(feature = "prd_35_pending_inputs"))]
     verifier_cpi::invoke_verify_adapt(
         &ctx.accounts.verifier_program,
         &proof_bytes,
@@ -451,21 +661,48 @@ pub fn handler<'info>(
     }
 
     // Pool transfers public_amount_in to adapter_in_ta (pool PDA signs the vault).
+    //
+    // PRD-33 §6.5 — privateRedeem of a synthetic voucher mint: the
+    // voucher (e.g. kUSDC issued by privateLend through the stateful
+    // Kamino adapter) was never backed by liquid tokens in `in_vault`.
+    // The user's claim lives in their per-user Kamino Obligation, owned
+    // by their `owner_pda`. Attempting to transfer N kUSDC out of an
+    // empty `in_vault` would fail with TokenError::InsufficientFunds.
+    //
+    // For (stateful adapter, synthetic in_mint) skip the transfer — the
+    // adapter's withdraw flow doesn't read `adapter_in_ta` (Kamino
+    // debits collateral from the obligation directly). The token-balance
+    // delta the pool's reshield logic needs is on the OUT side
+    // (USDC arriving in `out_vault`); that path is unchanged.
+    //
+    // Stateless adapters AND non-voucher in_mint paths keep the standard
+    // input transfer.
     let pool_config_info = ctx.accounts.pool_config.to_account_info();
     let signer_seeds: &[&[u8]] = &[VERSION_PREFIX, SEED_CONFIG, &[ctx.bumps.pool_config]];
     let signer = &[signer_seeds];
-    token::transfer(
-        CpiContext::new_with_signer(
-            ctx.accounts.token_program.to_account_info(),
-            Transfer {
-                from: ctx.accounts.in_vault.to_account_info(),
-                to: ctx.accounts.adapter_in_ta.to_account_info(),
-                authority: pool_config_info.clone(),
-            },
-            signer,
-        ),
-        pi.public_amount_in,
-    )?;
+    let skip_input_transfer = {
+        #[cfg(feature = "phase_9_dual_note")]
+        {
+            is_stateful_adapter(&adapter_program_key)
+                && is_synthetic_voucher_mint(&in_mint)
+        }
+        #[cfg(not(feature = "phase_9_dual_note"))]
+        { false }
+    };
+    if !skip_input_transfer {
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.in_vault.to_account_info(),
+                    to: ctx.accounts.adapter_in_ta.to_account_info(),
+                    authority: pool_config_info.clone(),
+                },
+                signer,
+            ),
+            pi.public_amount_in,
+        )?;
+    }
 
     // Relayer fee transfer (in IN mint, from in_vault). Circuit binding via
     // pi.relayer_fee_bind = Poseidon(TAG_FEE_BIND, fee, recipient).
@@ -495,56 +732,125 @@ pub fn handler<'info>(
     // `nullifier_remaining_consumed` is forwarded to the adapter.
     let adapter_remaining = &ctx.remaining_accounts[nullifier_remaining_consumed..];
 
-    let adapter_metas: Vec<AccountMeta> = {
-        let mut m = Vec::with_capacity(6 + adapter_remaining.len());
-        m.push(AccountMeta::new_readonly(
-            ctx.accounts.adapter_authority.key(),
-            false,
-        ));
-        m.push(AccountMeta::new(ctx.accounts.in_vault.key(), false));
-        m.push(AccountMeta::new(ctx.accounts.out_vault.key(), false));
-        m.push(AccountMeta::new(ctx.accounts.adapter_in_ta.key(), false));
-        m.push(AccountMeta::new(ctx.accounts.adapter_out_ta.key(), false));
-        m.push(AccountMeta::new_readonly(
-            ctx.accounts.token_program.key(),
-            false,
-        ));
-        for a in adapter_remaining.iter() {
-            if a.is_writable {
-                m.push(AccountMeta::new(*a.key, a.is_signer));
-            } else {
-                m.push(AccountMeta::new_readonly(*a.key, a.is_signer));
-            }
-        }
-        m
+    // PRD-33 §6.4 — stateful (cpi-only) adapters declare an `ix_sysvar`
+    // named slot AFTER token_program in their Execute<'info> layout. Pool
+    // passes its own instructions_sysvar so the adapter can verify the
+    // outer ix's program_id matches B402_POOL_PROGRAM_ID. Stateless
+    // adapters (Jupiter, mock) don't declare the slot and would error
+    // on the unexpected meta — gate the prepend.
+    let stateful_adapter = {
+        #[cfg(feature = "phase_9_dual_note")]
+        { is_stateful_adapter(&adapter_program_key) }
+        #[cfg(not(feature = "phase_9_dual_note"))]
+        { false }
     };
+    let ix_sysvar_for_adapter = if stateful_adapter {
+        Some(ctx.accounts.instructions_sysvar.key())
+    } else {
+        None
+    };
+    let adapter_metas: Vec<AccountMeta> = build_adapter_cpi_metas(
+        ctx.accounts.adapter_authority.key(),
+        ctx.accounts.in_vault.key(),
+        ctx.accounts.out_vault.key(),
+        ctx.accounts.adapter_in_ta.key(),
+        ctx.accounts.adapter_out_ta.key(),
+        ctx.accounts.token_program.key(),
+        ix_sysvar_for_adapter,
+        adapter_remaining
+            .iter()
+            .map(|a| (*a.key, a.is_writable, a.is_signer))
+            .collect::<Vec<_>>()
+            .as_slice(),
+    );
     let mut adapter_infos: Vec<AccountInfo<'info>> =
-        Vec::with_capacity(6 + adapter_remaining.len());
+        Vec::with_capacity(7 + adapter_remaining.len());
     adapter_infos.push(ctx.accounts.adapter_authority.to_account_info());
     adapter_infos.push(ctx.accounts.in_vault.to_account_info());
     adapter_infos.push(ctx.accounts.out_vault.to_account_info());
     adapter_infos.push(ctx.accounts.adapter_in_ta.to_account_info());
     adapter_infos.push(ctx.accounts.adapter_out_ta.to_account_info());
     adapter_infos.push(ctx.accounts.token_program.to_account_info());
+    if stateful_adapter {
+        adapter_infos.push(ctx.accounts.instructions_sysvar.clone());
+    }
     for a in adapter_remaining.iter() {
         adapter_infos.push(a.clone());
     }
 
+    // PRD-33 Phase 33.1: stateful-adapter forwarding. When the target
+    // adapter is in the stateful list AND the pool is built with
+    // phase_9_dual_note (so `pi.out_spending_pub` is available), the inner
+    // action_payload is prefixed with the user's viewing_pub_hash before
+    // forwarding. Stateless adapters get the bytes verbatim. Path-2 builds
+    // (no phase_9_dual_note) skip the rewrite and ship the v0.1 wire
+    // unchanged — there's no out_spending_pub to forward.
+    #[cfg(feature = "phase_9_dual_note")]
+    let cpi_ix_data: Vec<u8> = if is_stateful_adapter(&adapter_program_key) {
+        prepend_viewing_pub_hash_to_action_payload(
+            &args.raw_adapter_ix_data,
+            &pi.out_spending_pub,
+        )?
+    } else {
+        args.raw_adapter_ix_data.clone()
+    };
+    #[cfg(not(feature = "phase_9_dual_note"))]
+    let cpi_ix_data: Vec<u8> = args.raw_adapter_ix_data.clone();
+
     let ix = Instruction {
         program_id: adapter_program_key,
         accounts: adapter_metas,
-        data: args.raw_adapter_ix_data.clone(),
+        data: cpi_ix_data,
     };
     invoke(&ix, &adapter_infos).map_err(|_| error!(PoolError::AdapterCallReverted))?;
 
     // Post-CPI balance-delta invariant (I4).
+    //
+    // STATEFUL-ADAPTER GATE (PRD-33 §6.2): for adapters that credit the
+    // user's claim into protocol state instead of into a tradeable token
+    // account, `out_vault` delta is always 0 — the user's "kUSDC note"
+    // becomes a non-fungible witness for spending_priv, not a backed token
+    // claim. We MUST skip the delta slippage invariant for these adapters
+    // (the check is unsatisfiable when the OUT token never reaches our
+    // vault). The user's withdrawal voucher is `pi.commitment_out` (proof-
+    // bound, appended below regardless). Withdraw-side privateRedeem is
+    // where the actual token delta finally appears in out_vault — that
+    // path runs the standard slippage invariant.
+    //
+    // Stateless adapters (Jupiter, mock) keep the original I4: out_vault
+    // MUST receive ≥ expected_out_value on every adapt_execute. The list
+    // is pinned in `is_stateful_adapter()` and audited at every pool
+    // upgrade — adding a stateful adapter requires a pool source change.
     ctx.accounts.out_vault.reload()?;
     let post = ctx.accounts.out_vault.amount;
     let delta = post.saturating_sub(pre);
-    require!(
-        delta >= pi.expected_out_value,
-        PoolError::AdapterReturnedLessThanMin
-    );
+    // Path A semantics (PRD-33 §6.2): stateful adapters credit user
+    // claims into protocol state (Kamino Obligation owned by owner_pda),
+    // not into out_vault. On a privateLend deposit the SDK still wants
+    // a useful kUSDC voucher note — it passes expected_out_value = N
+    // (typically deposit amount or quoted kUSDC), but out_vault delta
+    // is 0 because Kamino didn't physically mint kUSDC tokens to us.
+    //
+    // The standard `delta >= expected_out_value` check would fail. Skip
+    // it ONLY when (stateful adapter) AND (delta < expected_out_value)
+    // — interpret the gap as "credited to obligation, not vault".
+    //
+    // privateRedeem path is unaffected: USDC physically arrives in
+    // out_vault via the adapter's owner_usdc_ata sweep, delta = M >= 0,
+    // standard check passes (whether expected_out is 0 with excess-
+    // minting picking up the M, or expected_out is M with no excess).
+    let stateful_voucher_mint = {
+        #[cfg(feature = "phase_9_dual_note")]
+        { is_stateful_adapter(&adapter_program_key) && delta < pi.expected_out_value }
+        #[cfg(not(feature = "phase_9_dual_note"))]
+        { false }
+    };
+    if !stateful_voucher_mint {
+        require!(
+            delta >= pi.expected_out_value,
+            PoolError::AdapterReturnedLessThanMin
+        );
+    }
 
     // Append output commitments to the tree, then (Phase 9 dual-note) any
     // excess delta as a SECOND commitment owned by the same spending_pub.
@@ -601,8 +907,12 @@ pub fn handler<'info>(
         // shared vault and skip this block. Phase 9 builds opt in by
         // compiling with `--features phase_9_dual_note`, which also bumps
         // PUBLIC_INPUT_COUNT to 24 and requires the matching VK.
+        // Skip excess minting for stateful adapters: their out_vault delta
+        // is 0 by design (claim lives in protocol state, not vault), so
+        // there's no excess to mint. The slippage gate above already
+        // bypassed; the symmetric thing here is to early-out.
         #[cfg(feature = "phase_9_dual_note")]
-        {
+        if !stateful_voucher_mint {
         let excess: u64 = delta
             .checked_sub(pi.expected_out_value)
             .ok_or(error!(PoolError::ArithmeticUnderflow))?;
@@ -610,13 +920,18 @@ pub fn handler<'info>(
             let out_mint_fr = util::reduce_le_mod_p(&out_mint.to_bytes());
             let commitment_a = pi.commitment_out[0];
 
-            // random_b = Poseidon(commitment_a, TAG_EXCESS) LE.
-            // Deterministic + collision-resistant + opaque on-chain. SDK
-            // mirrors this in packages/sdk/src/excess.ts::deriveExcessRandom.
+            // random_b = Poseidon(TAG_EXCESS, commitment_a) LE.
+            // Tag-first ordering matches `poseidonTagged` convention used by
+            // every other domain-tagged Poseidon call (commitment, nullifier,
+            // recipient_bind, ...). SDK mirrors this in
+            // packages/sdk/src/excess.ts::deriveExcessRandom which calls
+            // poseidonTagged('excess', commitmentA) = Poseidon(TAG, commitmentA).
+            // Reversing this order produces different bytes (Poseidon is a
+            // sponge construction; permuting inputs changes the digest).
             let random_b = hashv(
                 Parameters::Bn254X5,
                 Endianness::LittleEndian,
-                &[&commitment_a[..], &TAG_EXCESS[..]],
+                &[&TAG_EXCESS[..], &commitment_a[..]],
             )
             .map_err(|_| error!(PoolError::ProofVerificationFailed))?
             .to_bytes();
@@ -683,6 +998,120 @@ fn u64_to_fr_le(v: u64) -> [u8; 32] {
     out
 }
 
+// ---------------------------------------------------------------------------
+// PRD-33 Phase 33.1 — stateful-adapter forwarding.
+//
+// Stateful DeFi adapters (Kamino lend, Drift perps, Marginfi) require the
+// per-user `viewing_pub_hash` to derive their per-user owner PDA before
+// composing the protocol-level ix. The pool surfaces this value to the
+// adapter by surgically rewriting the adapter ix data: the inner
+// `action_payload` field is prefixed with the 32 B `pi.out_spending_pub`,
+// and the ix-data length prefix is bumped by 32. Stateless adapters
+// (Jupiter, Sanctum, mock) are forwarded byte-for-byte unchanged.
+//
+// `is_stateful_adapter` is a hardcoded const list rather than a registry
+// flag because:
+//   1. Adding a field to AdapterInfo would reshape the on-chain
+//      AdapterRegistry account, requiring a full re-init at upgrade time.
+//   2. New stateful adapters land alongside their adapter-program
+//      deployment — bumping the pool to add one entry to this list at the
+//      same time has equivalent operational cost (one upgrade tx).
+//   3. The list is auditable in source review; an off-chain registry
+//      flag is not.
+//
+// Adapter ix data layout (the universal b402 adapter ABI):
+//   [8 disc][8 in_amount][8 min_out][4 payload_len LE][payload bytes ...]
+// The transformation prepends the 32 B viewing_pub_hash to the payload
+// portion AND bumps the u32 length prefix accordingly.
+// ---------------------------------------------------------------------------
+
+/// Hardcoded list of stateful adapter program IDs (PRD-33 §6.1 — Choice C).
+/// Adding a stateful adapter = add its program ID here + bump the pool.
+/// Used only by the `phase_9_dual_note` build (out_spending_pub is the
+/// per-user identifier the rewrite is keyed on); default builds skip
+/// the rewrite entirely. `allow(dead_code)` so default-feature CI clippy
+/// doesn't flag this.
+#[allow(dead_code)]
+fn is_stateful_adapter(program_id: &Pubkey) -> bool {
+    // Kamino lend adapter — per-user Obligation under PRD-33 §3.3.
+    const KAMINO_ADAPTER: Pubkey =
+        anchor_lang::pubkey!("2enwFgcGKJDqruHpCtvmhtxe3DYcV3k72VTvoGcdt2rX");
+    program_id == &KAMINO_ADAPTER
+}
+
+/// PRD-33 §6.5 — voucher mints issued by stateful adapters' privateLend
+/// path. These commitments in the b402 pool's tree represent claims
+/// against a corresponding per-user adapter-side state (e.g. a Kamino
+/// Obligation), NOT liquid tokens in `in_vault`.
+///
+/// On privateRedeem the pool MUST skip the `in_vault → adapter_in_ta`
+/// transfer for these mints — the vault has no liquid balance to send
+/// (the deposit's value went into Kamino's reserve, not into the pool).
+/// The adapter then does Kamino's withdraw, USDC physically arrives in
+/// `out_vault`, and the pool reshields a USDC note against the actual
+/// delta as usual.
+///
+/// Adding a new voucher mint = bump the pool to extend this list. Same
+/// audit + upgrade discipline as `is_stateful_adapter`.
+#[allow(dead_code)]
+fn is_synthetic_voucher_mint(mint: &Pubkey) -> bool {
+    // kUSDC — Kamino USDC main reserve collateral mint. Issued by
+    // the adapter's `privateLend` (Kamino V2 deposit).
+    const KUSDC: Pubkey =
+        anchor_lang::pubkey!("B8V6WVjPxW1UGwVDfxH2d2r8SyT4cqn7dQRK6XneVa7D");
+    mint == &KUSDC
+}
+
+/// Offset in the adapter ix data at which the action_payload's u32 LE
+/// length prefix sits. Layout: `[8 disc][8 in_amount][8 min_out]
+/// [4 payload_len][payload bytes]`. Pinned by the b402 adapter ABI; any
+/// drift in the SDK's `concat(executeDisc, u64Le(amount), u64Le(out),
+/// vecU8(actionPayload))` builder mirrors here.
+#[allow(dead_code)]
+const ACTION_PAYLOAD_LEN_OFFSET: usize = 8 + 8 + 8;
+#[allow(dead_code)]
+const ACTION_PAYLOAD_BODY_OFFSET: usize = ACTION_PAYLOAD_LEN_OFFSET + 4;
+
+/// Surgically prepend `viewing_pub_hash` (32 B) to the action_payload
+/// embedded in `raw_ix_data`. Returns the new ix-data byte string.
+///
+/// Errors if `raw_ix_data` is shorter than the fixed prefix or if the
+/// embedded length prefix would overflow / overrun the input. Errors
+/// flow up as `InvalidInstructionData` so a malformed adapter ix from a
+/// buggy SDK aborts the tx cleanly instead of producing a silently-wrong
+/// CPI payload.
+#[allow(dead_code)]
+fn prepend_viewing_pub_hash_to_action_payload(
+    raw_ix_data: &[u8],
+    viewing_pub_hash: &[u8; 32],
+) -> Result<Vec<u8>> {
+    require!(
+        raw_ix_data.len() >= ACTION_PAYLOAD_BODY_OFFSET,
+        crate::error::PoolError::InvalidInstructionData
+    );
+    let len_bytes: [u8; 4] = raw_ix_data
+        [ACTION_PAYLOAD_LEN_OFFSET..ACTION_PAYLOAD_BODY_OFFSET]
+        .try_into()
+        .map_err(|_| error!(crate::error::PoolError::InvalidInstructionData))?;
+    let original_payload_len = u32::from_le_bytes(len_bytes) as usize;
+    require!(
+        raw_ix_data.len() >= ACTION_PAYLOAD_BODY_OFFSET + original_payload_len,
+        crate::error::PoolError::InvalidInstructionData
+    );
+    // Defence against u32 overflow on the bumped length prefix — payloads
+    // are far below 4 GiB so this is paranoia, but it's free.
+    let new_payload_len: u32 = (original_payload_len as u32)
+        .checked_add(32)
+        .ok_or(error!(crate::error::PoolError::InvalidInstructionData))?;
+
+    let mut out = Vec::with_capacity(raw_ix_data.len() + 32);
+    out.extend_from_slice(&raw_ix_data[..ACTION_PAYLOAD_LEN_OFFSET]);
+    out.extend_from_slice(&new_payload_len.to_le_bytes());
+    out.extend_from_slice(viewing_pub_hash);
+    out.extend_from_slice(&raw_ix_data[ACTION_PAYLOAD_BODY_OFFSET..]);
+    Ok(out)
+}
+
 #[inline(never)]
 fn build_public_inputs_for_adapt(
     pi: &AdaptPublicInputs,
@@ -731,6 +1160,130 @@ fn build_public_inputs_for_adapt(
     #[cfg(feature = "phase_9_dual_note")]
     v.push(pi.out_spending_pub);
     v
+}
+
+#[cfg(test)]
+mod stateful_adapter_forwarding_tests {
+    //! PRD-33 Phase 33.1 — pool-side action_payload rewrite.
+    //!
+    //! Pins:
+    //!   1. The 32-B viewing_pub_hash lands at the start of the inner
+    //!      action_payload byte-for-byte (so the adapter's
+    //!      `decode_per_user_payload` recovers it equal to what the prover
+    //!      bound).
+    //!   2. The u32 length prefix is bumped by exactly +32.
+    //!   3. The discriminator + in_amount + min_out + trailing bytes are
+    //!      preserved unchanged.
+    //!   4. Malformed inputs (too short, bad length prefix) error cleanly
+    //!      with `InvalidInstructionData` instead of panicking.
+    //!   5. The Kamino adapter program ID is recognised as stateful;
+    //!      arbitrary other program IDs are not.
+    use super::*;
+
+    fn build_adapter_ix_data(in_amount: u64, min_out: u64, payload: &[u8]) -> Vec<u8> {
+        // Mirrors examples/kamino-adapter-fork-deposit.ts and
+        // packages/sdk/src/b402.ts:911 default builder.
+        const EXECUTE_DISC: [u8; 8] = [130, 221, 242, 154, 13, 193, 189, 29];
+        let mut out = Vec::with_capacity(8 + 8 + 8 + 4 + payload.len());
+        out.extend_from_slice(&EXECUTE_DISC);
+        out.extend_from_slice(&in_amount.to_le_bytes());
+        out.extend_from_slice(&min_out.to_le_bytes());
+        out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
+
+    #[test]
+    fn prepend_inserts_hash_and_bumps_length() {
+        let original_payload: Vec<u8> = (0..49u8).collect(); // 49 B (KaminoAction::Deposit size).
+        let raw = build_adapter_ix_data(1_000_000, 950_000, &original_payload);
+        let h: [u8; 32] = [0xA1; 32];
+
+        let out = prepend_viewing_pub_hash_to_action_payload(&raw, &h).unwrap();
+
+        // Length prefix bumped by +32.
+        let new_len = u32::from_le_bytes(out[24..28].try_into().unwrap()) as usize;
+        assert_eq!(new_len, original_payload.len() + 32);
+
+        // Hash is byte-equal at offset 28..60.
+        assert_eq!(&out[28..60], &h);
+
+        // Original payload follows verbatim.
+        assert_eq!(&out[60..], original_payload.as_slice());
+
+        // Disc + in_amount + min_out untouched.
+        assert_eq!(&out[..24], &raw[..24]);
+
+        // Total grew by exactly 32.
+        assert_eq!(out.len(), raw.len() + 32);
+    }
+
+    #[test]
+    fn prepend_preserves_empty_payload_case() {
+        let raw = build_adapter_ix_data(1, 0, &[]);
+        let h: [u8; 32] = [0xBB; 32];
+        let out = prepend_viewing_pub_hash_to_action_payload(&raw, &h).unwrap();
+        assert_eq!(u32::from_le_bytes(out[24..28].try_into().unwrap()), 32);
+        assert_eq!(&out[28..60], &h);
+        assert_eq!(out.len(), raw.len() + 32);
+    }
+
+    #[test]
+    fn prepend_rejects_short_input() {
+        // Just the 8-B disc — way short of the 28-B minimum.
+        let raw = vec![0u8; 8];
+        let h = [0u8; 32];
+        assert!(prepend_viewing_pub_hash_to_action_payload(&raw, &h).is_err());
+    }
+
+    #[test]
+    fn prepend_rejects_truncated_payload() {
+        // Length prefix says payload is 100 B, but only 10 B follow.
+        let mut raw = vec![0u8; 24]; // disc + in + out
+        raw.extend_from_slice(&100u32.to_le_bytes());
+        raw.extend_from_slice(&[0u8; 10]);
+        let h = [0u8; 32];
+        assert!(prepend_viewing_pub_hash_to_action_payload(&raw, &h).is_err());
+    }
+
+    #[test]
+    fn kamino_adapter_id_is_stateful() {
+        let kamino: Pubkey =
+            anchor_lang::pubkey!("2enwFgcGKJDqruHpCtvmhtxe3DYcV3k72VTvoGcdt2rX");
+        assert!(is_stateful_adapter(&kamino));
+    }
+
+    #[test]
+    fn arbitrary_adapter_id_is_not_stateful() {
+        // The Jupiter adapter ID — stateless.
+        let arbitrary = Pubkey::new_unique();
+        assert!(!is_stateful_adapter(&arbitrary));
+    }
+
+    #[test]
+    fn round_trip_through_kamino_decoder_recovers_hash() {
+        // End-to-end: build adapter ix data, prepend, then verify the
+        // kamino-adapter-side decoder (replicated here as a standalone
+        // step) extracts the same hash. Catches subtle layout drift
+        // (e.g. wrong length-prefix endianness) without needing to load
+        // the kamino adapter as a workspace dep.
+        let inner_action: Vec<u8> = (0..49u8).collect();
+        let raw = build_adapter_ix_data(123, 0, &inner_action);
+        let h: [u8; 32] = [0x33; 32];
+        let rewritten = prepend_viewing_pub_hash_to_action_payload(&raw, &h).unwrap();
+
+        // Replicate kamino_adapter::decode_per_user_payload's prefix
+        // extraction. The adapter sees its own action_payload field
+        // (which, post-rewrite, starts with the 32-B hash followed by
+        // the original KaminoAction borsh).
+        let new_len =
+            u32::from_le_bytes(rewritten[24..28].try_into().unwrap()) as usize;
+        let action_payload = &rewritten[28..28 + new_len];
+        assert!(action_payload.len() > 32);
+        let recovered_hash: [u8; 32] = action_payload[..32].try_into().unwrap();
+        assert_eq!(recovered_hash, h);
+        assert_eq!(&action_payload[32..], inner_action.as_slice());
+    }
 }
 
 #[cfg(test)]
@@ -796,10 +1349,12 @@ mod excess_parity_tests {
         (commitment_a, out_mint_fr, spending_pub, excess)
     }
     fn compute_random_b(commitment_a: &[u8; 32]) -> [u8; 32] {
+        // Tag-first — must match the production handler at line ~616 and the
+        // SDK's deriveExcessRandom (poseidonTagged('excess', commitmentA)).
         hashv(
             Parameters::Bn254X5,
             Endianness::LittleEndian,
-            &[&commitment_a[..], &TAG_EXCESS[..]],
+            &[&TAG_EXCESS[..], &commitment_a[..]],
         )
         .unwrap()
         .to_bytes()
@@ -825,10 +1380,13 @@ mod excess_parity_tests {
         .unwrap()
         .to_bytes()
     }
-    /// Pinned LE-hex commitment_b for the frozen fixture. Empty until first
-    /// run; matches the TS fixture's placeholder. Update both at the same
-    /// time, never one without the other.
-    const EXPECTED_COMMITMENT_B_HEX: &str = "";
+    /// Pinned LE-hex commitment_b for the frozen fixture, generated against
+    /// the tag-first Poseidon ordering. Verified bit-equal between SDK
+    /// (circomlibjs) and on-chain hashv (light-poseidon). Update both this
+    /// file AND `tests/v2/integration/dual_note_vector.test.ts` at the
+    /// same time, never one without the other.
+    const EXPECTED_COMMITMENT_B_HEX: &str =
+        "e7c90af0bf88c9e1ceb3ed40a4f9151982b38b4b61d34b6bcec5a55aab472315";
     #[test]
     fn commitment_b_is_deterministic() {
         let (commitment_a, out_mint_fr, spending_pub, excess) = fixture();
@@ -880,3 +1438,379 @@ mod excess_parity_tests {
         let _: [u8; 4] = arr.as_slice().try_into().unwrap();
     }
 }
+
+// ---------------------------------------------------------------------------
+// PRD-35.9 — parse `AdaptPublicInputs` back from a `PendingInputs` PDA.
+//
+// `adapt_execute_v2` (the PRD-35 path) drops `args.public_inputs` from
+// the outer ix wire and instead reads the 24-input vector from the per-
+// user pending_inputs PDA. This function is the inverse mapping — given
+// the raw bytes that `build_public_inputs_for_adapt` would produce,
+// it recovers the structured `AdaptPublicInputs` so the rest of
+// `handler` runs unchanged.
+//
+// Inputs:
+//   `acct_data` is the full pending_inputs account data, including the
+//   8 B Anchor discriminator and 1 B version byte:
+//     bytes[ 0.. 8] = anchor disc (ignored)
+//     bytes[ 8]     = version (caller checks == 1)
+//     bytes[ 9..9 + 32 × N] = 24 × 32 B inputs in build order
+//
+// The mapping mirrors `build_public_inputs_for_adapt` exactly. Index
+// numbers are pinned by tests below.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "prd_35_pending_inputs")]
+fn fr_le_to_u64(fr: &[u8; 32]) -> Result<u64> {
+    // u64_to_fr_le packs u64 LE into bytes[0..8] and zeros the rest.
+    // Inverse: read u64 LE from [0..8] and require [8..32] == 0 — any
+    // non-zero in the upper bytes means the source value didn't fit in
+    // a u64, which would be a circuit-side bug, not a runtime case.
+    for &b in &fr[8..32] {
+        if b != 0 {
+            return err!(crate::error::PoolError::ProofPublicInputMismatch);
+        }
+    }
+    let mut le = [0u8; 8];
+    le.copy_from_slice(&fr[0..8]);
+    Ok(u64::from_le_bytes(le))
+}
+
+#[cfg(feature = "prd_35_pending_inputs")]
+#[allow(clippy::manual_memcpy)]
+fn parse_adapt_public_inputs_from_pda(acct_data: &[u8]) -> Result<AdaptPublicInputs> {
+    use crate::instructions::verifier_cpi::PUBLIC_INPUT_COUNT_ADAPT;
+
+    require!(
+        acct_data.len() >= 8 + 1 + 32 * PUBLIC_INPUT_COUNT_ADAPT,
+        crate::error::PoolError::ProofPublicInputMismatch
+    );
+    require!(
+        acct_data[8] == 1,
+        crate::error::PoolError::ProofPublicInputMismatch
+    );
+
+    // 24 inputs starting at offset 9.
+    let read_input = |idx: usize| -> [u8; 32] {
+        let off = 9 + idx * 32;
+        let mut buf = [0u8; 32];
+        buf.copy_from_slice(&acct_data[off..off + 32]);
+        buf
+    };
+
+    // Mapping per `build_public_inputs_for_adapt` (lines 894-930):
+    //   0  merkle_root
+    //   1  nullifier[0]
+    //   2  nullifier[1]
+    //   3  commitment_out[0]
+    //   4  commitment_out[1]
+    //   5  u64_to_fr_le(public_amount_in)
+    //   6  u64_to_fr_le(public_amount_out)
+    //   7  in_mint Fr           (derived; not in pi)
+    //   8  u64_to_fr_le(relayer_fee)
+    //   9  relayer_fee_bind
+    //   10 root_bind
+    //   11 recipient_bind
+    //   12-17 domain tag constants  (derived; not in pi)
+    //   18 adapter_id              (derived; not in pi)
+    //   19 action_hash             (derived; not in pi)
+    //   20 u64_to_fr_le(expected_out_value)
+    //   21 out_mint Fr             (derived; not in pi)
+    //   22 TAG_ADAPT_BIND          (derived; not in pi)
+    //   23 out_spending_pub        (Phase 9 only)
+    let pi = AdaptPublicInputs {
+        merkle_root: read_input(0),
+        nullifier: [read_input(1), read_input(2)],
+        commitment_out: [read_input(3), read_input(4)],
+        public_amount_in: fr_le_to_u64(&read_input(5))?,
+        public_amount_out: fr_le_to_u64(&read_input(6))?,
+        // skip 7 (in_mint, derived)
+        relayer_fee: fr_le_to_u64(&read_input(8))?,
+        relayer_fee_bind: read_input(9),
+        root_bind: read_input(10),
+        recipient_bind: read_input(11),
+        // skip 12-17 (domain tag constants), 18 (adapter_id), 19 (action_hash)
+        expected_out_value: fr_le_to_u64(&read_input(20))?,
+        // skip 21 (out_mint), 22 (TAG_ADAPT_BIND)
+        #[cfg(feature = "phase_9_dual_note")]
+        out_spending_pub: read_input(23),
+    };
+    Ok(pi)
+}
+
+#[cfg(test)]
+#[cfg(feature = "prd_35_pending_inputs")]
+mod prd_35_pi_parser_tests {
+    //! PRD-35.9 — round-trip parity test.
+    //!
+    //! For ANY `pi: AdaptPublicInputs`, parsing the bytes that
+    //! `build_public_inputs_for_adapt(pi, ...)` would write into the
+    //! pending_inputs PDA must yield back a `pi'` such that every field
+    //! the parser extracts is byte-equal to the original. Derived fields
+    //! (in_mint, adapter_id, action_hash, etc.) are NOT round-tripped —
+    //! pool recomputes them at handler time from accounts/payload.
+
+    use super::*;
+
+    fn fixture_pi() -> AdaptPublicInputs {
+        AdaptPublicInputs {
+            merkle_root: [1u8; 32],
+            nullifier: [[2u8; 32], [3u8; 32]],
+            commitment_out: [[4u8; 32], [5u8; 32]],
+            public_amount_in: 1_000_000,
+            public_amount_out: 0,
+            relayer_fee: 100,
+            relayer_fee_bind: [9u8; 32],
+            root_bind: [10u8; 32],
+            recipient_bind: [11u8; 32],
+            expected_out_value: 1_500_000,
+            #[cfg(feature = "phase_9_dual_note")]
+            out_spending_pub: [13u8; 32],
+        }
+    }
+
+    fn write_pda_bytes(pi: &AdaptPublicInputs) -> Vec<u8> {
+        // Synthesize PDA bytes the way commit_inputs would. Each input is
+        // 32 B at offset 9 + i*32, all 24 inputs present (Phase 9 build).
+        // Derived fields (mint, action_hash, etc.) get filled with sentinel
+        // values; the parser must IGNORE those.
+        use crate::instructions::verifier_cpi::PUBLIC_INPUT_COUNT_ADAPT;
+        let mut out = vec![0u8; 8 + 1 + 32 * PUBLIC_INPUT_COUNT_ADAPT];
+        out[8] = 1;
+        let mut put = |idx: usize, val: [u8; 32]| {
+            let off = 9 + idx * 32;
+            out[off..off + 32].copy_from_slice(&val);
+        };
+        put(0, pi.merkle_root);
+        put(1, pi.nullifier[0]);
+        put(2, pi.nullifier[1]);
+        put(3, pi.commitment_out[0]);
+        put(4, pi.commitment_out[1]);
+        put(5, u64_to_fr_le(pi.public_amount_in));
+        put(6, u64_to_fr_le(pi.public_amount_out));
+        put(7, [0xff; 32]); // in_mint sentinel — must be ignored
+        put(8, u64_to_fr_le(pi.relayer_fee));
+        put(9, pi.relayer_fee_bind);
+        put(10, pi.root_bind);
+        put(11, pi.recipient_bind);
+        put(12, [0xee; 32]); // tag constants — ignored
+        put(13, [0xee; 32]);
+        put(14, [0xee; 32]);
+        put(15, [0xee; 32]);
+        put(16, [0xee; 32]);
+        put(17, [0xee; 32]);
+        put(18, [0xdd; 32]); // adapter_id sentinel — ignored
+        put(19, [0xcc; 32]); // action_hash sentinel — ignored
+        put(20, u64_to_fr_le(pi.expected_out_value));
+        put(21, [0xbb; 32]); // out_mint — ignored
+        put(22, [0xaa; 32]); // TAG_ADAPT_BIND — ignored
+        #[cfg(feature = "phase_9_dual_note")]
+        put(23, pi.out_spending_pub);
+        out
+    }
+
+    #[test]
+    fn parse_returns_byte_equal_pi_fields() {
+        let pi = fixture_pi();
+        let bytes = write_pda_bytes(&pi);
+        let parsed = parse_adapt_public_inputs_from_pda(&bytes).unwrap();
+        assert_eq!(parsed.merkle_root, pi.merkle_root);
+        assert_eq!(parsed.nullifier, pi.nullifier);
+        assert_eq!(parsed.commitment_out, pi.commitment_out);
+        assert_eq!(parsed.public_amount_in, pi.public_amount_in);
+        assert_eq!(parsed.public_amount_out, pi.public_amount_out);
+        assert_eq!(parsed.relayer_fee, pi.relayer_fee);
+        assert_eq!(parsed.relayer_fee_bind, pi.relayer_fee_bind);
+        assert_eq!(parsed.root_bind, pi.root_bind);
+        assert_eq!(parsed.recipient_bind, pi.recipient_bind);
+        assert_eq!(parsed.expected_out_value, pi.expected_out_value);
+        #[cfg(feature = "phase_9_dual_note")]
+        assert_eq!(parsed.out_spending_pub, pi.out_spending_pub);
+    }
+
+    #[test]
+    fn parse_rejects_unset_version() {
+        let mut bytes = write_pda_bytes(&fixture_pi());
+        bytes[8] = 0; // not committed
+        assert!(parse_adapt_public_inputs_from_pda(&bytes).is_err());
+    }
+
+    #[test]
+    fn parse_rejects_short_buffer() {
+        let bytes = vec![0u8; 100]; // way too short
+        assert!(parse_adapt_public_inputs_from_pda(&bytes).is_err());
+    }
+
+    #[test]
+    fn fr_le_to_u64_round_trips() {
+        for v in [0u64, 1, 100, u64::MAX] {
+            let fr = u64_to_fr_le(v);
+            assert_eq!(fr_le_to_u64(&fr).unwrap(), v);
+        }
+    }
+
+    #[test]
+    fn fr_le_to_u64_rejects_oversize() {
+        let mut fr = [0u8; 32];
+        fr[10] = 1; // non-zero in the high bytes — not representable as u64
+        assert!(fr_le_to_u64(&fr).is_err());
+    }
+
+    #[test]
+    fn parse_round_trip_via_build_function() {
+        // The strongest invariant: parse is the exact inverse of
+        // build_public_inputs_for_adapt's pi-derived fields. We feed
+        // through build → parse and the structured fields survive.
+        use anchor_lang::solana_program::pubkey::Pubkey;
+        let pi = fixture_pi();
+        let in_mint = Pubkey::new_unique();
+        let out_mint = Pubkey::new_unique();
+        let adapter = Pubkey::new_unique();
+        let action_hash = [42u8; 32];
+        let v = build_public_inputs_for_adapt(&pi, &in_mint, &out_mint, &adapter, &action_hash);
+
+        // Synthesize PDA bytes from the build output.
+        use crate::instructions::verifier_cpi::PUBLIC_INPUT_COUNT_ADAPT;
+        assert_eq!(v.len(), PUBLIC_INPUT_COUNT_ADAPT);
+        let mut bytes = vec![0u8; 8 + 1 + 32 * PUBLIC_INPUT_COUNT_ADAPT];
+        bytes[8] = 1;
+        for (i, fr) in v.iter().enumerate() {
+            let off = 9 + i * 32;
+            bytes[off..off + 32].copy_from_slice(fr);
+        }
+
+        let parsed = parse_adapt_public_inputs_from_pda(&bytes).unwrap();
+        assert_eq!(parsed.merkle_root, pi.merkle_root);
+        assert_eq!(parsed.nullifier, pi.nullifier);
+        assert_eq!(parsed.commitment_out, pi.commitment_out);
+        assert_eq!(parsed.public_amount_in, pi.public_amount_in);
+        assert_eq!(parsed.public_amount_out, pi.public_amount_out);
+        assert_eq!(parsed.relayer_fee, pi.relayer_fee);
+        assert_eq!(parsed.relayer_fee_bind, pi.relayer_fee_bind);
+        assert_eq!(parsed.root_bind, pi.root_bind);
+        assert_eq!(parsed.recipient_bind, pi.recipient_bind);
+        assert_eq!(parsed.expected_out_value, pi.expected_out_value);
+        #[cfg(feature = "phase_9_dual_note")]
+        assert_eq!(parsed.out_spending_pub, pi.out_spending_pub);
+    }
+}
+
+#[cfg(test)]
+mod adapter_cpi_meta_tests {
+    //! Host-side guard for the pool's CPI `AccountMeta` flags. A regression
+    //! in any of these manifests as an Anchor `ConstraintMut` (error 2000)
+    //! at runtime — the adapter side enforces `#[account(mut, ...)]` on
+    //! the slots the pool must pass writable.
+    //!
+    //! Bug regression captured: 2026-05-05, kamino-adapter
+    //! `per_user_obligation` deploy. The pool was hardcoding
+    //! `adapter_authority` as readonly; Kamino's `init_user_metadata` CPI
+    //! requires it writable as feePayer, so the kamino lend deposit failed
+    //! `ConstraintMut` on mainnet (recoverable but cost a redeploy). This
+    //! module's first test would have caught that as a unit-time failure.
+    use super::*;
+
+    fn fixtures() -> (Pubkey, Pubkey, Pubkey, Pubkey, Pubkey, Pubkey) {
+        (
+            Pubkey::new_unique(), // adapter_authority
+            Pubkey::new_unique(), // in_vault
+            Pubkey::new_unique(), // out_vault
+            Pubkey::new_unique(), // adapter_in_ta
+            Pubkey::new_unique(), // adapter_out_ta
+            anchor_spl::token::ID, // token_program (matches runtime)
+        )
+    }
+
+    #[test]
+    fn adapter_authority_is_writable() {
+        // The bug fix. Kamino's per_user_obligation uses adapter_authority
+        // as Kamino's feePayer in the inner CPI; readonly here surfaces as
+        // Anchor ConstraintMut on the kamino-adapter side.
+        let (a, ivt, ovt, ita, ota, tok) = fixtures();
+        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, None, &[]);
+        assert_eq!(metas[0].pubkey, a);
+        assert!(
+            metas[0].is_writable,
+            "adapter_authority MUST be writable — see PRD-33 V1 Kamino integration"
+        );
+        assert!(!metas[0].is_signer, "adapter_authority is signed by the adapter via invoke_signed, not the outer tx");
+    }
+
+    #[test]
+    fn vaults_and_scratch_atas_are_writable() {
+        let (a, ivt, ovt, ita, ota, tok) = fixtures();
+        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, None, &[]);
+        // Slot 1: in_vault
+        assert_eq!(metas[1].pubkey, ivt);
+        assert!(metas[1].is_writable, "in_vault MUST be writable — token transfers debit it");
+        // Slot 2: out_vault
+        assert_eq!(metas[2].pubkey, ovt);
+        assert!(metas[2].is_writable, "out_vault MUST be writable — token transfers credit it");
+        // Slot 3: adapter_in_ta
+        assert_eq!(metas[3].pubkey, ita);
+        assert!(metas[3].is_writable, "adapter_in_ta MUST be writable — pool transfers tokens here for the adapter");
+        // Slot 4: adapter_out_ta
+        assert_eq!(metas[4].pubkey, ota);
+        assert!(metas[4].is_writable, "adapter_out_ta MUST be writable — adapter post-CPI sweep moves tokens out");
+    }
+
+    #[test]
+    fn token_program_is_readonly_and_not_signer() {
+        let (a, ivt, ovt, ita, ota, tok) = fixtures();
+        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, None, &[]);
+        assert_eq!(metas[5].pubkey, tok);
+        assert!(!metas[5].is_writable, "token_program is a Program account; never written");
+        assert!(!metas[5].is_signer);
+    }
+
+    #[test]
+    fn remaining_accounts_writable_flag_is_preserved() {
+        let (a, ivt, ovt, ita, ota, tok) = fixtures();
+        let r1 = (Pubkey::new_unique(), true, false);  // writable, not signer
+        let r2 = (Pubkey::new_unique(), false, false); // readonly, not signer
+        let r3 = (Pubkey::new_unique(), true, true);   // writable, signer
+        let r4 = (Pubkey::new_unique(), false, true);  // readonly, signer
+        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, None, &[r1, r2, r3, r4]);
+
+        // Total = 6 named + 4 forwarded.
+        assert_eq!(metas.len(), 10);
+
+        // r1 -> writable, not signer
+        assert_eq!(metas[6].pubkey, r1.0);
+        assert!(metas[6].is_writable);
+        assert!(!metas[6].is_signer);
+
+        // r2 -> readonly, not signer
+        assert_eq!(metas[7].pubkey, r2.0);
+        assert!(!metas[7].is_writable);
+        assert!(!metas[7].is_signer);
+
+        // r3 -> writable, signer (e.g. Jupiter's userTransferAuthority)
+        assert_eq!(metas[8].pubkey, r3.0);
+        assert!(metas[8].is_writable);
+        assert!(metas[8].is_signer);
+
+        // r4 -> readonly, signer
+        assert_eq!(metas[9].pubkey, r4.0);
+        assert!(!metas[9].is_writable);
+        assert!(metas[9].is_signer);
+    }
+
+    #[test]
+    fn first_six_are_named_slots_in_order() {
+        // Adapter ABI contract: the first 6 slots of remaining_accounts (as
+        // seen by the adapter's `Execute<'info>`) are the named pool-managed
+        // accounts in this exact order. Per-adapter remaining_accounts
+        // begin at index 6.
+        let (a, ivt, ovt, ita, ota, tok) = fixtures();
+        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, None, &[]);
+        assert_eq!(metas.len(), 6);
+        assert_eq!(metas[0].pubkey, a, "slot 0: adapter_authority");
+        assert_eq!(metas[1].pubkey, ivt, "slot 1: in_vault");
+        assert_eq!(metas[2].pubkey, ovt, "slot 2: out_vault");
+        assert_eq!(metas[3].pubkey, ita, "slot 3: adapter_in_ta");
+        assert_eq!(metas[4].pubkey, ota, "slot 4: adapter_out_ta");
+        assert_eq!(metas[5].pubkey, tok, "slot 5: token_program");
+    }
+}
+

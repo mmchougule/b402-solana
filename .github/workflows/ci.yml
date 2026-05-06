@@ -40,11 +40,16 @@ jobs:
           node-version: 20
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # Build workspace deps first — vitest resolves @b402ai/solana-shared via
-      # its compiled dist/ output, which doesn't exist until the package is built.
+      # Build workspace deps first — vitest resolves @b402ai/solana-shared
+      # AND @b402ai/solana-prover via their compiled dist/ output, which
+      # doesn't exist until those packages are built. Without prover/dist,
+      # b402.ts's import of AdaptProver/TransactProver fails to resolve and
+      # b402-signer-config.test.ts can't load.
       - run: pnpm --filter='@b402ai/solana-shared' build
+      - run: pnpm --filter='@b402ai/solana-prover' build
       - run: pnpm --filter='@b402ai/solana' test
       - run: pnpm --filter='@b402ai/solana-shared' --if-present test
+      - run: pnpm --filter='@b402ai/solana-prover' --if-present test
 
   crypto-rust:
     name: crypto crate (cargo test)
@@ -66,4 +71,12 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --no-deps -- -D warnings
+      # Enable feature flags that match the production-deployed binaries.
+      # adapt_execute_v2 (PRD-35 commit_inputs path) and Phase 9 dual-note
+      # are both shipped to mainnet; without these flags Anchor's #[program]
+      # macro fails to resolve cfg-gated entrypoints at expansion time.
+      - run: |
+          cargo clippy --workspace --no-deps \
+            --features b402-pool/prd_35_pending_inputs,b402-pool/phase_9_dual_note,b402-pool/inline_cpi_nullifier \
+            --features b402-verifier-adapt/phase_9_dual_note \
+            -- -D warnings

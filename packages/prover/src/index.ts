@@ -9,7 +9,17 @@
 
 // @ts-expect-error — snarkjs lacks types
 import * as snarkjs from 'snarkjs';
-import fs from 'node:fs';
+
+// Browser-compat: node:fs only for string-path artifact existence checks.
+// Browser passes buffers, fs stays null. See packages/sdk/src/note-store.ts
+// for the pattern.
+type NodeFs = typeof import('node:fs');
+let nodeFs: NodeFs | null = null;
+try {
+  const m = await import(/* webpackIgnore: true */ 'node:module');
+  const req = (m as { createRequire: (u: string) => (s: string) => unknown }).createRequire(import.meta.url);
+  nodeFs = req('node:fs') as NodeFs;
+} catch { /* browser */ }
 
 import {
   g1JacFromSnarkjs,
@@ -65,10 +75,13 @@ export interface TransactWitness {
   recipientOwnerHigh: bigint;
 }
 
+/** Filesystem path (Node, MCP) or pre-loaded byte buffer (browser). */
+export type CircuitArtifact = string | Uint8Array | ArrayBuffer;
+
 export interface ProverArtifacts {
-  wasmPath: string;
-  zkeyPath: string;
-  vkeyPath?: string;
+  wasmPath: CircuitArtifact;
+  zkeyPath: CircuitArtifact;
+  vkeyPath?: CircuitArtifact;
 }
 
 export interface TransactProof {
@@ -82,8 +95,10 @@ export interface TransactProof {
 
 export class TransactProver {
   constructor(private readonly artifacts: ProverArtifacts) {
+    // See AdaptProver — same logic. Buffer-based artifacts (browser) skip
+    // the fs check since they're already loaded.
     for (const p of [artifacts.wasmPath, artifacts.zkeyPath]) {
-      if (!fs.existsSync(p)) {
+      if (typeof p === 'string' && nodeFs && !nodeFs.existsSync(p)) {
         throw new Error(`prover artifact missing: ${p}`);
       }
     }
@@ -133,7 +148,11 @@ export class TransactProver {
   /** Verify locally with snarkjs — useful for SDK tests before submitting on-chain. */
   async verifyLocal(proof: TransactProof): Promise<boolean> {
     if (!this.artifacts.vkeyPath) throw new Error('vkeyPath not provided');
-    const vKey = JSON.parse(fs.readFileSync(this.artifacts.vkeyPath, 'utf-8'));
+    const vKey = JSON.parse(
+      typeof this.artifacts.vkeyPath === 'string'
+        ? (nodeFs ? nodeFs.readFileSync(this.artifacts.vkeyPath, 'utf-8') : (() => { throw new Error('verifyLocal needs node:fs to read vkey path; pass a buffer in browser'); })())
+        : new TextDecoder().decode(this.artifacts.vkeyPath),
+    );
     // Reconstruct snarkjs-style proof from our bytes by re-using the
     // original signals — in practice SDK will call prove() + immediately
     // use the bytes, and verifyLocal is a belt-and-suspenders helper that

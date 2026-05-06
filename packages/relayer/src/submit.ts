@@ -99,20 +99,24 @@ export class RpcSubmitter implements Submitter {
     }
 
     // Reshape the client account list:
-    //   - the pool requires account[0] = relayer (signer + writable);
-    //     overwrite the pubkey there with our relayer key so the client can
-    //     pass any placeholder.
+    //   - find the FIRST signer+writable slot — that's the relayer slot.
+    //     For shield/unshield/transact/adapt that's accountKeys[0]; for
+    //     pool::commit_inputs it's accountKeys[1] (slot 0 is the
+    //     pending-inputs PDA, writable but NOT signer).
+    //   - overwrite the pubkey at the relayer slot with our relayer key
+    //     so the client can pass any placeholder.
     //   - everything else is forwarded verbatim.
     if (input.accountKeys.length === 0) {
       throw Errors.badRequest('accountKeys must include at least the fee payer');
     }
-    const first = input.accountKeys[0]!;
-    if (!first.isSigner || !first.isWritable) {
-      throw Errors.badRequest('accountKeys[0] must be marked isSigner=true, isWritable=true (relayer slot)');
+    const relayerSlotIndex = input.accountKeys.findIndex((k) => k.isSigner && k.isWritable);
+    if (relayerSlotIndex === -1) {
+      throw Errors.badRequest('accountKeys must include at least one signer+writable slot (relayer slot)');
     }
+    const first = input.accountKeys[relayerSlotIndex]!;
 
     const keys = input.accountKeys.map((k, i) => ({
-      pubkey: i === 0 ? relayer.publicKey : new PublicKey(k.pubkey),
+      pubkey: i === relayerSlotIndex ? relayer.publicKey : new PublicKey(k.pubkey),
       isSigner: k.isSigner,
       isWritable: k.isWritable,
     }));
