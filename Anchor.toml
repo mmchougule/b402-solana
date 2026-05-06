@@ -9,11 +9,13 @@ skip-lint = false
 b402_pool = "42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y"
 b402_verifier_transact = "Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK"
 b402_jupiter_adapter = "3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7"
+b402_percolator_adapter = "Brp48gh1WcS6EtuKYFmK49Ldd55F9cdDkrYbfvh6RCq6"
 
 [programs.devnet]
 b402_pool = "42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y"
 b402_verifier_transact = "Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK"
 b402_jupiter_adapter = "3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7"
+b402_percolator_adapter = "Brp48gh1WcS6EtuKYFmK49Ldd55F9cdDkrYbfvh6RCq6"
 
 [registry]
 url = "https://api.apr.dev"
