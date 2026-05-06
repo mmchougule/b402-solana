@@ -1,0 +1,41 @@
+name: paysh-send uptime probe
+
+on:
+  schedule:
+    # Every 15 min — GitHub Actions cron is best-effort and skips when the
+    # runner pool is busy, so 5-min would just produce more noise. 15-min
+    # is the empirically-reliable cadence for free-tier scheduling.
+    - cron: '*/15 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  probe:
+    name: probe deployed paysh-send
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: GET /healthz
+        run: |
+          set -e
+          BODY=$(curl --fail --silent --show-error --max-time 10 \
+            -w '\n[status %{http_code} time %{time_total}s]\n' \
+            https://paysh-shield-production.up.railway.app/healthz)
+          echo "$BODY"
+          echo "$BODY" | grep -q '"ok":true'
+
+      - name: GET /stats
+        run: |
+          curl --silent --max-time 10 \
+            https://paysh-shield-production.up.railway.app/stats \
+            | python3 -m json.tool
+
+      - name: POST /send (no payment, expect 402)
+        run: |
+          curl --silent --show-error --max-time 10 \
+            -o /tmp/r.json -w '%{http_code}' \
+            -X POST https://paysh-shield-production.up.railway.app/send \
+            -H 'content-type: application/json' \
+            -d '{"to":"11111111111111111111111111111112","amount":"100000"}' \
+            > /tmp/code
+          test "$(cat /tmp/code)" = "402"
+          python3 -m json.tool < /tmp/r.json
