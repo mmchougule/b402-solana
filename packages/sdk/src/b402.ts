@@ -986,12 +986,41 @@ export class B402Solana {
     // on the heavyweight tx, lifting the v0-tx 1232 B ceiling that
     // today blocks per-user adapters at scale.
     if (req.pendingInputsMode) {
-      const { buildCommitInputsIx } = await import('./commit-inputs.js');
+      const { buildCommitInputsIx, derivePendingInputsPda } = await import('./commit-inputs.js');
       const spendingPubLe = bigintToLe32(this._wallet!.spendingPub);
+      const inputs = proof.publicInputsLeBytes.map((b) => new Uint8Array(b));
+
+      // Idempotency: if a prior attempt already wrote the same inputs to
+      // the per-user pending_inputs PDA, skip submitting a fresh commit
+      // tx. Saves ~$0.0009 + the round-trip latency, and avoids a redundant
+      // tx racing the previous one through Helius (where ws confirms can
+      // lag the chain by 30+ s under load).
+      // PDA layout: 8 (anchor disc) + 1 (version) + 32 × N (inputs) + ...
+      const [pendingPda] = derivePendingInputsPda(
+        new PublicKey(this.programIds.b402Pool),
+        spendingPubLe,
+      );
+      const existing = await this.connection.getAccountInfo(pendingPda, 'confirmed');
+      const expectedBytes = new Uint8Array(inputs.length * 32);
+      for (let i = 0; i < inputs.length; i++) expectedBytes.set(inputs[i], i * 32);
+      const PENDING_INPUTS_HEADER = 8 + 1; // disc + version byte
+      const alreadyCommitted =
+        existing &&
+        existing.data.length >= PENDING_INPUTS_HEADER + expectedBytes.length &&
+        existing.data[8] === 1 && // version flag — pool sets to 1 on commit
+        Buffer.from(existing.data).subarray(
+          PENDING_INPUTS_HEADER,
+          PENDING_INPUTS_HEADER + expectedBytes.length,
+        ).equals(Buffer.from(expectedBytes));
+
+      if (alreadyCommitted) {
+        // Skip the commit tx entirely; adapt_execute_v2 below reads the
+        // PDA we already wrote.
+      } else {
       const commitIx = buildCommitInputsIx({
         poolProgramId: new PublicKey(this.programIds.b402Pool),
         spendingPubLe,
-        inputs: proof.publicInputsLeBytes.map((b) => new Uint8Array(b)),
+        inputs,
         relayer: relayerPubkey,
       });
       // Two paths:
@@ -1026,6 +1055,7 @@ export class B402Solana {
           'confirmed',
         );
       }
+      } // end else (alreadyCommitted check)
     }
 
     // 7. Adapter ix data: default mock-adapter shape (discriminator + amount +

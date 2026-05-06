@@ -19,14 +19,12 @@ import {
   PublicKey,
   SystemProgram,
   Transaction,
-  sendAndConfirmTransaction,
   type AccountMeta,
 } from '@solana/web3.js';
 import {
   TOKEN_PROGRAM_ID,
   createAssociatedTokenAccountIdempotentInstruction,
   getAssociatedTokenAddressSync,
-  getOrCreateAssociatedTokenAccount,
 } from '@solana/spl-token';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -63,6 +61,43 @@ const ALT_PROGRAM = new PublicKey('AddressLookupTab1e1111111111111111111111111')
 const EXECUTE_DISC = Uint8Array.from([130, 221, 242, 154, 13, 193, 189, 29]);
 
 // ── small helpers ─────────────────────────────────────────────────────────────
+/**
+ * Send + confirm a tx without WebSocket subscriptions. web3.js's
+ * `sendAndConfirmTransaction` uses confirmTransaction's WS-based path,
+ * which on Helius free tier returns 429 on the WS upgrade after a few
+ * subs and never delivers the confirmation event — leaving txs to
+ * "expire" even when they Finalized 30s prior. Poll instead.
+ */
+async function sendAndPollConfirm(
+  conn: Connection,
+  tx: Transaction,
+  signers: Keypair[],
+  timeoutMs: number = 90_000,
+): Promise<string> {
+  const bh = await conn.getLatestBlockhash('confirmed');
+  tx.recentBlockhash = bh.blockhash;
+  tx.feePayer = signers[0].publicKey;
+  tx.sign(...signers);
+  const sig = await conn.sendRawTransaction(tx.serialize(), {
+    skipPreflight: false,
+    preflightCommitment: 'confirmed',
+    maxRetries: 3,
+  });
+  const start = Date.now();
+  let interval = 2000;
+  while (Date.now() - start < timeoutMs) {
+    const res = await conn.getSignatureStatuses([sig], { searchTransactionHistory: false });
+    const s = res.value[0];
+    if (s) {
+      if (s.err) throw new Error(`tx ${sig} failed: ${JSON.stringify(s.err)}`);
+      if (s.confirmationStatus === 'confirmed' || s.confirmationStatus === 'finalized') return sig;
+    }
+    await new Promise((r) => setTimeout(r, interval));
+    interval = Math.min(interval * 1.2, 5000);
+  }
+  throw new Error(`tx ${sig} not confirmed within ${timeoutMs / 1000}s`);
+}
+
 function findUtf8(buf: Buffer, needle: string): number {
   const b = Buffer.from(needle, 'utf8');
   for (let i = 0; i < buf.length - b.length; i++) {
@@ -297,7 +332,7 @@ export async function ensureAlt(args: {
     });
     altPubkey = fresh;
     altIsFresh = true;
-    await sendAndConfirmTransaction(args.conn, new Transaction().add(createIx), [args.admin], { commitment: 'finalized' });
+    await sendAndPollConfirm(args.conn, new Transaction().add(createIx), [args.admin]);
     // Wait for ALT to be finalized + visible.
     for (let i = 0; i < 60; i++) {
       const info = await args.conn.getAccountInfo(altPubkey, 'finalized');
@@ -329,7 +364,7 @@ export async function ensureAlt(args: {
         payer: args.admin.publicKey, authority: args.admin.publicKey, lookupTable: altPubkey,
         addresses: targets.slice(i, i + CHUNK),
       });
-      await sendAndConfirmTransaction(args.conn, new Transaction().add(ext), [args.admin], { commitment: 'confirmed' });
+      await sendAndPollConfirm(args.conn, new Transaction().add(ext), [args.admin]);
     }
     // Brief wait so the next tx can resolve via the new entries.
     await new Promise((r) => setTimeout(r, 4000));
@@ -351,7 +386,7 @@ export async function ensurePerUserSetup(args: {
   let adapterFunded = false;
   const aaBal = await args.conn.getBalance(args.adapterAuthority);
   if (aaBal < 0.05 * LAMPORTS_PER_SOL) {
-    await sendAndConfirmTransaction(args.conn,
+    await sendAndPollConfirm(args.conn,
       new Transaction().add(
         SystemProgram.transfer({
           fromPubkey: args.admin.publicKey,
@@ -359,7 +394,7 @@ export async function ensurePerUserSetup(args: {
           lamports: 0.5 * LAMPORTS_PER_SOL,
         }),
       ),
-      [args.admin], { commitment: 'confirmed' },
+      [args.admin],
     );
     adapterFunded = true;
   }
@@ -372,7 +407,7 @@ export async function ensurePerUserSetup(args: {
       args.admin.publicKey, args.perUser.ownerUsdcAta,
       args.perUser.ownerPda, args.reserve.liquidityMint,
     );
-    await sendAndConfirmTransaction(args.conn, new Transaction().add(createAtaIx), [args.admin], { commitment: 'confirmed' });
+    await sendAndPollConfirm(args.conn, new Transaction().add(createAtaIx), [args.admin]);
     ataCreated = true;
   }
 
@@ -387,13 +422,24 @@ export async function ensureAdapterScratchAtas(args: {
   inMint: PublicKey;
   outMint: PublicKey;
 }): Promise<{ adapterInTa: PublicKey; adapterOutTa: PublicKey }> {
-  const inAcc = await getOrCreateAssociatedTokenAccount(
-    args.conn, args.admin, args.inMint, args.adapterAuthority, true,
-  );
-  const outAcc = await getOrCreateAssociatedTokenAccount(
-    args.conn, args.admin, args.outMint, args.adapterAuthority, true,
-  );
-  return { adapterInTa: inAcc.address, adapterOutTa: outAcc.address };
+  const inAta = getAssociatedTokenAddressSync(args.inMint, args.adapterAuthority, true);
+  const outAta = getAssociatedTokenAddressSync(args.outMint, args.adapterAuthority, true);
+  // Idempotent create — both ATAs in one tx if either is missing. Anyone
+  // can pay rent for an ATA owned by anyone else (PDA in this case).
+  const ixs = [];
+  const [inInfo, outInfo] = await Promise.all([
+    args.conn.getAccountInfo(inAta), args.conn.getAccountInfo(outAta),
+  ]);
+  if (!inInfo) ixs.push(createAssociatedTokenAccountIdempotentInstruction(
+    args.admin.publicKey, inAta, args.adapterAuthority, args.inMint,
+  ));
+  if (!outInfo) ixs.push(createAssociatedTokenAccountIdempotentInstruction(
+    args.admin.publicKey, outAta, args.adapterAuthority, args.outMint,
+  ));
+  if (ixs.length > 0) {
+    await sendAndPollConfirm(args.conn, new Transaction().add(...ixs), [args.admin]);
+  }
+  return { adapterInTa: inAta, adapterOutTa: outAta };
 }
 
 // ── ix data builders (deposit / withdraw) ─────────────────────────────────────

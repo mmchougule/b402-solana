@@ -13,8 +13,11 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { Connection, Keypair, PublicKey } from '@solana/web3.js';
-import { getOrCreateAssociatedTokenAccount } from '@solana/spl-token';
+import { Connection, Keypair, PublicKey, Transaction } from '@solana/web3.js';
+import {
+  createAssociatedTokenAccountIdempotentInstruction,
+  getAssociatedTokenAddressSync,
+} from '@solana/spl-token';
 import { createRpc } from '@lightprotocol/stateless.js';
 import {
   poolConfigPda, adapterRegistryPda, treeStatePda,
@@ -99,9 +102,33 @@ export async function handlePrivateRedeem(
   const relayerPubkey = sdkInternal._relayerHttp?.client.pubkey
     ?? sdkInternal.relayer?.publicKey
     ?? admin.publicKey;
-  await getOrCreateAssociatedTokenAccount(
-    conn, admin, outMint /* kUSDC */, relayerPubkey, true,
-  );
+  // Idempotent ATA create — only sends a tx if missing. Avoids
+  // getOrCreateAssociatedTokenAccount's WS-based confirm.
+  const relayerVoucherAta = getAssociatedTokenAddressSync(outMint, relayerPubkey, true);
+  const existing = await conn.getAccountInfo(relayerVoucherAta);
+  if (!existing) {
+    const tx = new Transaction().add(
+      createAssociatedTokenAccountIdempotentInstruction(
+        admin.publicKey, relayerVoucherAta, relayerPubkey, outMint,
+      ),
+    );
+    const bh = await conn.getLatestBlockhash('confirmed');
+    tx.recentBlockhash = bh.blockhash;
+    tx.feePayer = admin.publicKey;
+    tx.sign(admin);
+    const sig = await conn.sendRawTransaction(tx.serialize(), { skipPreflight: false, preflightCommitment: 'confirmed' });
+    // Poll for confirm without WS subs.
+    const start = Date.now();
+    let interval = 2000;
+    while (Date.now() - start < 90_000) {
+      const r = await conn.getSignatureStatuses([sig], { searchTransactionHistory: false });
+      const s = r.value[0];
+      if (s?.confirmationStatus === 'confirmed' || s?.confirmationStatus === 'finalized') break;
+      if (s?.err) throw new Error(`relayer voucher ATA tx failed: ${JSON.stringify(s.err)}`);
+      await new Promise((r) => setTimeout(r, interval));
+      interval = Math.min(interval * 1.2, 5000);
+    }
+  }
 
   // 6. ALT (extends with per-user PDAs lazily, persisted per (market, mint)).
   const [pendingInputsPda] = derivePendingInputsPda(POOL, perUser.ownerPda.toBuffer());
