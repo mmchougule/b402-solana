@@ -54,6 +54,18 @@ ambiguous_glob_reexports = "allow"
 [workspace.lints.clippy]
 doc_overindented_list_items = "allow"
 cloned_ref_to_slice_refs = "allow"
+# `1 + N * ACCT_PER_X` is structurally clearer than `> N * ACCT_PER_X` — the
+# `1 +` reads as "1 sysvar slot + per-element block" and clippy's auto-rewrite
+# loses that intent.
+int_plus_one = "allow"
+# Anchor account contexts (Context<'_, '_, '_, 'info, T<'info>>) push fn arity
+# above clippy's threshold; refactoring into helper structs moves complexity
+# around without removing it.
+too_many_arguments = "allow"
+# `Box<AdaptExecuteV2Args>` is intentional — BPF's 4 KB stack overflows
+# on nested CPI when this struct sits on the stack. `boxed_local` reads it
+# as unnecessary; it isn't.
+boxed_local = "allow"
 
 
 [workspace.dependencies]

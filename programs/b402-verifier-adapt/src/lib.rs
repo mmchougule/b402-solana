@@ -113,8 +113,8 @@ pub mod b402_verifier_adapt {
     /// the verifier crate doesn't have to depend on the pool crate.
     /// `commit_inputs.rs::PendingInputs::LEN` is the source of truth for
     /// the layout; if it changes both sides update.
-    pub fn verify_with_account_inputs(
-        ctx: Context<VerifyWithAccountInputs>,
+    pub fn verify_with_account_inputs<'info>(
+        ctx: Context<'_, '_, '_, 'info, VerifyWithAccountInputs<'info>>,
         proof: [u8; 256],
     ) -> Result<()> {
         let acct_data = ctx.accounts.pending_inputs.try_borrow_data()?;
