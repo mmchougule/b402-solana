@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| **Status** | Draft (awaiting signoff) |
+| **Status** | Signed Off — Locked (2026-05-06, @mayur) |
 | **Owner** | b402 core |
 | **Date** | 2026-05-06 |
 | **Version** | 0.1 |
@@ -361,3 +361,4 @@ Concrete predictions for v1 ship and the 4-week window after.
 ## 12. Revision history
 
 - 2026-05-06: Initial draft.
+- 2026-05-06: Signed Off — Locked. Implementation branch: `phase-12/percolator-adapter-impl`.
