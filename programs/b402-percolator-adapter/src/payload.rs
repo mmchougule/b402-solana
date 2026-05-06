@@ -50,11 +50,18 @@ pub enum PercolatorAction {
     /// The adapter:
     ///   1. Reads `user_idx` from the perp-mapping account
     ///   2. Reads current position size from percolator's slab
-    ///   3. Submits `TradeCpi { size = -current_size, limit_price_e6 }`
-    ///      to flatten
-    ///   4. Submits `WithdrawCollateral { user_idx, amount = all }`
-    ///   5. Transfers the recovered USDC to the pool's out-vault
+    ///   3. If position != 0, submits `TradeCpi { lp_idx,
+    ///      size = -current_size, limit_price_e6 }` to flatten
+    ///   4. Reads current capital (post-PnL) from slab
+    ///   5. If capital > 0, submits `WithdrawCollateral { user_idx,
+    ///      amount = capital }`
+    ///   6. Transfers the recovered USDC to the pool's out-vault
+    ///
+    /// `lp_idx` selects which LP the close-side trade routes through
+    /// (matcher CPI). The user picks; doesn't need to match the LP
+    /// they opened with.
     ClosePosition {
+        lp_idx: u16,
         limit_price_e6: u64,
     },
 }
@@ -172,7 +179,10 @@ mod tests {
     }
 
     fn close_sample() -> PercolatorAction {
-        PercolatorAction::ClosePosition { limit_price_e6: 199_000_000 }
+        PercolatorAction::ClosePosition {
+            lp_idx: 3,
+            limit_price_e6: 199_000_000,
+        }
     }
 
     #[test]
@@ -189,8 +199,8 @@ mod tests {
     fn close_position_roundtrip() {
         let a = close_sample();
         let bytes = a.encode();
-        // discriminant + u64 = 1 + 8 = 9
-        assert_eq!(bytes.len(), 9);
+        // discriminant + u16 + u64 = 1 + 2 + 8 = 11
+        assert_eq!(bytes.len(), 11);
         assert_eq!(bytes[0], tag::CLOSE_POSITION);
         assert_eq!(PercolatorAction::try_decode(&bytes).unwrap(), a);
     }

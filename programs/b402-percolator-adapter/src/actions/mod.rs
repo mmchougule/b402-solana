@@ -70,7 +70,7 @@ mod tests {
     fn close_payload() -> Vec<u8> {
         encode_per_user_payload(
             &[2u8; 32],
-            &PercolatorAction::ClosePosition { limit_price_e6: 0 },
+            &PercolatorAction::ClosePosition { lp_idx: 0, limit_price_e6: 0 },
         )
     }
 

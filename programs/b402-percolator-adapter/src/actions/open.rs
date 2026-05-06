@@ -446,7 +446,7 @@ mod tests {
 
     #[test]
     fn rejects_close_variant_validator() {
-        let close = PercolatorAction::ClosePosition { limit_price_e6: 0 };
+        let close = PercolatorAction::ClosePosition { lp_idx: 0, limit_price_e6: 0 };
         assert_eq!(
             validate_open_args(&close, 1_000),
             Err(PercolatorAdapterError::WrongActionVariant),
