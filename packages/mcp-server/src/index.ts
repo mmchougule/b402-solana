@@ -49,6 +49,8 @@ import {
   balanceInput,
   quoteSwapInput,
   watchIncomingInput,
+  privateLendInput,
+  privateRedeemInput,
 } from './schemas.js';
 import { handleShield } from './tools/shield.js';
 import { handleUnshield } from './tools/unshield.js';
@@ -59,6 +61,8 @@ import { handleHoldings } from './tools/holdings.js';
 import { handleBalance } from './tools/balance.js';
 import { handleQuoteSwap } from './tools/quote_swap.js';
 import { handleWatchIncoming } from './tools/watch_incoming.js';
+import { handlePrivateLend } from './tools/private_lend.js';
+import { handlePrivateRedeem } from './tools/private_redeem.js';
 import { createLogger, type Logger } from './logger.js';
 
 import { zodToJsonSchema } from 'zod-to-json-schema';
@@ -166,6 +170,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         'WRITE: private → private (atomic). Swap one shielded mint for another via a registered adapter. INPUT: { inMint, outMint, amount }. CRITICAL CONSTRAINT: amount must EXACTLY match a deposit value — privateSwap spends the whole deposit, partial spends are not supported in v1. Call `holdings { mint: inMint }` first to read available deposit sizes, then pass one of them as amount. Adapter, ALT, scratch ATAs, expectedOut auto-resolved from cluster (Jupiter mainnet; mock devnet). RETURNS: { signature, outAmount, outDepositId }. CALL `quote_swap` FIRST on mainnet to bound slippage. PRIVACY: relayer signs/pays; user wallet absent from tx.',
       inputSchema: zodToJsonSchema(privateSwapInput),
     },
+    {
+      name: 'private_lend',
+      description:
+        'WRITE: private → Kamino V2 USDC reserve (atomic, mainnet only). Spends a shielded USDC note + deposits into Kamino + mints a kUSDC voucher commitment in one tx. Each viewing key gets its own Kamino Obligation (PRD-33 per-user obligation, derived from owner_pda) — independent positions, no shared state across users. INPUT: { amount (raw USDC, 6 decimals), leafIndex? }. amount must match a spendable USDC note value (auto-picks exact-match → most-recent fallback). FIRST CALL pays a one-time ~0.04 SOL for Kamino UserMetadata + Obligation account rent (charged to adapter authority, pre-funded by user). Subsequent calls are ~$0.003 in tx fees. RETURNS: { signature, voucherDepositId, obligationPda, ownerPda, inAmount, outVaultDelta (=0 for stateful adapter), setupTxs }. PRECONDITION: caller must hold a spendable shielded USDC note ≥ amount. Call `shield` first if not. The voucher is redeemed via `private_redeem`.',
+      inputSchema: zodToJsonSchema(privateLendInput),
+    },
+    {
+      name: 'private_redeem',
+      description:
+        'WRITE: Kamino V2 → private USDC (atomic, mainnet only). Burns a kUSDC voucher commitment minted by a prior `private_lend` + withdraws the underlying USDC from the per-user Kamino obligation + reshields the proceeds as a fresh USDC note. INPUT: { leafIndex? } — defaults to most-recent kUSDC voucher in the SDK note store. PRECONDITION: caller must have at least one kUSDC voucher note from a prior private_lend with the SAME viewing key. RETURNS: { signature, redeemedDepositId, obligationPda, usdcVaultDelta, redeemedAmount }. Slippage is typically 1 raw unit (Kamino reserve rounding); for $1 deposits that\'s 0.0001%.',
+      inputSchema: zodToJsonSchema(privateRedeemInput),
+    },
   ],
 }));
 
@@ -220,6 +236,12 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         break;
       case 'watch_incoming':
         result = await handleWatchIncoming(ctx(), watchIncomingInput.parse(args));
+        break;
+      case 'private_lend':
+        result = await handlePrivateLend(ctx(), privateLendInput.parse(args));
+        break;
+      case 'private_redeem':
+        result = await handlePrivateRedeem(ctx(), privateRedeemInput.parse(args));
         break;
       default:
         throw new Error(`unknown tool: ${name}`);
