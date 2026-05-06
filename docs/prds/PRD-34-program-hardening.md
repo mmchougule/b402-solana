@@ -1,6 +1,6 @@
 # PRD-34 — Solana Program Hardening + Pre-Deploy Harness
 
-Status: drafted 2026-05-03. Author: mayur. Owner: protocol.
+Status: shipped mainnet @ slot 417870483 / 417871785 (PR #46, commit f588410). `pre-deploy-check.sh` + sub-scripts ran the gates that backed the kamino-adapter `per_user_obligation` + `cpi-only` redeploy and the matching pool redeploy. Author: mayur. Owner: protocol.
 
 ## 1. Problem
 

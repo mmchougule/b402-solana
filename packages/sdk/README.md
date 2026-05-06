@@ -11,6 +11,8 @@ npm install @b402ai/solana
 - **Shield** SPL tokens into a private balance
 - **Unshield** to any public address
 - **Private swap** through registered adapters (Jupiter on mainnet, mock on devnet)
+- **Private lend** USDC into Kamino V2 from a shielded note (per-user obligation, mainnet)
+- **Private redeem** a kUSDC voucher back into a shielded USDC note (mainnet)
 - **Read** your private balance / per-deposit holdings without leaking ZK plumbing
 - **Watch** for new private deposits via cursor-based polling
 - **Quote** swaps via Jupiter Lite API before executing

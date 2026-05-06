@@ -22,10 +22,10 @@ Private DeFi on Solana — shielded pool + Kamino/Drift/Jupiter/Orca composabili
 
 ## SDK API parity goal
 
-The Solana adapter must expose the same method surface as `@b402ai/sdk`:
-`shield`, `unshield`, `privateSwap`, `privateLend`, `privateRedeem`, `status`, `rebalance`,
-plus Solana-native additions once mainnet lands (`privatePerpOpen`/`privatePerpClose` for Drift,
-`privateLP` for Orca).
+The Solana adapter exposes the same method surface as `@b402ai/sdk`:
+`shield`, `unshield`, `privateSwap`, `privateLend`, `privateRedeem` (shipped in `@b402ai/solana@0.0.20`),
+`status`, `rebalance`. Solana-native additions next: `privatePerpOpen` /
+`privatePerpClose` for Drift, `privateLP` for Orca.
 
 ## Toolchain
 
