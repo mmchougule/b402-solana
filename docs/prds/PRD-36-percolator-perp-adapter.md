@@ -408,7 +408,8 @@ Updated each session so the next session can pick up without re-reading the whol
 | 1 | Pure-logic primitives — payload codec, mapping table, PDA derivations | **DONE** | 77e7019, 0884d51 | 26 unit + 2 proptest |
 | 1.5 | Review-driven fixes — `record_init` idempotency, PRD §6.5 amendments | **DONE** | a074784 | +3 unit |
 | 2 | cdylib + `execute` entrypoint + percolator-prog ix builders + arg validators + Anchor.toml registration | **DONE** | 471024c, f823cd8 | +23 unit |
-| **3a** | **Open path: full handler** — payload's per-user prefix decode, slab data parsing, CPI builders, open.rs full implementation, mapping read/write through AccountInfo | **IN PROGRESS** | — | (target: +15 unit, fixtured slab parsing) |
+| **3a-α** | Slab data parsing — vendored SlabHeader / MarketConfig, percolator git dep, layout pinning, byte-level field reads | **DONE** | b510828 | +15 unit |
+| **3a-β** | Open handler proper — payload's per-user prefix decode, CPI builders, mapping read/write through AccountInfo, full open.rs implementation | next | — | — |
 | 3b | Close path: full handler — slab-side position read, TradeCpi flatten, WithdrawCollateral, mapping `record_close` | not started | — | — |
 | 4 | SDK side — `B402Solana.privatePerpOpen` / `privatePerpClose` builders, action_payload assembly, ALT layout | not started | — | — |
 | 5 | Surfpool integration tests — local fork running percolator-prog + matcher; e2e seven-case suite from §6.3 | not started | — | — |
