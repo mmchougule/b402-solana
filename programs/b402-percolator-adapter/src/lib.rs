@@ -22,7 +22,7 @@
 use anchor_lang::prelude::*;
 use anchor_spl::token::{Token, TokenAccount};
 
-declare_id!("Brp48gh1WcS6EtuKYFmK49Ldd55F9cdDkrYbfvh6RCq6");
+declare_id!("65NRt6GpeakqXhqvKcN3knohzKEZT37arUyQi3SZwfxv");
 
 pub mod actions;
 pub mod cpi;

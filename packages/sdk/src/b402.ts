@@ -103,7 +103,7 @@ const USDC_MAINNET = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
  * Override per-cluster via `req.adapterProgramId` until devnet/mainnet
  * deployments diverge.
  */
-const PERCOLATOR_ADAPTER_PROGRAM_ID = 'Brp48gh1WcS6EtuKYFmK49Ldd55F9cdDkrYbfvh6RCq6';
+const PERCOLATOR_ADAPTER_PROGRAM_ID = '65NRt6GpeakqXhqvKcN3knohzKEZT37arUyQi3SZwfxv';
 
 export interface B402SolanaConfig {
   cluster: 'mainnet' | 'devnet' | 'localnet';
@@ -292,7 +292,8 @@ export interface PrivatePerpOpenRequest {
   /** Optional matcher-defined tail accounts appended after slot 12. */
   matcherTail?: Array<{ pubkey: PublicKey; isSigner: boolean; isWritable: boolean }>;
 
-  /** Adapter program override. Defaults to `Brp48gh1…`. */
+  /** Adapter program override. Defaults to `65NRt6Gpe…` (matches the
+   *  keypair at `target/deploy/b402_percolator_adapter-keypair.json`). */
   adapterProgramId?: PublicKey;
   /** USDC mint override. Defaults to mainnet USDC. */
   inMint?: PublicKey;

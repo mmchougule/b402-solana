@@ -195,7 +195,7 @@ describe('buildPercolatorExecuteIxData', () => {
 
 // ─── PDA derivations (PRD-36 §5.2) ───
 
-const ADAPTER_PROGRAM_ID = new PublicKey('Brp48gh1WcS6EtuKYFmK49Ldd55F9cdDkrYbfvh6RCq6');
+const ADAPTER_PROGRAM_ID = new PublicKey('65NRt6GpeakqXhqvKcN3knohzKEZT37arUyQi3SZwfxv');
 const KAMINO_ADAPTER_ID_PLACEHOLDER = new PublicKey(
   // Just a deterministic-but-distinct stand-in for the cross-adapter test below.
   '11111111111111111111111111111112',

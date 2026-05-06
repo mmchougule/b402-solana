@@ -25,7 +25,7 @@ use std::str::FromStr;
 
 // ─── Constants pinned against the adapter source ───────────────────────
 
-const PERCOLATOR_ADAPTER_ID_STR: &str = "Brp48gh1WcS6EtuKYFmK49Ldd55F9cdDkrYbfvh6RCq6";
+const PERCOLATOR_ADAPTER_ID_STR: &str = "65NRt6GpeakqXhqvKcN3knohzKEZT37arUyQi3SZwfxv";
 const PERCOLATOR_PROG_ID_STR: &str = "Perco1ator111111111111111111111111111111111";
 const TOKEN_PROGRAM_ID_STR: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 

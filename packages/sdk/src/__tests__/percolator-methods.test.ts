@@ -20,7 +20,7 @@ import {
 } from '../percolator.js';
 
 const USDC_MAINNET = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
-const ADAPTER_PROGRAM_ID = new PublicKey('Brp48gh1WcS6EtuKYFmK49Ldd55F9cdDkrYbfvh6RCq6');
+const ADAPTER_PROGRAM_ID = new PublicKey('65NRt6GpeakqXhqvKcN3knohzKEZT37arUyQi3SZwfxv');
 const FAKE_ALT = new PublicKey('11111111111111111111111111111114');
 
 function fixturePerUser(): PercolatorPerUserAccounts {
