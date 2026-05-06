@@ -1,0 +1,35 @@
+[package]
+name = "b402-percolator-adapter"
+version.workspace = true
+edition.workspace = true
+description = "b402 Percolator perp adapter (per PRD-36, Option B: shielded user / private positions)"
+
+[lib]
+# Slice 1 ships pure-logic primitives only (payload codec, mapping
+# table, PDA derivations). cdylib is added when the `execute` ix
+# handler lands on a subsequent commit on this branch.
+crate-type = ["lib"]
+name = "b402_percolator_adapter"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+# PRD-36 §5: restrict execute() to CPI calls from b402_pool only.
+# Without this, anyone with a depositor's public viewing_pub_hash can
+# call execute(ClosePosition) directly and walk a user's slab slot.
+# Production deploys MUST include this feature; default off only for
+# unit tests that don't simulate the pool wrapper.
+cpi-only = []
+
+[dependencies]
+anchor-lang.workspace = true
+anchor-spl.workspace = true
+
+[dev-dependencies]
+proptest = "1.4"
+
+[lints]
+workspace = true
