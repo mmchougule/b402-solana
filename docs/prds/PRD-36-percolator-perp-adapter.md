@@ -394,3 +394,49 @@ Concrete predictions for v1 ship and the 4-week window after.
 - 2026-05-06: Initial draft.
 - 2026-05-06: Signed Off — Locked. Implementation branch: `phase-12/percolator-adapter-impl`.
 - 2026-05-06: §6.5 added — handler invariants discovered in slice 1 review (stale-entry re-verify, codec-accepts-but-handler-rejects arg list, `record_init` idempotency rule). §8 PRD-36-F added (compaction crank + zero-`out_spending_pub` pool guard). §9 risks expanded for stale-entry race and mapping-insert CU profile.
+- 2026-05-06: Slice 1 implemented (pure-logic primitives, 29 tests). §13 added.
+- 2026-05-06: Slice 2 implemented (cdylib + execute entrypoint + ix builders, 52 tests, BPF compiles).
+
+## 13. Implementation state
+
+Updated each session so the next session can pick up without re-reading the whole branch. Source of truth: `git log phase-12/percolator-adapter-impl`.
+
+### Slice ledger
+
+| Slice | Scope | Status | Commits | Tests added |
+|---|---|---|---|---|
+| 1 | Pure-logic primitives — payload codec, mapping table, PDA derivations | **DONE** | 77e7019, 0884d51 | 26 unit + 2 proptest |
+| 1.5 | Review-driven fixes — `record_init` idempotency, PRD §6.5 amendments | **DONE** | a074784 | +3 unit |
+| 2 | cdylib + `execute` entrypoint + percolator-prog ix builders + arg validators + Anchor.toml registration | **DONE** | 471024c, f823cd8 | +23 unit |
+| **3a** | **Open path: full handler** — payload's per-user prefix decode, slab data parsing, CPI builders, open.rs full implementation, mapping read/write through AccountInfo | **IN PROGRESS** | — | (target: +15 unit, fixtured slab parsing) |
+| 3b | Close path: full handler — slab-side position read, TradeCpi flatten, WithdrawCollateral, mapping `record_close` | not started | — | — |
+| 4 | SDK side — `B402Solana.privatePerpOpen` / `privatePerpClose` builders, action_payload assembly, ALT layout | not started | — | — |
+| 5 | Surfpool integration tests — local fork running percolator-prog + matcher; e2e seven-case suite from §6.3 | not started | — | — |
+| 6 | Devnet deployment — deploy percolator-prog ourselves if not already there; deploy adapter; smoke test | not started | — | — |
+| 7 | Mainnet — coordinated with percolator-prog mainnet ship (out of our control timing) | blocked | — | — |
+| 8 | Post + announcement | blocked on slice 6 | — | — |
+
+### Test-harness model
+
+- **Local unit + proptest**: `cargo test -p b402-percolator-adapter`. ~52 cases as of slice 2.
+- **BPF build**: `cargo build-sbf --manifest-path programs/b402-percolator-adapter/Cargo.toml`. Produces `target/deploy/b402_percolator_adapter.so`.
+- **Surfpool integration (slice 5+)**: forks mainnet, loads our adapter `.so`, loads percolator-prog `.so` (built locally from `~/development/ai/percolator-prog`), runs a JS/TS harness that drives the open + close round trip. Pattern lifted from `examples/kamino-adapter-fork-per-user.mjs` and `examples/mainnet-kamino-lend-demo.mjs`.
+- **Devnet (slice 6)**: same harness but pointed at devnet RPC; we pre-deploy percolator-prog if it isn't there.
+
+### Known external dependencies for the impl branch
+
+| Dep | What we need | Status |
+|---|---|---|
+| `~/development/ai/percolator-prog` deployed somewhere we can hit | A live `Perco1ator…` (or rotated) program ID for the slab/ix calls | Local `target/deploy/percolator_prog.so` only — no devnet/mainnet yet. Slice 6 ships our copy if upstream still hasn't. |
+| Phase-9 `outSpendingPub` public input on adapt_execute | Pool already passes a 32-byte hash to adapter via action_payload prefix (kamino confirms) | DONE on `feat/phase-9-deploy` (our base) |
+| `b402-pool` adapter_registry entry for the adapter program ID | Pool needs to know about us before it can route privatePerp calls | Add in slice 4 alongside the SDK-side builders |
+| Surfpool 1.0.0 binary | Local integration test runner | Installed at `/opt/homebrew/bin/surfpool` |
+
+### Slab layout dependency note
+
+Slice 3a requires reading percolator's `Account` table inside the slab to find the user_idx that `InitUser` assigned (no return data) and to read position state on close. Two options for the type layout:
+
+1. **Vendor minimal struct fields** (preferred). Copy `Account.owner` offset / `Account` size / `accounts[]` base offset into a `slab_layout.rs` module. Add a runtime sanity check (slab header `MAGIC == 0x504552434f4c4154`). Pro: small footprint, no external dep. Con: must update if percolator changes `Account` layout — pin the percolator commit hash in a constant.
+2. Add `percolator` as a path dep. Use `RiskEngine` types directly. Pro: type-safe. Con: pulls 7,500 LOC into our adapter binary; brittle path requires a known checkout layout.
+
+Going with (1) for slice 3a. The vendored layout block lives at the top of `src/slab_layout.rs` with explicit version pin (`PERCOLATOR_LAYOUT_PINNED_AT = "v12.19.13"`) and a CI test that re-derives the offsets and asserts they match the constants.
