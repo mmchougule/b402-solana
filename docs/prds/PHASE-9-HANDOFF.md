@@ -102,7 +102,7 @@ For reference, the Phase 7B commands (already in `PHASE-7-HANDOFF.md`) remain th
 
 ```bash
 solana program deploy \
-    --url https://mainnet.helius-rpc.com/?api-key=1a565ed2-... \
+    --url https://mainnet.helius-rpc.com/?api-key=$HELIUS_KEY \
     --program-id 42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y \
     ops/phase7-builds/b402_pool_inline_v2.so   # current production binary
 ```

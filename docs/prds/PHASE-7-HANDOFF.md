@@ -247,12 +247,12 @@ solana program show 42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y \
 
 # 5. Mainnet upgrade — pool first, then nullifier.
 solana program deploy \
-    --url https://mainnet.helius-rpc.com/?api-key=1a565ed2-... \
+    --url https://mainnet.helius-rpc.com/?api-key=$HELIUS_KEY \
     --program-id 42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y \
     programs/b402-pool/target/deploy/b402_pool.so
 
 solana program deploy \
-    --url https://mainnet.helius-rpc.com/?api-key=1a565ed2-... \
+    --url https://mainnet.helius-rpc.com/?api-key=$HELIUS_KEY \
     --program-id 2AnRZwWu6CTurZs1yQpqrcJWo4yRYL1xpeV78b2siweq \
     programs/b402-nullifier/target/deploy/b402_nullifier.so
 

@@ -6,7 +6,12 @@ const KAMINO_ADAPTER = new PublicKey('2enwFgcGKJDqruHpCtvmhtxe3DYcV3k72VTvoGcdt2
 const USDC = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
 const KUSDC = new PublicKey('B8V6WVjPxW1UGwVDfxH2d2r8SyT4cqn7dQRK6XneVa7D');
 
-const conn = new Connection('https://mainnet.helius-rpc.com/?api-key=1a565ed2-0587-4701-9867-1665ac67864d', 'confirmed');
+const RPC_URL = process.env.B402_RPC_URL;
+if (!RPC_URL) {
+  console.error('B402_RPC_URL required (mainnet RPC URL with api-key= for Helius/Triton).');
+  process.exit(1);
+}
+const conn = new Connection(RPC_URL, 'confirmed');
 
 const cfg = poolConfigPda(POOL);
 console.log('pool_config PDA:', cfg.toBase58());

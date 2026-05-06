@@ -20,7 +20,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-const RPC = 'https://mainnet.helius-rpc.com/?api-key=1a565ed2-0587-4701-9867-1665ac67864d';
+const RPC = process.env.B402_RPC_URL;
+if (!RPC) {
+  console.error('B402_RPC_URL required (mainnet RPC URL with api-key= for Helius/Triton).');
+  process.exit(1);
+}
 const POOL = new PublicKey('42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y');
 const KUSDC = new PublicKey('B8V6WVjPxW1UGwVDfxH2d2r8SyT4cqn7dQRK6XneVa7D');
 const SYSVAR_RENT = new PublicKey('SysvarRent111111111111111111111111111111111');
