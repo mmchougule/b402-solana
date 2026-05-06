@@ -994,32 +994,38 @@ export class B402Solana {
         inputs: proof.publicInputsLeBytes.map((b) => new Uint8Array(b)),
         relayer: relayerPubkey,
       });
-      // Single getLatestBlockhash call — blockhash + lastValidBlockHeight
-      // are a pair and confirmTransaction needs them from the SAME response.
-      // Two separate fetches can yield a blockhash that's already past its
-      // lastValidBlockHeight from the second fetch's perspective and trip
-      // spurious confirmation timeouts.
-      const commitBh = await this.connection.getLatestBlockhash('confirmed');
-      const commitMsg = new TransactionMessage({
-        payerKey: relayerPubkey,
-        recentBlockhash: commitBh.blockhash,
-        instructions: [commitIx],
-      }).compileToV0Message();
-      const commitVtx = new VersionedTransaction(commitMsg);
-      // Local relayer signs commit_inputs (it's the payer for any
-      // first-time PDA alloc). HTTP relayer's bundle support for the
-      // commit-tx is V1.5 — for now, self-submit via local relayer
-      // while the heavyweight adapt_execute may still go through the
-      // HTTP relayer below.
-      commitVtx.sign([this._requireRelayer('privateSwap (commit_inputs tx 1)')]);
-      const csig = await this.connection.sendRawTransaction(commitVtx.serialize(), {
-        skipPreflight: false,
-        preflightCommitment: 'confirmed',
-      });
-      await this.connection.confirmTransaction(
-        { signature: csig, blockhash: commitBh.blockhash, lastValidBlockHeight: commitBh.lastValidBlockHeight },
-        'confirmed',
-      );
+      // Two paths:
+      //   - HTTP relayer wired → submit via /relay/pool-ix (relayer signs
+      //     + pays gas, user wallet stays off-chain). This is the privacy
+      //     path; needs relayer ≥ v0.0.3 (POST /relay/pool-ix endpoint).
+      //   - No HTTP relayer → self-submit with local relayer keypair.
+      //     Caller's wallet pays gas; only useful for dev / e2e.
+      if (this._relayerHttp) {
+        await this._relayerHttp.client.submit({
+          label: 'pool-ix',
+          ix: commitIx,
+          altAddresses: [],
+          computeUnitLimit: 200_000,
+        });
+      } else {
+        // Self-submit fallback. Local relayer pays.
+        const commitBh = await this.connection.getLatestBlockhash('confirmed');
+        const commitMsg = new TransactionMessage({
+          payerKey: relayerPubkey,
+          recentBlockhash: commitBh.blockhash,
+          instructions: [commitIx],
+        }).compileToV0Message();
+        const commitVtx = new VersionedTransaction(commitMsg);
+        commitVtx.sign([this._requireRelayer('privateSwap (commit_inputs tx 1)')]);
+        const csig = await this.connection.sendRawTransaction(commitVtx.serialize(), {
+          skipPreflight: false,
+          preflightCommitment: 'confirmed',
+        });
+        await this.connection.confirmTransaction(
+          { signature: csig, blockhash: commitBh.blockhash, lastValidBlockHeight: commitBh.lastValidBlockHeight },
+          'confirmed',
+        );
+      }
     }
 
     // 7. Adapter ix data: default mock-adapter shape (discriminator + amount +

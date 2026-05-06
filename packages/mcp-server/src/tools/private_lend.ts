@@ -59,10 +59,18 @@ export async function handlePrivateLend(
     throw new Error(`private_lend is mainnet-only (current cluster: ${ctx.cluster}). Kamino reserves don't exist on devnet/localnet.`);
   }
 
+  // ready() lazily inits the wallet + provers — must run before any
+  // ctx.b402.wallet access (b402.wallet getter throws otherwise).
+  await ctx.b402.ready();
+
   const conn = new Connection(ctx.rpcUrl, 'confirmed');
   const admin = loadKeypair();
   const inMint = USDC;
   const lendAmount = BigInt(input.amount);
+
+  // SDK 0.0.20 routes commit_inputs through the hosted relayer's
+  // /relay/pool-ix endpoint when configured, so the user wallet stays
+  // off-chain. No monkey-patch needed; just call privateLend below.
 
   // 1. Read + parse the Kamino USDC reserve.
   const reserveAcct = await conn.getAccountInfo(RESERVE);

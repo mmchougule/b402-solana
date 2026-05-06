@@ -65,7 +65,8 @@ export async function handlePrivateSwap(
 
   // Photon RPC — required for v2 nullifier address-tree non-inclusion proof.
   // Defaults to the same RPC URL (Helius mainnet has Photon co-located).
-  const photonUrl = process.env.B402_PHOTON_RPC_URL ?? ctx.rpcUrl;
+  // B402_PHOTON_RPC_URL kept as a fallback for older configs.
+  const photonUrl = process.env.B402_PHOTON_URL ?? process.env.B402_PHOTON_RPC_URL ?? ctx.rpcUrl;
   const photonRpc = createRpc(ctx.rpcUrl, photonUrl);
 
   // ── mainnet: fetch real Jupiter route ──────────────────────────────────────
@@ -127,6 +128,11 @@ export async function handlePrivateSwap(
     ...(actionPayload !== undefined ? { actionPayload } : {}),
     ...(remainingAccounts !== undefined ? { remainingAccounts } : {}),
     ...(extraAlts.length > 0 ? { alts: extraAlts } : {}),
+    // Phase 9 mainnet pool requires pendingInputsMode + phase9DualNote;
+    // legacy path (false) hits InvalidProgramId on token_program slot
+    // because the pool's AdaptExecute account layout changed at slot ~458.5M.
+    phase9DualNote: cluster === 'mainnet',
+    pendingInputsMode: cluster === 'mainnet',
   });
 
   const excess = result.excessNote;

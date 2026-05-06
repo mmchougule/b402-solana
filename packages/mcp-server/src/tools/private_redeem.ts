@@ -13,7 +13,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { Connection, Keypair } from '@solana/web3.js';
+import { Connection, Keypair, PublicKey } from '@solana/web3.js';
 import { getOrCreateAssociatedTokenAccount } from '@solana/spl-token';
 import { createRpc } from '@lightprotocol/stateless.js';
 import {
@@ -52,9 +52,14 @@ export async function handlePrivateRedeem(
     throw new Error(`private_redeem is mainnet-only (current cluster: ${ctx.cluster}).`);
   }
 
+  await ctx.b402.ready();
+
   const conn = new Connection(ctx.rpcUrl, 'confirmed');
   const admin = loadKeypair();
   const inMint = USDC;
+
+  // SDK 0.0.20 routes commit_inputs through hosted relayer's
+  // /relay/pool-ix endpoint — user wallet stays off-chain.
 
   // 1. Read + parse Kamino reserve.
   const reserveAcct = await conn.getAccountInfo(RESERVE);
@@ -78,9 +83,22 @@ export async function handlePrivateRedeem(
   // 4. Per-user setup (idempotent).
   await ensurePerUserSetup({ conn, admin, perUser, reserve, adapterAuthority });
 
-  // 5. Pool's adapt_execute requires fee_ata_sentinel (relayer's ATA for IN
-  //    mint). For redeem, IN mint = kUSDC. Pre-create.
-  await getOrCreateAssociatedTokenAccount(conn, admin, outMint /* kUSDC */, admin.publicKey);
+  // 5. Pool's adapt_execute requires fee_ata_sentinel — the relayer's ATA
+  //    for the IN mint. For redeem, IN mint = kUSDC. The relayer is either
+  //    (a) the hosted HTTP relayer pubkey (default mainnet path), or
+  //    (b) the local SDK relayer keypair (e.g. e2e fork tests). Either
+  //    way, ensure the ATA exists; user (admin) pays the ~0.002 SOL rent
+  //    once. Anyone can be the payer of an ATA owned by anyone else.
+  const sdkInternal = ctx.b402 as unknown as {
+    _relayerHttp?: { client: { pubkey: PublicKey } };
+    relayer?: { publicKey: PublicKey };
+  };
+  const relayerPubkey = sdkInternal._relayerHttp?.client.pubkey
+    ?? sdkInternal.relayer?.publicKey
+    ?? admin.publicKey;
+  await getOrCreateAssociatedTokenAccount(
+    conn, admin, outMint /* kUSDC */, relayerPubkey, true,
+  );
 
   // 6. ALT (extends with per-user PDAs lazily).
   const [pendingInputsPda] = derivePendingInputsPda(POOL, perUser.ownerPda.toBuffer());
