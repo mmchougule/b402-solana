@@ -61,9 +61,23 @@ proptest! {
                 let mut m = PerpMapping::from_bytes(&mut buf).unwrap();
                 match op {
                     Op::Init { hash_idx, user_idx } => {
-                        m.record_init(&h(*hash_idx), *user_idx).unwrap();
-                        live.insert(*hash_idx, *user_idx);
-                        closed.remove(hash_idx);
+                        // Idempotency rule: live entries reject mismatched
+                        // user_idx. Mirror that in the harness.
+                        match live.get(hash_idx) {
+                            Some(existing) if existing != user_idx => {
+                                let result = m.record_init(&h(*hash_idx), *user_idx);
+                                prop_assert_eq!(
+                                    result,
+                                    Err(mapping::MappingError::LiveEntryMismatch),
+                                );
+                                // No state change.
+                            }
+                            _ => {
+                                m.record_init(&h(*hash_idx), *user_idx).unwrap();
+                                live.insert(*hash_idx, *user_idx);
+                                closed.remove(hash_idx);
+                            }
+                        }
                     }
                     Op::Close { hash_idx } => {
                         if live.contains_key(hash_idx) {

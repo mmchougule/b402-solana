@@ -279,6 +279,34 @@ Per repo convention (PRD-07), every component lands with tests first.
 
 The full demo flow on local validator. Runs in CI under `--test` mode; runs on devnet manually under `--devnet` once percolator-prog ships there.
 
+## 6.5 Handler-level invariants discovered during slice 1
+
+Found while reviewing slice 1 (pure-logic primitives). Promoted from inline notes
+to explicit handler obligations so slice 3 (action handlers) implements them.
+
+1. **Stale-entry re-verification.** Before trusting a `mapping.allocate(hash) →
+   Existing { user_idx }` result, the handler MUST verify on chain that
+   `slab.accounts[user_idx].owner == owner_pda`. Percolator's `KeeperCrank`
+   can liquidate any slot and reassign it. If the mapping is stale, the
+   handler closes the stale entry (`mapping.record_close`) and falls
+   through to the `NewSlotNeeded` path.
+2. **Handler-level rejection of percolator-unsafe args.** The codec accepts
+   `size_e6 == 0`, `size_e6 == i128::MIN`, and `lp_idx == user_idx` because
+   they're valid Borsh — but percolator-prog rejects all three with
+   `InvalidInstructionData`. The handler MUST reject these earlier so the
+   user sees a clean adapter-level error rather than burning CU through
+   InitUser/Deposit and failing at TradeCpi.
+3. **`viewing_pub_hash == [0u8; 32]` rejection at the pool layer.** The
+   adapter assumes `out_spending_pub` is a non-zero Poseidon image. The
+   pool's `adapt_execute` should reject proofs whose `out_spending_pub`
+   public input is zero — otherwise we silently derive a "default"
+   `owner_pda`. Out of scope for this PRD; tracked as PRD-36-F.
+4. **Mapping `record_init` idempotency.** Slice 1 added a
+   `LiveEntryMismatch` error. Handlers calling `record_init` after an
+   apparent `NewSlotNeeded` outcome must pass percolator's freshly-assigned
+   `user_idx` exactly. A second `record_init` for the same live hash with
+   a different `user_idx` indicates a handler bug and is rejected.
+
 ## 7. Acceptance criteria
 
 PRD-36 v1 is "done" when all of the following hold:
@@ -298,6 +326,7 @@ PRD-36 v1 is "done" when all of the following hold:
 - **PRD-36-C:** position adjustment (size delta, leverage delta) without close.
 - **PRD-36-D:** multi-market portfolio per user, with one mapping table per slab.
 - **PRD-36-E:** sponsored gas for shielded users on percolator (via the existing hosted relayer pattern).
+- **PRD-36-F:** mapping-table compaction crank. Closed entries persist forever in the sorted prefix; over a long-lived slab with churn, the table fills and locks out new users. v2 adds a permissionless crank that compacts the table (rewrites without closed entries). Until then, MAX_ENTRIES=2048 is the soft cap on lifetime-distinct shielded users per market. Pool-side rejection of zero `out_spending_pub` also lives here.
 - **Upstream coordination:** request a percolator-prog mainnet deployment slot. v1 of this PRD targets local validator + devnet.
 
 ## 9. Risks
@@ -311,6 +340,8 @@ PRD-36 v1 is "done" when all of the following hold:
 | `limit_price_e6` exposure leaks intent | Low | Documented as same shape as Drift order books. Agents wanting tighter privacy add an intent layer above the adapter |
 | Solana runtime upgrade reduces `MAX_INVOKE_STACK_HEIGHT` | Low | sBPF v3 set it at 5; v4+ may change. Re-test on every Solana release pinning |
 | Per-user PDA reseeding if `viewing_pub_hash` algorithm changes | Low | Phase-9 outSpendingPub is locked. If a v2 changes the hash domain, mapping table needs migration |
+| Stale-entry race after percolator liquidation | Medium | Handler re-verifies `slab.accounts[user_idx].owner == owner_pda` before reusing a mapping entry; on mismatch, calls `record_close` and falls through to a fresh `InitUser`. Specified in §6.5 #1. |
+| Sorted `record_init` is O(N); worst-case insert at MAX_ENTRIES costs ~330k CU on top of pool's ~600k Groth16 verify | Medium | Acceptable in v1 (still under the 1.4M ix cap); slice 5 measures on solana-test-validator. If tight, switch to unsorted append-only (O(1) insert, O(N) lookup) — same correctness, different CU profile. |
 
 ## 10. Review process
 
@@ -362,3 +393,4 @@ Concrete predictions for v1 ship and the 4-week window after.
 
 - 2026-05-06: Initial draft.
 - 2026-05-06: Signed Off — Locked. Implementation branch: `phase-12/percolator-adapter-impl`.
+- 2026-05-06: §6.5 added — handler invariants discovered in slice 1 review (stale-entry re-verify, codec-accepts-but-handler-rejects arg list, `record_init` idempotency rule). §8 PRD-36-F added (compaction crank + zero-`out_spending_pub` pool guard). §9 risks expanded for stale-entry race and mapping-insert CU profile.

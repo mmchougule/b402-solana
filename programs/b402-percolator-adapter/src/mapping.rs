@@ -57,6 +57,11 @@ pub enum MappingError {
     BadDiscriminant,
     SlabMismatch,
     InvariantBroken,
+    /// `record_init` called for a hash that already has a live entry with
+    /// a different `user_idx`. Indicates a handler bug — the slab slot for
+    /// this user did not change unless percolator liquidated/reassigned
+    /// it, in which case the handler should call `record_close` first.
+    LiveEntryMismatch,
 }
 
 /// In-memory view of the mapping account. The on-chain account is stored
@@ -168,6 +173,13 @@ impl<'a> PerpMapping<'a> {
     /// Record a freshly-allocated `user_idx` after percolator's `InitUser`
     /// returned. Inserts (or reactivates) the entry, preserving the sorted
     /// invariant.
+    ///
+    /// Idempotency rule: if the entry already exists and is live (not
+    /// FLAG_CLOSED), the supplied `user_idx` MUST match the stored one,
+    /// otherwise this returns `LiveEntryMismatch`. A live entry whose
+    /// `user_idx` no longer matches percolator's reality is a signal of a
+    /// handler bug or a stale-entry race; the caller must explicitly
+    /// `record_close` first if a re-allocation is intended.
     pub fn record_init(
         &mut self,
         hash: &ViewingPubHash,
@@ -175,8 +187,11 @@ impl<'a> PerpMapping<'a> {
     ) -> Result<(), MappingError> {
         match self.binary_search(hash) {
             Ok(pos) => {
-                // Reactivate a closed entry, or overwrite a stale one.
                 let mut e = self.read_entry(pos);
+                if e.flags & FLAG_CLOSED == 0 && e.user_idx != user_idx {
+                    return Err(MappingError::LiveEntryMismatch);
+                }
+                // Reactivate a closed entry, or no-op a matched live entry.
                 e.flags &= !FLAG_CLOSED;
                 e.user_idx = user_idx;
                 self.write_entry(pos, &e);
@@ -421,6 +436,46 @@ mod tests {
         assert_eq!(m.next_free_idx_hint(), 1);
         m.record_init(&h(2), 7).unwrap();
         assert_eq!(m.next_free_idx_hint(), 8);
+    }
+
+    #[test]
+    fn record_init_double_call_with_same_idx_is_idempotent() {
+        let mut buf = fresh_buf();
+        let mut m = PerpMapping::from_bytes(&mut buf).unwrap();
+        m.initialize(&slab_pk(), 0).unwrap();
+        m.record_init(&h(7), 42).unwrap();
+        // Second call with the same user_idx is a no-op success.
+        m.record_init(&h(7), 42).unwrap();
+        assert_eq!(m.allocate(&h(7)), AllocateOutcome::Existing { user_idx: 42 });
+    }
+
+    #[test]
+    fn record_init_with_mismatched_idx_on_live_entry_rejects() {
+        let mut buf = fresh_buf();
+        let mut m = PerpMapping::from_bytes(&mut buf).unwrap();
+        m.initialize(&slab_pk(), 0).unwrap();
+        m.record_init(&h(7), 42).unwrap();
+        // A second call asserting a different user_idx for the same hash
+        // is a handler-level mismatch and must be rejected.
+        assert_eq!(
+            m.record_init(&h(7), 99),
+            Err(MappingError::LiveEntryMismatch),
+        );
+        // Live entry preserved.
+        assert_eq!(m.allocate(&h(7)), AllocateOutcome::Existing { user_idx: 42 });
+    }
+
+    #[test]
+    fn record_init_after_close_with_new_idx_succeeds() {
+        let mut buf = fresh_buf();
+        let mut m = PerpMapping::from_bytes(&mut buf).unwrap();
+        m.initialize(&slab_pk(), 0).unwrap();
+        m.record_init(&h(7), 42).unwrap();
+        m.record_close(&h(7)).unwrap();
+        // After close, re-init with a different idx is allowed (slot was
+        // released back to the allocator).
+        m.record_init(&h(7), 99).unwrap();
+        assert_eq!(m.allocate(&h(7)), AllocateOutcome::Existing { user_idx: 99 });
     }
 
     #[test]

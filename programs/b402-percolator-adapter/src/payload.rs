@@ -26,7 +26,16 @@ pub enum PercolatorAction {
     /// limit_price_e6 }` to open the position.
     ///
     /// Subsequent calls (slot already claimed) skip InitUser and reuse
-    /// the existing `user_idx` from the perp-mapping account.
+    /// the existing `user_idx` from the perp-mapping account, after
+    /// re-verifying that `slab.accounts[user_idx].owner == owner_pda`
+    /// (stale-entry race guard — slot may have been liquidated and
+    /// reassigned by percolator's KeeperCrank since our last touch).
+    ///
+    /// Codec accepts but the action handler MUST reject:
+    ///   - `size_e6 == 0` (percolator-prog rejects with InvalidInstructionData)
+    ///   - `size_e6 == i128::MIN` (no positive counterpart — engine rejects)
+    ///   - `lp_idx >= percolator::MAX_ACCOUNTS` for the deployment tier
+    ///   - `lp_idx == user_idx` (percolator-prog rejects)
     OpenPosition {
         lp_idx: u16,
         size_e6: i128,
