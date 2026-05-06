@@ -72,6 +72,12 @@ export {
   PERCOLATOR_MAX_ACCOUNTS_DEFAULT,
 } from './percolator.js';
 
+// Percolator method request shapes (B402Solana.privatePerpOpen / privatePerpClose).
+export type {
+  PrivatePerpOpenRequest,
+  PrivatePerpCloseRequest,
+} from './b402.js';
+
 /** Solana hard tx-size cap. */
 export const MAX_TX_SIZE = 1232;
 /** Soft ceiling for adapter action_payload. Pool recomputes keccak over it. */
