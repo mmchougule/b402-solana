@@ -78,7 +78,7 @@ export async function getValidityProofForNullifier(
   const address = deriveNullifierAddress(nullifierLeBytes);
   const r = rpc as ReturnType<typeof stateless.createRpc>;
 
-  const proofResult = await r.getValidityProofV0(
+  const proofArgs: Parameters<typeof r.getValidityProofV0> = [
     [],
     [
       {
@@ -87,7 +87,30 @@ export async function getValidityProofForNullifier(
         address: stateless.bn(address.toBytes()),
       },
     ],
-  );
+  ];
+
+  // Retry transient Photon failures (Helius 5xx, 429s). The validity proof
+  // RPC has no idempotency concern — same nullifier always derives the same
+  // address, so we either get the proof or a hard "already exists" failure.
+  let proofResult: Awaited<ReturnType<typeof r.getValidityProofV0>> | null = null;
+  let lastErr: unknown = null;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      proofResult = await r.getValidityProofV0(...proofArgs);
+      break;
+    } catch (e) {
+      lastErr = e;
+      const msg = String((e as { message?: string })?.message ?? e);
+      // "already exists" is terminal — don't retry.
+      if (/already exists/i.test(msg)) throw e;
+      // Back off: 500ms, 1.5s, 4s.
+      const delay = 500 * Math.pow(3, attempt);
+      await new Promise((res) => setTimeout(res, delay));
+    }
+  }
+  if (!proofResult) {
+    throw new Error(`Photon validity proof failed after retries: ${String((lastErr as { message?: string })?.message ?? lastErr)}`);
+  }
   if (!proofResult.compressedProof) {
     throw new Error('Photon returned no proof — address may already exist (double-spend)');
   }

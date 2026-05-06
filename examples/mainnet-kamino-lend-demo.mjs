@@ -456,6 +456,7 @@ async function main() {
     await b402.status({ refresh: true });
     usdcNotes = b402._notes.getSpendable(inMintFr);
     console.log(`  USDC notes on chain: [${usdcNotes.map((n) => n.value.toString()).join(', ')}]`);
+    console.log(`  USDC notes (idx,val): [${usdcNotes.map((n) => `${n.leafIndex}=${n.value}`).join(', ')}]`);
   }
 
   let noteToSpend;
@@ -467,10 +468,18 @@ async function main() {
     lendAmount = noteToSpend.value;
     console.log(`✓ REUSE_NOTE=1 — using existing ${lendAmount}-unit note (leafIndex=${noteToSpend.leafIndex})`);
   } else if (STEP === 'lend' && usdcNotes.length > 0) {
-    const sorted = [...usdcNotes].sort((a, b) => Number(BigInt(b.leafIndex) - BigInt(a.leafIndex)));
-    noteToSpend = sorted[0];
-    lendAmount = noteToSpend.value;
-    console.log(`✓ STEP=lend — using most-recent note (leafIndex=${noteToSpend.leafIndex}, value=${lendAmount})`);
+    if (process.env.LEAF_INDEX) {
+      const target = Number(process.env.LEAF_INDEX);
+      noteToSpend = usdcNotes.find((n) => Number(n.leafIndex) === target);
+      if (!noteToSpend) throw new Error(`LEAF_INDEX=${target} not found in spendable notes [${usdcNotes.map((n) => n.leafIndex).join(',')}]`);
+      lendAmount = noteToSpend.value;
+      console.log(`✓ STEP=lend LEAF_INDEX=${target} — using note (leafIndex=${noteToSpend.leafIndex}, value=${lendAmount})`);
+    } else {
+      const sorted = [...usdcNotes].sort((a, b) => Number(BigInt(b.leafIndex) - BigInt(a.leafIndex)));
+      noteToSpend = sorted[0];
+      lendAmount = noteToSpend.value;
+      console.log(`✓ STEP=lend — using most-recent note (leafIndex=${noteToSpend.leafIndex}, value=${lendAmount})`);
+    }
   } else if (STEP === 'lend') {
     throw new Error('STEP=lend requires an existing discoverable shielded note (or set REUSE_NOTE=1; not available with backfill skipped)');
   } else {
@@ -742,4 +751,4 @@ async function main() {
   console.log('✓ ROUND-TRIP COMPLETE — privateLend + privateRedeem both green');
 }
 
-main().catch((e) => { console.error('\n❌', e); process.exit(1); });
+main().then(() => process.exit(0)).catch((e) => { console.error('\n❌', e); process.exit(1); });
