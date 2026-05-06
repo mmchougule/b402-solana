@@ -71,24 +71,33 @@ fn decode_per_user_payload_rejects_missing_inner_action() {
     );
 }
 
+/// Mainnet USDC for the per-mint PDA tests below — any 32-byte pubkey
+/// works, USDC is just a stable choice.
+const USDC_MINT_BYTES: [u8; 32] = [
+    198, 250, 122, 243, 190, 219, 173, 58, 61, 101, 243, 106, 171, 201, 116, 49,
+    177, 187, 228, 194, 210, 246, 224, 228, 124, 166, 2, 3, 69, 47, 93, 97,
+];
+
 #[test]
 fn derive_owner_pda_is_deterministic() {
     let h = fixed_hash(0x11);
-    let (a, b1) = derive_owner_pda(&ADAPTER_ID, &h);
-    let (a2, b2) = derive_owner_pda(&ADAPTER_ID, &h);
-    assert_eq!(a, a2, "same hash → same PDA");
-    assert_eq!(b1, b2, "same hash → same bump");
+    let mint = Pubkey::new_from_array(USDC_MINT_BYTES);
+    let (a, b1) = derive_owner_pda(&ADAPTER_ID, &h, &mint);
+    let (a2, b2) = derive_owner_pda(&ADAPTER_ID, &h, &mint);
+    assert_eq!(a, a2, "same hash + mint → same PDA");
+    assert_eq!(b1, b2, "same hash + mint → same bump");
 }
 
 #[test]
 fn three_distinct_users_get_three_distinct_owner_pdas() {
+    let mint = Pubkey::new_from_array(USDC_MINT_BYTES);
     let alice_hash = fixed_hash(0xA1);
     let bob_hash = fixed_hash(0xB2);
     let carol_hash = fixed_hash(0xC3);
 
-    let (alice_pda, _) = derive_owner_pda(&ADAPTER_ID, &alice_hash);
-    let (bob_pda, _) = derive_owner_pda(&ADAPTER_ID, &bob_hash);
-    let (carol_pda, _) = derive_owner_pda(&ADAPTER_ID, &carol_hash);
+    let (alice_pda, _) = derive_owner_pda(&ADAPTER_ID, &alice_hash, &mint);
+    let (bob_pda, _) = derive_owner_pda(&ADAPTER_ID, &bob_hash, &mint);
+    let (carol_pda, _) = derive_owner_pda(&ADAPTER_ID, &carol_hash, &mint);
 
     assert_ne!(alice_pda, bob_pda, "alice ≠ bob owner_pda");
     assert_ne!(bob_pda, carol_pda, "bob ≠ carol owner_pda");
@@ -96,27 +105,45 @@ fn three_distinct_users_get_three_distinct_owner_pdas() {
 }
 
 #[test]
+fn same_user_different_mints_get_different_pdas() {
+    // Per-(viewing_key, mint) derivation: a single user lending USDC and
+    // SOL must end up with TWO independent Kamino obligations. Without
+    // this, refresh_obligation has to walk both reserves on every op and
+    // positions can't be redeemed independently.
+    let h = fixed_hash(0x44);
+    let usdc_mint = Pubkey::new_from_array(USDC_MINT_BYTES);
+    let sol_mint = Pubkey::new_from_array([
+        6, 155, 136, 87, 254, 171, 129, 132, 251, 104, 127, 99, 70, 24, 192,
+        53, 218, 196, 57, 220, 26, 235, 59, 85, 152, 160, 240, 0, 0, 0, 0, 1,
+    ]);
+    let (usdc_pda, _) = derive_owner_pda(&ADAPTER_ID, &h, &usdc_mint);
+    let (sol_pda, _) = derive_owner_pda(&ADAPTER_ID, &h, &sol_mint);
+    assert_ne!(usdc_pda, sol_pda, "same user, different mint → distinct PDA");
+}
+
+#[test]
 fn owner_pda_changes_with_one_bit_flip() {
+    let mint = Pubkey::new_from_array(USDC_MINT_BYTES);
     let mut h = fixed_hash(0x22);
-    let (orig_pda, _) = derive_owner_pda(&ADAPTER_ID, &h);
+    let (orig_pda, _) = derive_owner_pda(&ADAPTER_ID, &h, &mint);
     // Flip a single bit in the viewing_pub_hash.
     h[0] ^= 0x01;
-    let (perturbed_pda, _) = derive_owner_pda(&ADAPTER_ID, &h);
+    let (perturbed_pda, _) = derive_owner_pda(&ADAPTER_ID, &h, &mint);
     assert_ne!(orig_pda, perturbed_pda);
 }
 
 #[test]
-fn owner_pda_seeds_match_prd_33_section_3_2() {
-    // PRD-33 §3.2 pins the seed list. If anyone reorders these seeds the
-    // SDK-derived owner_pda diverges from the on-chain derivation and every
-    // per-user deposit dies with `KaminoCpiFailed` (signer seeds wrong).
-    // Pinning the exact byte representation here makes that drift loud.
+fn owner_pda_seeds_match_extended_layout() {
+    // Pinned seed list: ["b402/v1", "adapter-owner", viewing_pub_hash, mint].
+    // SDK derivation must match byte-for-byte or every per-user deposit
+    // dies with KaminoCpiFailed (signer seeds wrong).
     let h = fixed_hash(0x33);
+    let mint = Pubkey::new_from_array(USDC_MINT_BYTES);
     let (expected_pda, expected_bump) = Pubkey::find_program_address(
-        &[b"b402/v1", b"adapter-owner", h.as_ref()],
+        &[b"b402/v1", b"adapter-owner", h.as_ref(), mint.as_ref()],
         &ADAPTER_ID,
     );
-    let (actual_pda, actual_bump) = derive_owner_pda(&ADAPTER_ID, &h);
+    let (actual_pda, actual_bump) = derive_owner_pda(&ADAPTER_ID, &h, &mint);
     assert_eq!(actual_pda, expected_pda);
     assert_eq!(actual_bump, expected_bump);
 }

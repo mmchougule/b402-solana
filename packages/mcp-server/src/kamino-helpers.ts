@@ -19,14 +19,12 @@ import {
   PublicKey,
   SystemProgram,
   Transaction,
-  sendAndConfirmTransaction,
   type AccountMeta,
 } from '@solana/web3.js';
 import {
   TOKEN_PROGRAM_ID,
   createAssociatedTokenAccountIdempotentInstruction,
   getAssociatedTokenAddressSync,
-  getOrCreateAssociatedTokenAccount,
 } from '@solana/spl-token';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -63,6 +61,43 @@ const ALT_PROGRAM = new PublicKey('AddressLookupTab1e1111111111111111111111111')
 const EXECUTE_DISC = Uint8Array.from([130, 221, 242, 154, 13, 193, 189, 29]);
 
 // ── small helpers ─────────────────────────────────────────────────────────────
+/**
+ * Send + confirm a tx without WebSocket subscriptions. web3.js's
+ * `sendAndConfirmTransaction` uses confirmTransaction's WS-based path,
+ * which on Helius free tier returns 429 on the WS upgrade after a few
+ * subs and never delivers the confirmation event — leaving txs to
+ * "expire" even when they Finalized 30s prior. Poll instead.
+ */
+async function sendAndPollConfirm(
+  conn: Connection,
+  tx: Transaction,
+  signers: Keypair[],
+  timeoutMs: number = 90_000,
+): Promise<string> {
+  const bh = await conn.getLatestBlockhash('confirmed');
+  tx.recentBlockhash = bh.blockhash;
+  tx.feePayer = signers[0].publicKey;
+  tx.sign(...signers);
+  const sig = await conn.sendRawTransaction(tx.serialize(), {
+    skipPreflight: false,
+    preflightCommitment: 'confirmed',
+    maxRetries: 3,
+  });
+  const start = Date.now();
+  let interval = 2000;
+  while (Date.now() - start < timeoutMs) {
+    const res = await conn.getSignatureStatuses([sig], { searchTransactionHistory: false });
+    const s = res.value[0];
+    if (s) {
+      if (s.err) throw new Error(`tx ${sig} failed: ${JSON.stringify(s.err)}`);
+      if (s.confirmationStatus === 'confirmed' || s.confirmationStatus === 'finalized') return sig;
+    }
+    await new Promise((r) => setTimeout(r, interval));
+    interval = Math.min(interval * 1.2, 5000);
+  }
+  throw new Error(`tx ${sig} not confirmed within ${timeoutMs / 1000}s`);
+}
+
 function findUtf8(buf: Buffer, needle: string): number {
   const b = Buffer.from(needle, 'utf8');
   for (let i = 0; i < buf.length - b.length; i++) {
@@ -101,9 +136,13 @@ export function obligationFarmPda(farm: PublicKey, obligation: PublicKey): Publi
   )[0];
 }
 
-export function deriveOwnerPda(adapter: PublicKey, hash: Buffer): PublicKey {
+/** Per-(viewing_key, mint) PDA — matches the adapter's `derive_owner_pda`
+ *  in programs/b402-kamino-adapter/src/lib.rs. Each lending position
+ *  keyed by liquidity mint gets its own Kamino UserMetadata + Obligation,
+ *  so positions across mints are structurally independent. */
+export function deriveOwnerPda(adapter: PublicKey, hash: Buffer, mint: PublicKey): PublicKey {
   return PublicKey.findProgramAddressSync(
-    [Buffer.from('b402/v1'), Buffer.from('adapter-owner'), hash], adapter,
+    [Buffer.from('b402/v1'), Buffer.from('adapter-owner'), hash, mint.toBuffer()], adapter,
   )[0];
 }
 
@@ -130,15 +169,21 @@ export interface ParsedReserve {
   reserveFarmCollateral: PublicKey;
 }
 
-/** Parse a Kamino reserve account's on-chain layout. The byte offsets here
- *  are derived from the kLend Reserve struct. Mainnet-USDC-tested. */
-export function parseReserve(data: Buffer): ParsedReserve {
-  const liquidityMint = new PublicKey(data.subarray(128, 160));
-  const reserveFarmCollateral = new PublicKey(data.subarray(64, 96));
-  let nameOff = findUtf8(data, 'USDC\0');
-  if (nameOff < 0) nameOff = findUtf8(data, 'USD Coin');
-  if (nameOff < 0) throw new Error('TokenInfo.name not found in reserve');
-  const tokenInfoOff = nameOff;
+/** Reserve struct field offsets shared with the SDK's kamino-discover. */
+const RESERVE_LIQUIDITY_MINT_OFFSET = 128;
+const RESERVE_FARM_COLLATERAL_OFFSET = 64;
+const RESERVE_TOKEN_INFO_NAME_OFFSET = 5032;
+
+/** Parse a Kamino reserve account into the per-reserve PDAs the adapter
+ *  needs. Uses fixed struct offsets only — no string-anchor search, so
+ *  it works for any mint (USDC, SOL, JitoSOL, BONK, …). The `market`
+ *  argument is required because the per-reserve sub-PDAs (liquidity
+ *  supply, collateral mint, etc.) are derived from `(market, mint)`. */
+export function parseReserve(data: Buffer, market: PublicKey): ParsedReserve {
+  const liquidityMint = new PublicKey(data.subarray(RESERVE_LIQUIDITY_MINT_OFFSET, RESERVE_LIQUIDITY_MINT_OFFSET + 32));
+  const reserveFarmCollateral = new PublicKey(data.subarray(RESERVE_FARM_COLLATERAL_OFFSET, RESERVE_FARM_COLLATERAL_OFFSET + 32));
+  const tokenInfoOff = RESERVE_TOKEN_INFO_NAME_OFFSET;
+  // Within TokenInfo: name(32) + heuristic(24) + maxAgePriceSeconds(8) + maxAgeTwapSeconds(8) + scopeConfig(...)
   const scopeOff = tokenInfoOff + 32 + 24 + 24;
   const swbOff = scopeOff + 52;
   const pythOff = swbOff + 68;
@@ -149,9 +194,9 @@ export function parseReserve(data: Buffer): ParsedReserve {
   };
   return {
     liquidityMint,
-    liquiditySupply: reservePda('reserve_liq_supply', MARKET, liquidityMint),
-    collateralMint: reservePda('reserve_coll_mint', MARKET, liquidityMint),
-    collateralReserveDestSupply: reservePda('reserve_coll_supply', MARKET, liquidityMint),
+    liquiditySupply: reservePda('reserve_liq_supply', market, liquidityMint),
+    collateralMint: reservePda('reserve_coll_mint', market, liquidityMint),
+    collateralReserveDestSupply: reservePda('reserve_coll_supply', market, liquidityMint),
     pyth: readPk(pythOff),
     switchboardPrice: readPk(swbOff),
     switchboardTwap: readPk(swbOff + 32),
@@ -174,23 +219,36 @@ export interface PerUserAccounts {
 export function deriveAllPerUser(
   spendingPub: bigint,
   reserve: ParsedReserve,
+  market: PublicKey,
 ): PerUserAccounts {
   const hash = spendingPubToHashBytes(spendingPub);
-  const ownerPda = deriveOwnerPda(KAMINO_ADAPTER, hash);
+  const ownerPda = deriveOwnerPda(KAMINO_ADAPTER, hash, reserve.liquidityMint);
   const isFarmAttached = !reserve.reserveFarmCollateral.equals(PublicKey.default);
+  const obl = obligationPda(ownerPda, market);
   return {
     ownerPda,
     userMetadata: userMetadataPda(ownerPda),
-    obligation: obligationPda(ownerPda, MARKET),
-    obligationFarm: isFarmAttached ? obligationFarmPda(reserve.reserveFarmCollateral, obligationPda(ownerPda, MARKET)) : KLEND,
+    obligation: obl,
+    obligationFarm: isFarmAttached ? obligationFarmPda(reserve.reserveFarmCollateral, obl) : KLEND,
     reserveFarmState: isFarmAttached ? reserve.reserveFarmCollateral : KLEND,
+    // Per-mint user ATA owned by ownerPda — was named `ownerUsdcAta` for the
+    // initial USDC-only flow but works for any mint via `reserve.liquidityMint`.
     ownerUsdcAta: getAssociatedTokenAddressSync(reserve.liquidityMint, ownerPda, true),
     isFarmAttached,
   };
 }
 
 // ── ALT bootstrap ─────────────────────────────────────────────────────────────
-const ALT_PERSIST_DEFAULT = path.join(os.homedir(), '.b402-solana', 'kamino-mainnet-alt.json');
+/** Persist one ALT per (market, mint) tuple. Different markets/mints have
+ *  disjoint reserve sub-PDAs; sharing one ALT across mints would force
+ *  re-extends on every switch, eating the 256-entry ALT cap fast. */
+function altPersistPathFor(market: PublicKey, mint: PublicKey): string {
+  return path.join(
+    os.homedir(),
+    '.b402-solana',
+    `kamino-mainnet-alt-${market.toBase58().slice(0, 8)}-${mint.toBase58().slice(0, 8)}.json`,
+  );
+}
 
 /** Load (or create + extend) the persisted ALT for Kamino lend/redeem. The
  *  ALT contains all the static and per-user accounts that the lend/redeem
@@ -198,6 +256,8 @@ const ALT_PERSIST_DEFAULT = path.join(os.homedir(), '.b402-solana', 'kamino-main
 export async function ensureAlt(args: {
   conn: Connection;
   admin: Keypair;
+  market: PublicKey;
+  reserveAddr: PublicKey;
   reserve: ParsedReserve;
   perUser: PerUserAccounts;
   pendingInputsPda: PublicKey;
@@ -214,7 +274,7 @@ export async function ensureAlt(args: {
   };
   altPersistPath?: string;
 }): Promise<PublicKey> {
-  const persistPath = args.altPersistPath ?? ALT_PERSIST_DEFAULT;
+  const persistPath = args.altPersistPath ?? altPersistPathFor(args.market, args.reserve.liquidityMint);
   fs.mkdirSync(path.dirname(persistPath), { recursive: true });
 
   const NULLIFIER_CPI_AUTHORITY = PublicKey.findProgramAddressSync(
@@ -238,7 +298,7 @@ export async function ensureAlt(args: {
     VERIFIER_A,
     KAMINO_ADAPTER, args.adapterAuthority,
     args.adapterInTa, args.adapterOutTa,
-    RESERVE, MARKET, lendingMarketAuthorityPda(MARKET),
+    args.reserveAddr, args.market, lendingMarketAuthorityPda(args.market),
     args.reserve.liquiditySupply, args.reserve.collateralMint,
     args.reserve.collateralReserveDestSupply,
     args.reserve.pyth ?? KLEND, args.reserve.switchboardPrice ?? KLEND,
@@ -276,7 +336,7 @@ export async function ensureAlt(args: {
     });
     altPubkey = fresh;
     altIsFresh = true;
-    await sendAndConfirmTransaction(args.conn, new Transaction().add(createIx), [args.admin], { commitment: 'finalized' });
+    await sendAndPollConfirm(args.conn, new Transaction().add(createIx), [args.admin]);
     // Wait for ALT to be finalized + visible.
     for (let i = 0; i < 60; i++) {
       const info = await args.conn.getAccountInfo(altPubkey, 'finalized');
@@ -308,7 +368,7 @@ export async function ensureAlt(args: {
         payer: args.admin.publicKey, authority: args.admin.publicKey, lookupTable: altPubkey,
         addresses: targets.slice(i, i + CHUNK),
       });
-      await sendAndConfirmTransaction(args.conn, new Transaction().add(ext), [args.admin], { commitment: 'confirmed' });
+      await sendAndPollConfirm(args.conn, new Transaction().add(ext), [args.admin]);
     }
     // Brief wait so the next tx can resolve via the new entries.
     await new Promise((r) => setTimeout(r, 4000));
@@ -330,7 +390,7 @@ export async function ensurePerUserSetup(args: {
   let adapterFunded = false;
   const aaBal = await args.conn.getBalance(args.adapterAuthority);
   if (aaBal < 0.05 * LAMPORTS_PER_SOL) {
-    await sendAndConfirmTransaction(args.conn,
+    await sendAndPollConfirm(args.conn,
       new Transaction().add(
         SystemProgram.transfer({
           fromPubkey: args.admin.publicKey,
@@ -338,7 +398,7 @@ export async function ensurePerUserSetup(args: {
           lamports: 0.5 * LAMPORTS_PER_SOL,
         }),
       ),
-      [args.admin], { commitment: 'confirmed' },
+      [args.admin],
     );
     adapterFunded = true;
   }
@@ -351,7 +411,7 @@ export async function ensurePerUserSetup(args: {
       args.admin.publicKey, args.perUser.ownerUsdcAta,
       args.perUser.ownerPda, args.reserve.liquidityMint,
     );
-    await sendAndConfirmTransaction(args.conn, new Transaction().add(createAtaIx), [args.admin], { commitment: 'confirmed' });
+    await sendAndPollConfirm(args.conn, new Transaction().add(createAtaIx), [args.admin]);
     ataCreated = true;
   }
 
@@ -366,13 +426,24 @@ export async function ensureAdapterScratchAtas(args: {
   inMint: PublicKey;
   outMint: PublicKey;
 }): Promise<{ adapterInTa: PublicKey; adapterOutTa: PublicKey }> {
-  const inAcc = await getOrCreateAssociatedTokenAccount(
-    args.conn, args.admin, args.inMint, args.adapterAuthority, true,
-  );
-  const outAcc = await getOrCreateAssociatedTokenAccount(
-    args.conn, args.admin, args.outMint, args.adapterAuthority, true,
-  );
-  return { adapterInTa: inAcc.address, adapterOutTa: outAcc.address };
+  const inAta = getAssociatedTokenAddressSync(args.inMint, args.adapterAuthority, true);
+  const outAta = getAssociatedTokenAddressSync(args.outMint, args.adapterAuthority, true);
+  // Idempotent create — both ATAs in one tx if either is missing. Anyone
+  // can pay rent for an ATA owned by anyone else (PDA in this case).
+  const ixs = [];
+  const [inInfo, outInfo] = await Promise.all([
+    args.conn.getAccountInfo(inAta), args.conn.getAccountInfo(outAta),
+  ]);
+  if (!inInfo) ixs.push(createAssociatedTokenAccountIdempotentInstruction(
+    args.admin.publicKey, inAta, args.adapterAuthority, args.inMint,
+  ));
+  if (!outInfo) ixs.push(createAssociatedTokenAccountIdempotentInstruction(
+    args.admin.publicKey, outAta, args.adapterAuthority, args.outMint,
+  ));
+  if (ixs.length > 0) {
+    await sendAndPollConfirm(args.conn, new Transaction().add(...ixs), [args.admin]);
+  }
+  return { adapterInTa: inAta, adapterOutTa: outAta };
 }
 
 // ── ix data builders (deposit / withdraw) ─────────────────────────────────────
@@ -411,15 +482,17 @@ export function buildAdapterIxData(inAmount: bigint, expectedOut: bigint, payloa
 
 // ── remaining_accounts builders ──────────────────────────────────────────────
 export function buildDepositRemainingAccounts(args: {
+  market: PublicKey;
+  reserveAddr: PublicKey;
   reserve: ParsedReserve;
   perUser: PerUserAccounts;
 }): AccountMeta[] {
   const { reserve, perUser } = args;
   const isFarm = perUser.isFarmAttached;
   return [
-    { pubkey: RESERVE, isSigner: false, isWritable: true },
-    { pubkey: MARKET, isSigner: false, isWritable: false },
-    { pubkey: lendingMarketAuthorityPda(MARKET), isSigner: false, isWritable: false },
+    { pubkey: args.reserveAddr, isSigner: false, isWritable: true },
+    { pubkey: args.market, isSigner: false, isWritable: false },
+    { pubkey: lendingMarketAuthorityPda(args.market), isSigner: false, isWritable: false },
     { pubkey: reserve.liquiditySupply, isSigner: false, isWritable: true },
     { pubkey: reserve.collateralMint, isSigner: false, isWritable: true },
     { pubkey: reserve.collateralReserveDestSupply, isSigner: false, isWritable: true },
@@ -442,16 +515,18 @@ export function buildDepositRemainingAccounts(args: {
 }
 
 export function buildWithdrawRemainingAccounts(args: {
+  market: PublicKey;
+  reserveAddr: PublicKey;
   reserve: ParsedReserve;
   perUser: PerUserAccounts;
 }): AccountMeta[] {
   const { reserve, perUser } = args;
   const isFarm = perUser.isFarmAttached;
   return [
-    { pubkey: RESERVE, isSigner: false, isWritable: true },                                  // 0
+    { pubkey: args.reserveAddr, isSigner: false, isWritable: true },                         // 0
     { pubkey: perUser.obligation, isSigner: false, isWritable: true },                       // 1
-    { pubkey: MARKET, isSigner: false, isWritable: false },                                  // 2
-    { pubkey: lendingMarketAuthorityPda(MARKET), isSigner: false, isWritable: false },       // 3
+    { pubkey: args.market, isSigner: false, isWritable: false },                             // 2
+    { pubkey: lendingMarketAuthorityPda(args.market), isSigner: false, isWritable: false },  // 3
     { pubkey: reserve.collateralReserveDestSupply, isSigner: false, isWritable: true },      // 4
     { pubkey: reserve.collateralMint, isSigner: false, isWritable: true },                   // 5
     { pubkey: reserve.liquiditySupply, isSigner: false, isWritable: true },                  // 6

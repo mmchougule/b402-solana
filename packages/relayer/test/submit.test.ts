@@ -43,6 +43,18 @@ function fakeConnection(overrides: Partial<{
       value: { err: confirmErr },
       context: { slot },
     })),
+    // pollForConfirmation in submit.ts uses getSignatureStatuses now
+    // (replaces the WS-based confirmTransaction). Fake confirms on first
+    // poll so tests don't sleep through the backoff loop.
+    getSignatureStatuses: vi.fn(async (_sigs: string[]) => ({
+      value: [{
+        slot,
+        confirmations: 1,
+        err: confirmErr,
+        confirmationStatus: 'confirmed',
+      }],
+      context: { slot },
+    })),
     getSlot: vi.fn(async () => slot),
     getBalance: vi.fn(async () => 1_000_000_000),
   } as unknown as Connection;

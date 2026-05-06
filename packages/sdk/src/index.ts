@@ -56,6 +56,29 @@ export {
   type KaminoPerUserAccounts,
 } from './kamino.js';
 
+// On-chain reserve discovery (no static reserve map).
+export {
+  KLEND_PROGRAM_ID,
+  RESERVE_DISCRIMINATOR,
+  LENDING_MARKET_DISCRIMINATOR,
+  RESERVE_ACCOUNT_SIZE,
+  LENDING_MARKET_ACCOUNT_SIZE,
+  RESERVE_LENDING_MARKET_OFFSET,
+  RESERVE_FARM_COLLATERAL_OFFSET,
+  RESERVE_LIQUIDITY_MINT_OFFSET,
+  RESERVE_TOKEN_INFO_NAME_OFFSET,
+  RESERVE_AVAILABLE_AMOUNT_OFFSET,
+  RESERVE_BORROWED_AMOUNT_SF_OFFSET,
+  discoverKaminoMarkets,
+  discoverKaminoReserves,
+  findKaminoReserveByMint,
+  findAllKaminoReservesByMint,
+  pickBestKaminoReserveByMint,
+  type DiscoveredReserve,
+  type DiscoveredMarket,
+  type DiscoverReservesOptions,
+} from './kamino-discover.js';
+
 /** Solana hard tx-size cap. */
 export const MAX_TX_SIZE = 1232;
 /** Soft ceiling for adapter action_payload. Pool recomputes keccak over it. */
