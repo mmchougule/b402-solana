@@ -25,11 +25,12 @@ import { leToFrReduced, type SpendableNote } from '@b402ai/solana-shared';
 import type { B402Context } from '../context.js';
 import type { PrivateRedeemInput } from '../schemas.js';
 import {
-  POOL, KAMINO_ADAPTER, RESERVE, USDC,
+  POOL, KAMINO_ADAPTER, USDC,
   parseReserve, deriveAllPerUser, ensureAlt, ensurePerUserSetup,
   ensureAdapterScratchAtas, adapterAuthorityPda,
   buildWithdrawPayload, buildAdapterIxData, buildWithdrawRemainingAccounts,
 } from '../kamino-helpers.js';
+import { pickBestKaminoReserveByMint } from '@b402ai/solana';
 
 function loadKeypair(): Keypair {
   const p = path.resolve(
@@ -56,20 +57,22 @@ export async function handlePrivateRedeem(
 
   const conn = new Connection(ctx.rpcUrl, 'confirmed');
   const admin = loadKeypair();
-  const inMint = USDC;
+  const inMint = input.mint ? new PublicKey(input.mint) : USDC;
 
-  // SDK 0.0.20 routes commit_inputs through hosted relayer's
-  // /relay/pool-ix endpoint — user wallet stays off-chain.
-
-  // 1. Read + parse Kamino reserve.
-  const reserveAcct = await conn.getAccountInfo(RESERVE);
-  if (!reserveAcct) throw new Error(`Kamino USDC reserve ${RESERVE.toBase58()} not on chain`);
-  const reserve = parseReserve(reserveAcct.data);
-  const outMint = reserve.collateralMint; // kUSDC (the input for redeem)
+  // 1. Discover the (market, reserve) tuple — must match what was used at lend.
+  const marketFilter = input.market ? { market: new PublicKey(input.market) } : {};
+  const picked = await pickBestKaminoReserveByMint(conn, inMint, marketFilter);
+  if (!picked) {
+    throw new Error(`no Kamino reserve found for mint ${inMint.toBase58()}${input.market ? ` in market ${input.market}` : ''}`);
+  }
+  const reserveAddr = picked.best.address;
+  const market = picked.best.market;
+  const reserve = parseReserve(picked.best.data, market);
+  const outMint = reserve.collateralMint; // collateral mint (input for redeem — voucher being burned)
 
   // 2. Per-user accounts.
   const spendingPub = ctx.b402.wallet.spendingPub;
-  const perUser = deriveAllPerUser(spendingPub, reserve);
+  const perUser = deriveAllPerUser(spendingPub, reserve, market);
   const adapterAuthority = adapterAuthorityPda();
 
   // 3. Reverse adapter scratch ATAs: adapter_in_ta = kUSDC, adapter_out_ta = USDC.
@@ -100,10 +103,10 @@ export async function handlePrivateRedeem(
     conn, admin, outMint /* kUSDC */, relayerPubkey, true,
   );
 
-  // 6. ALT (extends with per-user PDAs lazily).
+  // 6. ALT (extends with per-user PDAs lazily, persisted per (market, mint)).
   const [pendingInputsPda] = derivePendingInputsPda(POOL, perUser.ownerPda.toBuffer());
   const altPubkey = await ensureAlt({
-    conn, admin, reserve, perUser, pendingInputsPda,
+    conn, admin, market, reserveAddr, reserve, perUser, pendingInputsPda,
     adapterAuthority,
     adapterInTa: wAdapterInTa, adapterOutTa: wAdapterOutTa,
     outMint: inMint, // for ALT purposes, want USDC + kUSDC token configs both included
@@ -135,9 +138,9 @@ export async function handlePrivateRedeem(
   const ktIn = redeemNote.value;
 
   // 8. Build adapter ix + ra_withdraw_per_user.
-  const actionPayload = buildWithdrawPayload(RESERVE, ktIn);
+  const actionPayload = buildWithdrawPayload(reserveAddr, ktIn);
   const adapterIxData = buildAdapterIxData(ktIn, 0n, actionPayload);
-  const remainingAccounts = buildWithdrawRemainingAccounts({ reserve, perUser });
+  const remainingAccounts = buildWithdrawRemainingAccounts({ market, reserveAddr, reserve, perUser });
 
   // 9. Pool's USDC vault delta — actual USDC redeemed.
   const usdcVaultPda = vaultPda(POOL, inMint);

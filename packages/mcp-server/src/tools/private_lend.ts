@@ -1,19 +1,18 @@
 /**
- * private_lend — atomic private deposit into Kamino V2 USDC reserve.
+ * private_lend — atomic private deposit into a Kamino V2 reserve.
  *
- * Spends a shielded USDC note + deposits into Kamino + mints a kUSDC
- * voucher commitment. Each viewing key gets its own Kamino Obligation
- * (PRD-33 per-user obligation, derived from owner_pda). Mainnet only.
+ * Caller picks a mint (default USDC). The reserve is discovered on-chain:
+ * if multiple Kamino markets list that mint, the deepest by available
+ * supply wins, and alternates are returned in the response so the agent
+ * can switch markets next time. Pass `market` to pin a specific one.
  *
- * One-time setup performed automatically on first call:
- *   - Pre-fund adapter authority (~0.5 SOL) for Kamino UserMetadata +
- *     Obligation rent
- *   - Create owner_pda's USDC ATA (Kamino enforces token::authority ==
- *     obligationOwner on deposit)
- *   - Create / extend the persisted Address Lookup Table to fit all
- *     account refs in the 1232-byte tx cap
+ * Each viewing key gets its own Kamino Obligation per (mint, market)
+ * tuple. Mainnet only.
  *
- * Subsequent calls reuse all of the above.
+ * Auto-setup (cached per (mint, market) tuple):
+ *   - Pre-fund adapter authority for Kamino UserMetadata + Obligation rent
+ *   - Create owner_pda's <mint> ATA (Kamino requires token::authority == obligationOwner)
+ *   - Create / extend the persisted Address Lookup Table for the (market, reserve) tuple
  */
 
 import * as fs from 'node:fs';
@@ -24,13 +23,14 @@ import { createRpc } from '@lightprotocol/stateless.js';
 import {
   poolConfigPda, adapterRegistryPda, treeStatePda,
   tokenConfigPda, vaultPda, derivePendingInputsPda,
+  pickBestKaminoReserveByMint, findAllKaminoReservesByMint,
 } from '@b402ai/solana';
 import { leToFrReduced, type SpendableNote } from '@b402ai/solana-shared';
 
 import type { B402Context } from '../context.js';
 import type { PrivateLendInput } from '../schemas.js';
 import {
-  POOL, KAMINO_ADAPTER, RESERVE, USDC,
+  POOL, KAMINO_ADAPTER, USDC,
   parseReserve, deriveAllPerUser, ensureAlt, ensurePerUserSetup,
   ensureAdapterScratchAtas, adapterAuthorityPda,
   buildDepositPayload, buildAdapterIxData, buildDepositRemainingAccounts,
@@ -49,8 +49,13 @@ export async function handlePrivateLend(
 ): Promise<{
   signature: string;
   voucherDepositId: string;
+  market: string;
+  marketAlternates?: { market: string; reserve: string; availableAmount: string }[];
+  reserve: string;
+  symbol: string;
   obligationPda: string;
   ownerPda: string;
+  inMint: string;
   inAmount: string;
   outVaultDelta: string;
   setupTxs: string[];
@@ -59,31 +64,29 @@ export async function handlePrivateLend(
     throw new Error(`private_lend is mainnet-only (current cluster: ${ctx.cluster}). Kamino reserves don't exist on devnet/localnet.`);
   }
 
-  // ready() lazily inits the wallet + provers — must run before any
-  // ctx.b402.wallet access (b402.wallet getter throws otherwise).
   await ctx.b402.ready();
 
   const conn = new Connection(ctx.rpcUrl, 'confirmed');
   const admin = loadKeypair();
-  const inMint = USDC;
+  const inMint = input.mint ? new PublicKey(input.mint) : USDC;
   const lendAmount = BigInt(input.amount);
 
-  // SDK 0.0.20 routes commit_inputs through the hosted relayer's
-  // /relay/pool-ix endpoint when configured, so the user wallet stays
-  // off-chain. No monkey-patch needed; just call privateLend below.
-
-  // 1. Read + parse the Kamino USDC reserve.
-  const reserveAcct = await conn.getAccountInfo(RESERVE);
-  if (!reserveAcct) throw new Error(`Kamino USDC reserve ${RESERVE.toBase58()} not on chain`);
-  const reserve = parseReserve(reserveAcct.data);
-  if (!reserve.liquidityMint.equals(USDC)) {
-    throw new Error(`reserve liquidity mint ${reserve.liquidityMint.toBase58()} != USDC`);
+  // 1. Discover the Kamino reserve for this mint. If `market` is pinned,
+  //    only consider that market; otherwise scan all markets and pick
+  //    the deepest by available_amount.
+  const marketFilter = input.market ? { market: new PublicKey(input.market) } : {};
+  const picked = await pickBestKaminoReserveByMint(conn, inMint, marketFilter);
+  if (!picked) {
+    throw new Error(`no Kamino reserve found for mint ${inMint.toBase58()}${input.market ? ` in market ${input.market}` : ''}`);
   }
-  const outMint = reserve.collateralMint; // kUSDC
+  const reserveAddr = picked.best.address;
+  const market = picked.best.market;
+  const reserve = parseReserve(picked.best.data, market);
+  const outMint = reserve.collateralMint; // collateral mint (e.g. kUSDC, kSOL)
 
-  // 2. Derive per-user accounts from the SDK's spending pubkey.
+  // 2. Derive per-user accounts.
   const spendingPub = ctx.b402.wallet.spendingPub;
-  const perUser = deriveAllPerUser(spendingPub, reserve);
+  const perUser = deriveAllPerUser(spendingPub, reserve, market);
   const adapterAuthority = adapterAuthorityPda();
 
   const setupTxs: string[] = [];
@@ -100,10 +103,11 @@ export async function handlePrivateLend(
   if (setup.adapterFunded) setupTxs.push('adapter-funded');
   if (setup.ataCreated) setupTxs.push('owner-ata-created');
 
-  // 5. ALT (lazily extended).
+
+  // 5. ALT (lazily extended, persisted per (market, mint) tuple).
   const [pendingInputsPda] = derivePendingInputsPda(POOL, perUser.ownerPda.toBuffer());
   const altPubkey = await ensureAlt({
-    conn, admin, reserve, perUser, pendingInputsPda,
+    conn, admin, market, reserveAddr, reserve, perUser, pendingInputsPda,
     adapterAuthority, adapterInTa, adapterOutTa, outMint,
     poolHelpers: { poolConfigPda, adapterRegistryPda, treeStatePda, tokenConfigPda, vaultPda },
   });
@@ -143,9 +147,9 @@ export async function handlePrivateLend(
   const actualLendAmount = note.value;
 
   // 7. Build the adapter ix + remaining_accounts.
-  const actionPayload = buildDepositPayload(RESERVE, actualLendAmount);
+  const actionPayload = buildDepositPayload(reserveAddr, actualLendAmount);
   const adapterIxData = buildAdapterIxData(actualLendAmount, 0n, actionPayload);
-  const remainingAccounts = buildDepositRemainingAccounts({ reserve, perUser });
+  const remainingAccounts = buildDepositRemainingAccounts({ market, reserveAddr, reserve, perUser });
 
   // 8. Pool's kUSDC vault delta (informational — should be 0 for stateful adapter).
   const outVaultPda = vaultPda(POOL, outMint);
@@ -176,11 +180,25 @@ export async function handlePrivateLend(
   const postInfo = await conn.getAccountInfo(outVaultPda);
   const postKUsdc = postInfo ? BigInt(postInfo.data.readBigUInt64LE(64)) : 0n;
 
+  // Surface the runner-up markets so the caller can switch next time
+  // without re-discovering. Top 5 only — full list is available via
+  // list_kamino_reserves.
+  const marketAlternates = picked.alternates.slice(0, 5).map((a) => ({
+    market: a.market.toBase58(),
+    reserve: a.address.toBase58(),
+    availableAmount: a.availableAmount.toString(),
+  }));
+
   return {
     signature: lendRes.signature,
     voucherDepositId: lendRes.outNote.commitment.toString(16).padStart(64, '0').slice(0, 16),
+    market: market.toBase58(),
+    ...(marketAlternates.length > 0 ? { marketAlternates } : {}),
+    reserve: reserveAddr.toBase58(),
+    symbol: picked.best.symbol,
     obligationPda: perUser.obligation.toBase58(),
     ownerPda: perUser.ownerPda.toBase58(),
+    inMint: inMint.toBase58(),
     inAmount: actualLendAmount.toString(),
     outVaultDelta: (postKUsdc - preKUsdc).toString(),
     setupTxs,

@@ -95,14 +95,18 @@ export const watchIncomingInput = z
 
 export const privateLendInput = z
   .object({
-    amount: U64String.describe('USDC amount to lend, in raw units (6 decimals — e.g. 100000 = 0.10 USDC, 1000000 = 1.00 USDC). Mainnet only. The caller must already hold a spendable shielded USDC note ≥ this amount; if a note matching the exact amount exists, it will be used, otherwise the most-recent spendable USDC note is selected. First call by a viewing key pays a one-time ~0.04 SOL for Kamino UserMetadata + Obligation rent (charged to adapter authority pre-funded by the user).'),
-    leafIndex: z.number().int().nonnegative().optional().describe('Optional Merkle leaf index of the specific USDC note to spend. Omit to auto-pick (exact-amount match → most-recent fallback).'),
+    amount: U64String.describe('Amount to lend in raw units (smallest token denomination). E.g. for USDC (6 decimals), 1000000 = 1.00 USDC; for SOL (9 decimals), 1000000000 = 1.00 SOL. Caller must hold a spendable shielded note ≥ this amount in `mint`.'),
+    mint: Base58Pubkey.optional().describe('SPL mint to lend. Default USDC mainnet (EPjFWdd5...). Pass any mint Kamino supports (SOL, JitoSOL, USDT, BONK, etc.) — the reserve is discovered on-chain via `pickBestKaminoReserveByMint`.'),
+    market: Base58Pubkey.optional().describe('Pin a specific Kamino LendingMarket. Without this, the reserve with the largest available_amount across all markets wins; the alternates are returned in the response.'),
+    leafIndex: z.number().int().nonnegative().optional().describe('Optional Merkle leaf index of the specific note to spend. Omit to auto-pick (exact-amount match → most-recent fallback).'),
   })
   .strict();
 
 export const privateRedeemInput = z
   .object({
-    leafIndex: z.number().int().nonnegative().optional().describe('Optional Merkle leaf index of the specific kUSDC voucher note to burn. Omit to use the most-recent. Each prior `private_lend` mints a kUSDC voucher commitment of value == lend amount; redeem burns one and unlocks the deposited USDC plus accrued interest from the per-user obligation.'),
+    mint: Base58Pubkey.optional().describe('Underlying mint of the position to redeem. Default USDC mainnet. Must match the mint that was lent.'),
+    market: Base58Pubkey.optional().describe('Pin a specific Kamino LendingMarket (matching the one used at lend time). Without this, the deepest reserve for the mint is used.'),
+    leafIndex: z.number().int().nonnegative().optional().describe('Optional Merkle leaf index of the specific voucher note to burn. Omit to use the most-recent.'),
   })
   .strict();
 

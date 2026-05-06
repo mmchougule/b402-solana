@@ -46,7 +46,16 @@ export async function buildServer() {
     trustProxy: true,
   });
 
-  const connection = new Connection(cfg.rpcUrl, 'confirmed');
+  // confirmTransactionInitialTimeout = how long web3.js waits for the
+  // first confirmation before declaring the tx unconfirmed. The default
+  // (~30s) is too tight for current mainnet — Kamino lend's commit_inputs
+  // sub-tx can take 25-40s under typical Helius load and the strict 30s
+  // races the network. 90s gives enough buffer that the relayer surfaces
+  // the actual signature back to the SDK before timing out.
+  const connection = new Connection(cfg.rpcUrl, {
+    commitment: 'confirmed',
+    confirmTransactionInitialTimeout: 90_000,
+  });
   const auth = new Authenticator(cfg);
   const submitter = new RpcSubmitter({
     connection,
