@@ -119,19 +119,30 @@ pub mod b402_percolator_adapter {
         }
     }
 
-    /// Allocate + initialize the per-slab `perp_mapping` PDA.
+    /// Step 1 of the per-slab `perp_mapping` bootstrap.
     ///
-    /// One-shot. Caller pays rent. The adapter signs `create_account` as
-    /// the PDA via `invoke_signed`, allocating exactly
-    /// `PERP_MAPPING_ACCOUNT_LEN` (= 81_968 B) and assigning ownership to
-    /// this program. Idempotent: reverts cleanly if already initialized.
+    /// Allocates the PDA at `MAX_PERMITTED_DATA_INCREASE` (10,240 B), funds
+    /// it with rent for the FULL target size (`PERP_MAPPING_ACCOUNT_LEN` =
+    /// 81,968 B), and assigns ownership to this program. The caller then
+    /// follows with N × `grow_mapping` ixs to reach the target size —
+    /// Solana caps each ix's data growth at 10,240 B, so N = 8 grows
+    /// (81_968 - 10_240 = 71_728 ≈ 7 × 10_240 + 168) bring the account
+    /// to its final size.
     ///
-    /// Must be called once per slab before the first `execute(OpenPosition)`
-    /// for that slab. The fork harness + slice 4-γ SDK helper invoke this
-    /// directly; the production pool's adapt_execute path will fold it into
-    /// a lazy-init step (PRD-36 §8 follow-up).
+    /// Single-tx pattern (the SDK helper batches all 9 ixs together):
+    /// ```ignore
+    /// init_mapping(slab) → create at 10_240
+    /// grow_mapping(slab) × 8  → realloc by +10_240, capped at 81_968
+    /// ```
+    ///
+    /// Idempotent: if the account already exists with the right size,
+    /// `init_mapping` reverts cleanly via `create_account`'s
+    /// already-in-use check; `grow_mapping` is a no-op once the account
+    /// reaches `PERP_MAPPING_ACCOUNT_LEN`.
     pub fn init_mapping(ctx: Context<InitMapping>) -> Result<()> {
-        use anchor_lang::solana_program::{program::invoke_signed, system_instruction};
+        use anchor_lang::solana_program::{
+            entrypoint::MAX_PERMITTED_DATA_INCREASE, program::invoke_signed, system_instruction,
+        };
         use crate::mapping::PERP_MAPPING_ACCOUNT_LEN;
 
         let mapping_acc = &ctx.accounts.perp_mapping;
@@ -146,13 +157,18 @@ pub mod b402_percolator_adapter {
             &[bump],
         ];
 
+        // Initial allocation = MAX_PERMITTED_DATA_INCREASE so we max out the
+        // first ix's growth budget (the largest single create can be is
+        // 10_240). Rent is funded for the FULL target — top-up after grows
+        // would otherwise bloat the wire and complicate the SDK helper.
+        let initial_size = core::cmp::min(MAX_PERMITTED_DATA_INCREASE, PERP_MAPPING_ACCOUNT_LEN);
         let rent = anchor_lang::solana_program::rent::Rent::get()?
             .minimum_balance(PERP_MAPPING_ACCOUNT_LEN);
         let create_ix = system_instruction::create_account(
             payer.key,
             mapping_acc.key,
             rent,
-            PERP_MAPPING_ACCOUNT_LEN as u64,
+            initial_size as u64,
             &crate::ID,
         );
         invoke_signed(
@@ -164,15 +180,31 @@ pub mod b402_percolator_adapter {
             ],
             &[seeds],
         )?;
+        Ok(())
+    }
 
-        // Header init: zero everything (PerpMapping::from_bytes accepts an
-        // all-zero account as "fresh empty"; len + count both 0).
-        let mut data = mapping_acc.try_borrow_mut_data()?;
-        debug_assert!(data.iter().all(|b| *b == 0));
-        // Future: write a layout-version sentinel here so we can rev the
-        // mapping format without losing existing accounts. v1 keeps it
-        // implicit (all zeros = v1 fresh).
-        let _ = &mut *data;
+    /// Step 2 of the per-slab `perp_mapping` bootstrap. Idempotent.
+    ///
+    /// Grows the account by `min(MAX_PERMITTED_DATA_INCREASE, remaining)`,
+    /// capped at `PERP_MAPPING_ACCOUNT_LEN`. Caller submits this ix N
+    /// times (N = 8 for the 81_968 B target) in the same tx as
+    /// `init_mapping` — each ix independently reaches its 10_240 B growth
+    /// budget.
+    ///
+    /// Once the account is at full size, this is a no-op (returns Ok).
+    /// That makes it safe to call after restart even if the boot harness
+    /// previously crashed mid-bootstrap.
+    pub fn grow_mapping(ctx: Context<GrowMapping>) -> Result<()> {
+        use anchor_lang::solana_program::entrypoint::MAX_PERMITTED_DATA_INCREASE;
+        use crate::mapping::PERP_MAPPING_ACCOUNT_LEN;
+
+        let mapping_acc = &ctx.accounts.perp_mapping;
+        let cur = mapping_acc.data_len();
+        if cur >= PERP_MAPPING_ACCOUNT_LEN {
+            return Ok(()); // already at full size; idempotent no-op.
+        }
+        let next = core::cmp::min(cur + MAX_PERMITTED_DATA_INCREASE, PERP_MAPPING_ACCOUNT_LEN);
+        mapping_acc.realloc(next, true)?;
         Ok(())
     }
 }
@@ -193,6 +225,23 @@ pub struct InitMapping<'info> {
     )]
     pub perp_mapping: AccountInfo<'info>,
     pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct GrowMapping<'info> {
+    /// CHECK: slab pubkey is the seed for the mapping PDA derivation. Not
+    /// dereferenced here — `init_mapping` already pinned the slab on
+    /// account creation, and `execute()` re-validates via slab MAGIC.
+    pub slab: AccountInfo<'info>,
+    /// CHECK: must be owned by this program (create_account was the
+    /// gating check). realloc is bounded by Solana to +10_240 per ix.
+    #[account(
+        mut,
+        seeds = [SEED_B402, crate::pda::SEED_PERP_MAPPING, slab.key().as_ref()],
+        bump,
+        owner = crate::ID,
+    )]
+    pub perp_mapping: AccountInfo<'info>,
 }
 
 /// Account struct for `execute`. Variant-specific accounts (slab,

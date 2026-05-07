@@ -29,7 +29,7 @@ anchor-spl.workspace = true
 # compile time for `size_of` / `offset_of` introspection of the slab's
 # Account table and MarketConfig fields; the lib is no_std + no runtime
 # deps and embeds cleanly into the BPF binary.
-percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "a946e5508fcfe1bc250845a98a85ef614fdebb99" }
+percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "f6b13f5751a11176afd070f6e89c6aaa77a886f1" }
 bytemuck = { workspace = true }
 
 [dev-dependencies]

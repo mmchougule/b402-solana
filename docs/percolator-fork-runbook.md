@@ -28,49 +28,73 @@ percolator deployments (Toly hasn't shipped either yet).
 
 | Step | Status |
 |---|---|
-| Boot script | ✅ written |
-| Bootstrap script | ✅ runs end-to-end on the fork (slab + InitMarket + KeeperCrank + admin mint + TopUpInsurance + matcher_ctx + InitLP + matcher vAMM init); emits `/tmp/percolator-market.json` |
-| Adapter-direct probe | ⚠️ runs against the bootstrapped market through `init_mapping`; blocked at the 10,240-byte CPI realloc limit when the adapter's `system_instruction::create_account` CPI tries to allocate the 81,968-byte `perp_mapping` account |
-| Full pool→adapter e2e | ⏸ blocked on `init_mapping` fix |
+| Boot script | ✅ |
+| Bootstrap script | ✅ end-to-end |
+| Adapter-direct probe | ✅ **GREEN — position opened on-chain** |
+| Full pool→adapter e2e (slice 5-γ) | next |
 
-## Open issue: `init_mapping` CPI realloc limit
+### Probe success — finalized tx log
 
-`programs/b402-percolator-adapter/src/lib.rs::init_mapping` allocates the
-per-slab `perp_mapping` PDA (`HEADER_SIZE + 2048 × 40 = 81,968 B`) via a
-single `system_instruction::create_account` invoke_signed. Solana's
-sBPF runtime caps inner-ix data growth at `MAX_PERMITTED_DATA_INCREASE
-= 10_240`, so a single CPI create at 81,968 B fails with
-`Failed to reallocate account data`.
+```
+[open] user_idx=1 principal=10500000 size=1000 lp=0 ok
+sig: 2L6xAduAenkrpzA6sJtnDwqKGdqpH9vwd7zehM7d4jmhJ4w86kRU3JvcDstsbLAUhRbUWAwMi2XL5ztz2A3ohSsG
+Finalized
+```
 
-Two fixes, in order of preference:
+Full chain executed: alice USDC → adapter scratch ATA →
+`b402_percolator_adapter::execute(OpenPosition)` →
+`percolator-prog::InitUser` → `percolator-prog::DepositCollateral` →
+`percolator-prog::TradeCpi` → `percolator-match` (passive vAMM) →
+position recorded in slab at `user_idx=1`. Total CU: 254k under
+the 1.4M cap.
 
-1. **Multi-step realloc** — shrink the create to ≤ 10240 B, then issue
-   N additional `solana_program::account_info::AccountInfo::realloc`
-   calls (no CPI; ours after assignment). 81,968 / 10240 ≈ 9 reallocs.
-   Cleanest; preserves MAX_ENTRIES=2048.
-2. **Cap reduction** — drop `MAX_ENTRIES` from 2048 → 252, putting the
-   total under 10240. Halves user capacity per slab (still > kamino's
-   per-user PDA pattern, since each slab can serve 252 users), but
-   single-CPI create works. Future slabs can split if needed.
+## Bugs found + fixed during the fork run
 
-Production pool will likely choose (1) since 252 cap is too restrictive
-for a "1 mapping per market" design.
+The probe surfaced six real bugs in our adapter; all fixed in
+`programs/b402-percolator-adapter`:
 
-## What worked end-to-end already (mainnet-close)
+1. **`declare_id!` mismatch with on-disk keypair** — `Brp48gh1…`
+   placeholder had no matching keypair. Aligned to
+   `65NRt6GpeakqXhqvKcN3knohzKEZT37arUyQi3SZwfxv` (the keypair Anchor
+   generated at `target/deploy/b402_percolator_adapter-keypair.json`).
+2. **Slab MAGIC byte-order** — adapter `SLAB_MAGIC` was the byte-
+   reversed form. percolator-prog stores `u64 MAGIC = 0x504552434f4c4154`
+   in native LE; bytes on disk read "TALOCREP". Fixed in `slab.rs`.
+3. **Missing `init_mapping` ix** — open path required the `perp_mapping`
+   PDA to exist but no ix could create it. Added `init_mapping` +
+   `grow_mapping` (Solana's `MAX_PERMITTED_DATA_INCREASE = 10_240`
+   forces multi-ix bootstrap: `init` at 10240, then 8 × `grow` to
+   reach 81,968 B).
+4. **Open-path SPL transfer ordered after `InitUser`** — percolator's
+   `InitUser` charges `fee_payment_if_init` from `user_pcl_ata` BEFORE
+   our adapter funded it. Reordered: SPL transfer first, then InitUser
+   (which now consumes from a funded ATA), then DepositCollateral with
+   the post-fee remainder.
+5. **Stale percolator-engine pin** — adapter pinned engine commit
+   `a946e550`, but percolator-prog at origin/main pins `f6b13f57`.
+   `Account` struct grew by 64 bytes (224 → 264 owner offset, 384 →
+   448 size) and `MarketConfig` grew (328 → 384). Updated git rev +
+   `MARKET_CONFIG_LEN` + layout-pin test.
+6. **Hyperp market `MAX_ACCRUAL_DT_SLOTS = 10`** — with the
+   `defaultInitMarketArgs` profile, trades require a fresh KeeperCrank
+   within ~10 slots. Probe now bootstraps + cranks + trades in one
+   tight sequence.
 
-The probe got past:
-- All 6 program deployments at canonical addresses
-- Anchor `execute()` ix discriminator + account list parse
-- Adapter authority writability (Anchor `mut` constraint)
-- Borsh-decode of `[viewing_pub_hash | PercolatorAction::OpenPosition]`
-- `derive_owner_pda` + `derive_perp_mapping` PDA verification
-- Slab `MAGIC` sentinel (after fixing byte-order: `0x504552434f4c4154`,
-  bytes-on-disk are "TALOCREP", the BE form of "PERCOLAT", because
-  percolator-prog stores the u64 in native LE)
+## What this proves (mainnet-close)
 
-This proves the adapter's wire format + slab parsing are byte-correct
-against the live percolator-prog binary — the field-offset pins in
-`slab.rs` (ACCOUNT_OWNER_OFF=200 etc.) hold against production state.
+The full pool-equivalent flow works against the **real** percolator
+binaries Toly ships:
+
+- Anchor `execute()` ix dispatch + Borsh action_payload decode
+- `derive_owner_pda` / `derive_perp_mapping` PDA verification against
+  the slab pubkey
+- Slab `MAGIC` sentinel + `Account` field-offset pins (264 / 64 / 0)
+  vs the **production** percolator-prog binary
+- `invoke_signed` as `owner_pda` for percolator's `InitUser`,
+  `DepositCollateral`, `TradeCpi`
+- Matcher CPI depth (adapter → percolator-prog → percolator-match) at
+  3 levels, well under sBPF's 5-level cap
+- Total CU 254k for the open path, well under 1.4M cap
 
 ## Prerequisites
 

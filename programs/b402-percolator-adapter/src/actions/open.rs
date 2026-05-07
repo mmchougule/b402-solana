@@ -188,64 +188,13 @@ pub fn handle_open<'info>(
         }
     };
 
-    // 8. Resolve user_idx (with stale-entry guard)
-    let user_idx = match outcome {
-        AllocateOutcome::Existing { user_idx } => {
-            // Stale-entry guard (PRD-36 §6.5 #1).
-            let owner_bytes = expected_owner.to_bytes();
-            let still_ours = {
-                let slab_data = slab_acc.try_borrow_data()?;
-                slab_mod::verify_owner_at_idx(&slab_data, user_idx, &owner_bytes)
-                    .map_err(|_| error!(PercolatorAdapterError::InvalidActionPayload))?
-            };
-            if still_ours {
-                user_idx
-            } else {
-                // Slot was reassigned. Mark closed in mapping, allocate fresh.
-                {
-                    let mut mapping_data = mapping_acc.try_borrow_mut_data()?;
-                    let mut mapping = PerpMapping::from_bytes(&mut mapping_data)
-                        .map_err(|_| {
-                            error!(PercolatorAdapterError::MappingAccountSizeMismatch)
-                        })?;
-                    let _ = mapping.record_close(&viewing_pub_hash);
-                }
-                allocate_fresh_slot(
-                    percolator_program,
-                    owner_pda_acc,
-                    slab_acc,
-                    user_pcl_ata,
-                    slab_vault,
-                    &token_program_ai,
-                    clock,
-                    fee_payment_if_init,
-                    owner_signer_seeds,
-                    mapping_acc,
-                    &viewing_pub_hash,
-                    &expected_owner,
-                )?
-            }
-        }
-        AllocateOutcome::NewSlotNeeded | AllocateOutcome::PrevClosed { .. } => {
-            allocate_fresh_slot(
-                percolator_program,
-                owner_pda_acc,
-                slab_acc,
-                user_pcl_ata,
-                slab_vault,
-                &token_program_ai,
-                clock,
-                fee_payment_if_init,
-                owner_signer_seeds,
-                mapping_acc,
-                &viewing_pub_hash,
-                &expected_owner,
-            )?
-        }
-    };
-
-    // 9. Token transfer adapter_in_ta → user's percolator USDC ATA, signed
-    // by adapter_authority.
+    // 8. Token transfer adapter_in_ta → user's percolator USDC ATA, signed
+    // by adapter_authority. MUST happen before allocate_fresh_slot —
+    // percolator's `InitUser` ix immediately transfers `fee_payment_if_init`
+    // from `user_pcl_ata` to slab_vault, so the ATA needs to be funded
+    // first. Total transfer = `in_amount`; subsequent CPIs draw from this
+    // running balance (InitUser → fee_payment_if_init, DepositCollateral
+    // → remainder).
     let (_auth_pubkey, auth_bump) = derive_adapter_authority(&crate::ID);
     let auth_bump_arr = [auth_bump];
     let auth_seeds: [&[u8]; 3] = [
@@ -266,7 +215,79 @@ pub fn handle_open<'info>(
         token::transfer(cpi_ctx, in_amount)?;
     }
 
-    // 10. DepositCollateral
+    // 9. Resolve user_idx + capital remaining for DepositCollateral.
+    //   - Existing slot (still ours): no InitUser, full `in_amount` available.
+    //   - New slot / stale-entry recovery: `allocate_fresh_slot` invokes
+    //     percolator's InitUser, which transfers `fee_payment_if_init`
+    //     from user_pcl_ata to slab_vault and credits
+    //     `(fee_payment_if_init - new_account_fee)` as engine capital.
+    //     DepositCollateral then drains the rest.
+    let (user_idx, deposit_amount) = match outcome {
+        AllocateOutcome::Existing { user_idx } => {
+            // Stale-entry guard (PRD-36 §6.5 #1).
+            let owner_bytes = expected_owner.to_bytes();
+            let still_ours = {
+                let slab_data = slab_acc.try_borrow_data()?;
+                slab_mod::verify_owner_at_idx(&slab_data, user_idx, &owner_bytes)
+                    .map_err(|_| error!(PercolatorAdapterError::InvalidActionPayload))?
+            };
+            if still_ours {
+                (user_idx, in_amount)
+            } else {
+                // Slot was reassigned. Mark closed in mapping, allocate fresh.
+                {
+                    let mut mapping_data = mapping_acc.try_borrow_mut_data()?;
+                    let mut mapping = PerpMapping::from_bytes(&mut mapping_data)
+                        .map_err(|_| {
+                            error!(PercolatorAdapterError::MappingAccountSizeMismatch)
+                        })?;
+                    let _ = mapping.record_close(&viewing_pub_hash);
+                }
+                let idx = allocate_fresh_slot(
+                    percolator_program,
+                    owner_pda_acc,
+                    slab_acc,
+                    user_pcl_ata,
+                    slab_vault,
+                    &token_program_ai,
+                    clock,
+                    fee_payment_if_init,
+                    owner_signer_seeds,
+                    mapping_acc,
+                    &viewing_pub_hash,
+                    &expected_owner,
+                )?;
+                (
+                    idx,
+                    in_amount.checked_sub(fee_payment_if_init)
+                        .ok_or(error!(PercolatorAdapterError::ZeroMargin))?,
+                )
+            }
+        }
+        AllocateOutcome::NewSlotNeeded | AllocateOutcome::PrevClosed { .. } => {
+            let idx = allocate_fresh_slot(
+                percolator_program,
+                owner_pda_acc,
+                slab_acc,
+                user_pcl_ata,
+                slab_vault,
+                &token_program_ai,
+                clock,
+                fee_payment_if_init,
+                owner_signer_seeds,
+                mapping_acc,
+                &viewing_pub_hash,
+                &expected_owner,
+            )?;
+            (
+                idx,
+                in_amount.checked_sub(fee_payment_if_init)
+                    .ok_or(error!(PercolatorAdapterError::ZeroMargin))?,
+            )
+        }
+    };
+
+    // 10. DepositCollateral with the post-fee remainder.
     percolator_cpi::invoke_deposit_collateral(
         percolator_program,
         owner_pda_acc,
@@ -276,7 +297,7 @@ pub fn handle_open<'info>(
         &token_program_ai,
         clock,
         user_idx,
-        in_amount,
+        deposit_amount,
         owner_signer_seeds,
     )?;
 

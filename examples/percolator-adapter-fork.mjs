@@ -137,39 +137,93 @@ const adapterUsdcAta = await getOrCreateAssociatedTokenAccount(
   conn, admin, USDC, adapterAuthority, true,
 );
 
-// 4.5. Init perp_mapping PDA (one-shot per slab). Idempotent — reverts
-// cleanly if already created. We tolerate the "already exists" path by
-// catching `0x0` (system program already-initialized) and continuing.
-//
-// init_mapping discriminator = sha256("global:init_mapping")[..8].
+// 4.5. Bootstrap perp_mapping PDA: init_mapping (size 10240) +
+// 8 × grow_mapping (each grows by 10240, capped at PERP_MAPPING_ACCOUNT_LEN
+// = 81968). Solana's MAX_PERMITTED_DATA_INCREASE is 10240 per ix, so we
+// can't allocate the full account in one ix. All 9 ixs go in a single
+// tx. Idempotent: skipped if account already exists.
 {
-  const INIT_MAPPING_DISC = Uint8Array.from([119, 15, 30, 99, 8, 143, 191, 70]);
-  const ix = new TransactionInstruction({
-    programId: PERCOLATOR_ADAPTER,
-    keys: [
-      { pubkey: admin.publicKey, isSigner: true, isWritable: true },
-      { pubkey: SLAB, isSigner: false, isWritable: false },
-      { pubkey: perpMapping, isSigner: false, isWritable: true },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-    ],
-    data: Buffer.from(INIT_MAPPING_DISC),
-  });
-  try {
-    const sig = await sendAndConfirmTransaction(conn, new Transaction().add(ix), [admin], { commitment: 'confirmed' });
-    console.log(`▶ init_mapping ✓ ${sig.slice(0, 24)}…`);
-  } catch (e) {
-    const logs = (e?.logs ?? []).join('\n');
-    if (logs.includes('already in use') || logs.includes('AccountAlreadyInitialized')) {
-      console.log('  (mapping account already exists, continuing)');
-    } else {
-      throw e;
+  const mappingInfo = await conn.getAccountInfo(perpMapping);
+  if (mappingInfo && mappingInfo.data.length === 81968) {
+    console.log(`  (mapping already at full size ${mappingInfo.data.length}B, skipping)`);
+  } else {
+    const INIT_MAPPING_DISC = Uint8Array.from([119, 15, 30, 99, 8, 143, 191, 70]);
+    const GROW_MAPPING_DISC = Uint8Array.from([202, 61, 64, 131, 68, 49, 26, 161]);
+    const initIx = new TransactionInstruction({
+      programId: PERCOLATOR_ADAPTER,
+      keys: [
+        { pubkey: admin.publicKey, isSigner: true, isWritable: true },
+        { pubkey: SLAB, isSigner: false, isWritable: false },
+        { pubkey: perpMapping, isSigner: false, isWritable: true },
+        { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      ],
+      data: Buffer.from(INIT_MAPPING_DISC),
+    });
+    const growIxs = Array.from({ length: 8 }, () => new TransactionInstruction({
+      programId: PERCOLATOR_ADAPTER,
+      keys: [
+        { pubkey: SLAB, isSigner: false, isWritable: false },
+        { pubkey: perpMapping, isSigner: false, isWritable: true },
+      ],
+      data: Buffer.from(GROW_MAPPING_DISC),
+    }));
+    try {
+      const sig = await sendAndConfirmTransaction(
+        conn,
+        new Transaction()
+          .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }))
+          .add(initIx, ...growIxs),
+        [admin], { commitment: 'confirmed' },
+      );
+      const after = await conn.getAccountInfo(perpMapping);
+      console.log(`▶ init_mapping + 8× grow_mapping ✓ ${sig.slice(0, 24)}… size=${after.data.length}B`);
+    } catch (e) {
+      const logs = (e?.logs ?? []).join('\n');
+      if (logs.includes('already in use')) {
+        console.log('  (init failed because mapping exists; need separate grow loop — please re-run after manual reset)');
+      } else {
+        throw e;
+      }
     }
   }
 }
 
+// 4.6. Fresh KeeperCrank — Hyperp markets advance their internal mark
+// only on cranks; if we wait too long after bootstrap the engine's
+// accrual envelope (MAX_ACCRUAL_DT_SLOTS) expires and TradeCpi rejects
+// with OracleStale (0x6).
+//
+// Encoder layout (percolator-cli encodeKeeperCrank):
+//   tag(1) = 8, caller_idx(2) u16 LE, allow_panic(1) u8 = 0
+{
+  const SYSVAR_CLOCK = new PublicKey('SysvarC1ock11111111111111111111111111111111');
+  // tag=5 (KeeperCrank), caller_idx=65535 u16 LE, format_version=1
+  const crankData = Buffer.from([5, 0xff, 0xff, 1]);
+  const crankIx = new TransactionInstruction({
+    programId: PERCOLATOR_PROG,
+    keys: [
+      { pubkey: admin.publicKey, isSigner: true, isWritable: true },
+      { pubkey: SLAB, isSigner: false, isWritable: true },
+      { pubkey: SYSVAR_CLOCK, isSigner: false, isWritable: false },
+      { pubkey: SLAB, isSigner: false, isWritable: false }, // dummy oracle (Hyperp ignores)
+    ],
+    data: crankData,
+  });
+  await sendAndConfirmTransaction(conn,
+    new Transaction()
+      .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }))
+      .add(crankIx),
+    [admin], { commitment: 'confirmed', skipPreflight: true });
+  console.log('▶ fresh KeeperCrank ✓');
+}
+
 // 5. Fund adapter_in_ta from alice.
 const aliceUsdcAta = getAssociatedTokenAddressSync(USDC, alice.publicKey);
-const FUND_AMOUNT = 100_000n; // 0.1 USDC (6 decimals)
+// Local Hyperp market (defaultInitMarketArgs) sets minNonzeroImReq=200_000,
+// initial_margin=10%, mark $100. A 1.0 unit (size_e6 = 1_000_000) trade has
+// notional = mark × size = $100, IM = 10% = $10 = 10_000_000 raw. Fund
+// 10.5 USDC so we cover IM + fees + tx slippage.
+const FUND_AMOUNT = 10_500_000n;
 console.log(`▶ funding adapter_in_ta with ${FUND_AMOUNT} (raw)`);
 const fundTx = new Transaction().add(
   createAssociatedTokenAccountIdempotentInstruction(admin.publicKey, userPercolatorAta, ownerPda, USDC),
@@ -179,9 +233,17 @@ await sendAndConfirmTransaction(conn, fundTx, [admin, alice], { commitment: 'con
 
 // 6. Build OpenPosition action_payload + execute ix data.
 const LP_IDX = 0;
-const SIZE_E6 = 1_000_000n;        // 1.0 unit long
-const LIMIT_PRICE_E6 = 200_000_000n;
-const FEE_INIT = 1_000n;
+// Default Hyperp market boots with mark = 100_000_000 e6 ($100). The
+// passive matcher fills at mark + base_spread_bps; with base=50bps, fill
+// ≈ $100.50. To stay collateralized, IM = size × fill_price × 10% must be
+// well below our deposit (10.5 USDC raw = 10_500_000). Pick size_e6 such
+// that IM ≪ deposit:
+//   size_e6 = 1_000  (= 0.001 units)
+//   notional ≈ 0.001 × $100.5 ≈ $0.1005
+//   IM at 10% ≈ $0.01005 = 10_050 raw  ≪  10_500_000 deposit
+const SIZE_E6 = 1_000n;
+const LIMIT_PRICE_E6 = 200_000_000n; // $200 ceiling — well above fill price
+const FEE_INIT = 1_000_000n;
 
 const actionInner = Buffer.concat([
   Buffer.from([TAG_OPEN]),

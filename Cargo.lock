@@ -1838,7 +1838,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "percolator"
 version = "0.1.0"
-source = "git+https://github.com/aeyakovenko/percolator?rev=a946e5508fcfe1bc250845a98a85ef614fdebb99#a946e5508fcfe1bc250845a98a85ef614fdebb99"
+source = "git+https://github.com/aeyakovenko/percolator?rev=f6b13f5751a11176afd070f6e89c6aaa77a886f1#f6b13f5751a11176afd070f6e89c6aaa77a886f1"
 
 [[package]]
 name = "polyval"

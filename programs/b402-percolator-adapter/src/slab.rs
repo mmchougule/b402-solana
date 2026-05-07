@@ -47,8 +47,9 @@ pub enum SlabError {
 
 // ─── Vendored layout types (mirror percolator-prog at pinned rev) ───────
 
-/// Mirrors `percolator-prog::state::SlabHeader`. Stable layout pinned at
-/// percolator-prog commit a946e550. 96 bytes.
+/// Mirrors `percolator-prog::state::SlabHeader`. 136 bytes at engine
+/// commit f6b13f57. Verified live against the on-chain percolator-prog
+/// binary via the slice-5 fork run.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct SlabHeader {
@@ -82,7 +83,7 @@ struct MarketConfigPrefix {
 }
 
 const HEADER_LEN: usize = size_of::<SlabHeader>();
-const MARKET_CONFIG_LEN: usize = 0x148; // 328 B at percolator-prog a946e550 — verified by sanity test below
+const MARKET_CONFIG_LEN: usize = 0x180; // 384 B at percolator-prog with engine f6b13f57 — verified against percolator-prog::state::MarketConfig size_of()
 const ENGINE_ALIGN: usize = align_of::<RiskEngine>();
 const ENGINE_OFF: usize = align_up(HEADER_LEN + MARKET_CONFIG_LEN, ENGINE_ALIGN);
 
@@ -374,17 +375,17 @@ mod tests {
 
     #[test]
     #[allow(clippy::assertions_on_constants)]
-    fn account_layout_pinned_at_a946e550() {
-        // Pinned values observed against percolator commit a946e550 on
+    fn account_layout_pinned_at_f6b13f57() {
+        // Pinned values observed against percolator commit f6b13f57 on
         // 2026-05-06. If any upstream change shifts these, every helper
         // in this module reads the wrong bytes — flag loudly here.
         // (clippy: these are const-folded; that's the intent — the
         // test exists so a layout drift surfaces as a compile-time or
         // assertion failure, not a silent miscompute.)
-        assert_eq!(ACCOUNT_OWNER_OFF, 200);
+        assert_eq!(ACCOUNT_OWNER_OFF, 264);
         assert_eq!(ACCOUNT_POSITION_OFF, 64);
         assert_eq!(ACCOUNT_CAPITAL_OFF, 0);
-        let size_within_envelope = ACCOUNT_SIZE >= 384 && ACCOUNT_SIZE <= 400;
+        let size_within_envelope = ACCOUNT_SIZE >= 432 && ACCOUNT_SIZE <= 464;
         assert!(
             size_within_envelope,
             "Account size {ACCOUNT_SIZE} drifted outside expected envelope",
