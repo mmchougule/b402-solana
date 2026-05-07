@@ -44,6 +44,32 @@ function nodeRandomBytes(n: number): Uint8Array {
   (globalThis.crypto as Crypto).getRandomValues(out);
   return out;
 }
+
+/**
+ * Poll for tx confirmation via getSignatureStatuses. Avoids the
+ * signatureSubscribe WebSocket that confirmTransaction opens, which
+ * keeps the Node event loop alive past the user's last `await` and
+ * makes short scripts hang on exit.
+ */
+async function pollConfirm(
+  conn: Connection,
+  sig: string,
+  timeoutMs: number,
+): Promise<void> {
+  const start = Date.now();
+  let interval = 1500;
+  while (Date.now() - start < timeoutMs) {
+    const r = await conn.getSignatureStatuses([sig], { searchTransactionHistory: false });
+    const s = r.value[0];
+    if (s?.confirmationStatus === 'confirmed' || s?.confirmationStatus === 'finalized') {
+      if (s.err) throw new Error(`tx ${sig} landed with err ${JSON.stringify(s.err)}`);
+      return;
+    }
+    await new Promise((res) => setTimeout(res, interval));
+    interval = Math.min(interval * 1.2, 4000);
+  }
+  throw new Error(`tx ${sig} not confirmed within ${timeoutMs}ms`);
+}
 import { FR_MODULUS, PROGRAM_IDS, B402_ALT_DEVNET, B402_ALT_MAINNET, leToFrReduced } from '@b402ai/solana-shared';
 import type { SpendableNote } from '@b402ai/solana-shared';
 import {
@@ -495,18 +521,22 @@ export class B402Solana {
     }
   }
 
+  /**
+   * Lazily resolve circuit artifacts. Called by methods that actually need
+   * a prover (shield, privateSwap). Read-only methods (balance, holdings)
+   * don't trigger the fetch — and unit tests that just exercise wallet
+   * setup never hit the network.
+   */
+  private async _ensureProvers(): Promise<void> {
+    if (this._prover && this._adaptProver) return;
+    const { resolveAllCircuits } = await import('./circuits.js');
+    const c = await resolveAllCircuits();
+    if (!this._prover) this._prover = new TransactProver(c.transact);
+    if (!this._adaptProver) this._adaptProver = new AdaptProver(c.adapt);
+  }
+
   /** Lazy-init wallet + note store. Idempotent. */
   async ready(): Promise<void> {
-    // Auto-resolve circuit artifacts on first ready() if the caller didn't
-    // pass any. Cached at ~/.b402ai/circuits/<sha>/ — first install pays
-    // a one-time ~36MB fetch from the GitHub release; subsequent runs are
-    // local. Hashes are pinned in src/circuits.ts and verified before use.
-    if (!this._prover || !this._adaptProver) {
-      const { resolveAllCircuits } = await import('./circuits.js');
-      const c = await resolveAllCircuits();
-      if (!this._prover) this._prover = new TransactProver(c.transact);
-      if (!this._adaptProver) this._adaptProver = new AdaptProver(c.adapt);
-    }
     if (!this._wallet) {
       // Deterministic b402 wallet seeded from the active signer. For
       // KeypairSigner this is `keypair.secretKey[0..32]` (preserves
@@ -635,6 +665,7 @@ export class B402Solana {
   /** Shield `amount` of `mint` from this caller's ATA into the pool. */
   async shield(req: ShieldRequest): Promise<ShieldResult> {
     await this.ready();
+    await this._ensureProvers();
     if (!this._prover) {
       throw new B402Error(
         B402ErrorCode.InvalidConfig,
@@ -712,6 +743,7 @@ export class B402Solana {
    */
   async unshield(req: UnshieldRequest): Promise<UnshieldResult> {
     await this.ready();
+    await this._ensureProvers();
     if (!this._prover) {
       throw new B402Error(
         B402ErrorCode.InvalidConfig,
@@ -894,6 +926,7 @@ export class B402Solana {
    */
   async privateSwap(req: PrivateSwapRequest): Promise<PrivateSwapResult> {
     await this.ready();
+    await this._ensureProvers();
     // Relayer pubkey bound into the ix's account[0] + relayer_fee_recipient
     // placeholder + feeAtaSentinel derivation. When the HTTP relayer is in
     // use, we use ITS pubkey so on-chain accounts match the actual fee payer.
@@ -1155,10 +1188,9 @@ export class B402Solana {
           skipPreflight: false,
           preflightCommitment: 'confirmed',
         });
-        await this.connection.confirmTransaction(
-          { signature: csig, blockhash: commitBh.blockhash, lastValidBlockHeight: commitBh.lastValidBlockHeight },
-          'confirmed',
-        );
+        // Poll-based — see comment in actions/shield.ts on why we avoid
+        // confirmTransaction's WebSocket subscription.
+        await pollConfirm(this.connection, csig, 90_000);
       }
       } // end else (alreadyCommitted check)
     }
@@ -1430,10 +1462,7 @@ export class B402Solana {
         skipPreflight: true,
         preflightCommitment: 'confirmed',
       });
-      await this.connection.confirmTransaction(
-        { signature, blockhash: bh.blockhash, lastValidBlockHeight: bh.lastValidBlockHeight },
-        'confirmed',
-      );
+      await pollConfirm(this.connection, signature, 90_000);
     }
 
     // 13. Compute outAmount from on-chain delta.

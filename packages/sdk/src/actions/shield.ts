@@ -288,7 +288,24 @@ export async function shield(params: ShieldParams): Promise<ShieldResult> {
     if (!sameSigner) tx.partialSign(relayer);
     sig = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
   }
-  await connection.confirmTransaction(sig, 'confirmed');
+  // Poll-based confirm — avoids opening a signatureSubscribe WebSocket
+  // that would keep the Node event loop alive after this call returns.
+  // Users running short scripts (`shield + log + exit`) get a clean exit;
+  // long-lived processes are unaffected.
+  {
+    const start = Date.now();
+    let interval = 1500;
+    while (Date.now() - start < 90_000) {
+      const r = await connection.getSignatureStatuses([sig], { searchTransactionHistory: false });
+      const s = r.value[0];
+      if (s?.confirmationStatus === 'confirmed' || s?.confirmationStatus === 'finalized') {
+        if (s.err) throw new Error(`shield tx ${sig} landed with err ${JSON.stringify(s.err)}`);
+        break;
+      }
+      await new Promise((res) => setTimeout(res, interval));
+      interval = Math.min(interval * 1.2, 4000);
+    }
+  }
 
   // 8. Construct the SpendableNote record so the caller can hand straight to NoteStore.
   const note: SpendableNote = {
