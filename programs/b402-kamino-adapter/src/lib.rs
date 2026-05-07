@@ -1890,26 +1890,6 @@ pub enum KaminoAdapterError {
 /// own `program_id`) makes the same `viewing_pub_hash` resolve to a
 /// DIFFERENT `owner_pda` on Drift / Marginfi adapters — cross-protocol
 /// correlation by `owner_pda` alone is impossible.
-/// Read `liquidity.mint_pubkey` from a Kamino Reserve account at offset 128.
-/// Returns `KaminoCpiFailed` if the account is too short or the slot can't be
-/// parsed. The Reserve struct's mint offset is stable across reserves —
-/// verified empirically against USDC + SOL reserves on mainnet.
-fn read_reserve_liquidity_mint(
-    ctx: &Context<'_, '_, '_, '_, Execute<'_>>,
-    ra_index: usize,
-) -> Result<Pubkey> {
-    const LIQUIDITY_MINT_OFFSET: usize = 128;
-    let info = &ctx.remaining_accounts[ra_index];
-    let data = info.try_borrow_data().map_err(|_| KaminoAdapterError::KaminoCpiFailed)?;
-    require!(
-        data.len() >= LIQUIDITY_MINT_OFFSET + 32,
-        KaminoAdapterError::KaminoCpiFailed
-    );
-    let mut buf = [0u8; 32];
-    buf.copy_from_slice(&data[LIQUIDITY_MINT_OFFSET..LIQUIDITY_MINT_OFFSET + 32]);
-    Ok(Pubkey::new_from_array(buf))
-}
-
 /// Derive the per-(viewing_key, mint) `owner_pda`. Each lending position
 /// keyed by liquidity mint gets its own Kamino UserMetadata + Obligation,
 /// so positions across mints (USDC, SOL, JitoSOL, …) are structurally
