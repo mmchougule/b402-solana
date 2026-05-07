@@ -68,7 +68,8 @@ pub const RA_ORACLE: usize = 8;
 pub const RA_MATCHER_PROGRAM: usize = 9;
 pub const RA_MATCHER_CONTEXT: usize = 10;
 pub const RA_LP_PDA: usize = 11;
-pub const RA_MATCHER_TAIL_START: usize = 12;
+pub const RA_SLAB_VAULT_AUTHORITY: usize = 12;
+pub const RA_MATCHER_TAIL_START: usize = 13;
 
 /// Validate the `OpenPosition` variant's args against percolator-prog's
 /// rejection rules (PRD-36 §6.5 #2). Returns the inner field tuple so
@@ -490,6 +491,7 @@ mod tests {
         assert_eq!(RA_MATCHER_PROGRAM, 9);
         assert_eq!(RA_MATCHER_CONTEXT, 10);
         assert_eq!(RA_LP_PDA, 11);
-        assert_eq!(RA_MATCHER_TAIL_START, 12);
+        assert_eq!(RA_SLAB_VAULT_AUTHORITY, 12);
+        assert_eq!(RA_MATCHER_TAIL_START, 13);
     }
 }

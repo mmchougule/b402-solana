@@ -172,22 +172,37 @@ pub fn build_withdraw_collateral_ix(
     percolator_program_id: &Pubkey,
     owner_pda: &Pubkey,
     slab: &Pubkey,
-    user_ata: &Pubkey,
     vault: &Pubkey,
+    user_ata: &Pubkey,
+    vault_pda: &Pubkey,
     token_program: &Pubkey,
     clock: &Pubkey,
+    oracle_idx: &Pubkey,
     user_idx: u16,
     amount: u64,
 ) -> Instruction {
+    // Account layout (percolator-prog WithdrawCollateral, v12.21+):
+    //   [0] user (signer)        — owner_pda
+    //   [1] slab (writable)
+    //   [2] vault (writable)     — slab's collateral SPL ATA
+    //   [3] user_ata (writable)  — user's collateral SPL ATA
+    //   [4] vault_pda            — derive_vault_authority(slab)
+    //   [5] token_program
+    //   [6] clock sysvar
+    //   [7] oracle_idx           — Pyth/Chainlink for non-Hyperp;
+    //                              ignored for Hyperp markets (slab pubkey
+    //                              is a safe placeholder).
     Instruction {
         program_id: *percolator_program_id,
         accounts: vec![
             AccountMeta::new(*owner_pda, true),
             AccountMeta::new(*slab, false),
-            AccountMeta::new(*user_ata, false),
             AccountMeta::new(*vault, false),
+            AccountMeta::new(*user_ata, false),
+            AccountMeta::new_readonly(*vault_pda, false),
             AccountMeta::new_readonly(*token_program, false),
             AccountMeta::new_readonly(*clock, false),
+            AccountMeta::new_readonly(*oracle_idx, false),
         ],
         data: build_withdraw_collateral_data(user_idx, amount),
     }
@@ -198,10 +213,12 @@ pub fn invoke_withdraw_collateral<'info>(
     percolator_program: &AccountInfo<'info>,
     owner_pda: &AccountInfo<'info>,
     slab: &AccountInfo<'info>,
-    user_ata: &AccountInfo<'info>,
     vault: &AccountInfo<'info>,
+    user_ata: &AccountInfo<'info>,
+    vault_pda: &AccountInfo<'info>,
     token_program: &AccountInfo<'info>,
     clock: &AccountInfo<'info>,
+    oracle_idx: &AccountInfo<'info>,
     user_idx: u16,
     amount: u64,
     owner_signer_seeds: &[&[&[u8]]],
@@ -210,10 +227,12 @@ pub fn invoke_withdraw_collateral<'info>(
         percolator_program.key,
         owner_pda.key,
         slab.key,
-        user_ata.key,
         vault.key,
+        user_ata.key,
+        vault_pda.key,
         token_program.key,
         clock.key,
+        oracle_idx.key,
         user_idx,
         amount,
     );
@@ -222,10 +241,12 @@ pub fn invoke_withdraw_collateral<'info>(
         &[
             owner_pda.clone(),
             slab.clone(),
-            user_ata.clone(),
             vault.clone(),
+            user_ata.clone(),
+            vault_pda.clone(),
             token_program.clone(),
             clock.clone(),
+            oracle_idx.clone(),
             percolator_program.clone(),
         ],
         owner_signer_seeds,
@@ -406,10 +427,13 @@ mod tests {
 
     #[test]
     fn withdraw_collateral_ix_account_layout() {
+        // v12.21+ wire layout: 8 accounts including vault_pda + oracle_idx.
         let ix = build_withdraw_collateral_ix(
-            &pk(1), &pk(2), &pk(3), &pk(4), &pk(5), &token_program(), &pk(7), 5, 999,
+            &pk(1), &pk(2), &pk(3), &pk(4), &pk(5), &pk(6),
+            &token_program(), &pk(7), &pk(8),
+            5, 999,
         );
-        assert_eq!(ix.accounts.len(), 6);
+        assert_eq!(ix.accounts.len(), 8);
         assert_eq!(ix.data[0], 4);
         assert_eq!(&ix.data[1..3], &5u16.to_le_bytes());
         assert_eq!(&ix.data[3..11], &999u64.to_le_bytes());

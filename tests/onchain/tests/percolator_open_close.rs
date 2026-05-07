@@ -281,6 +281,7 @@ fn send_execute(
         AccountMeta::new_readonly(matcher_program, false), // 9 RA_MATCHER_PROGRAM
         AccountMeta::new(matcher_context, false),       // 10 RA_MATCHER_CONTEXT
         AccountMeta::new_readonly(lp_pda, false),       // 11 RA_LP_PDA
+        AccountMeta::new_readonly(setup.slab, false),   // 12 RA_SLAB_VAULT_AUTHORITY (placeholder; close-only)
     ]);
 
     let ix = Instruction {

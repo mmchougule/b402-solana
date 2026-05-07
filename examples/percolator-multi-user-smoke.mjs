@@ -183,6 +183,10 @@ async function openForUser(viewingPubHash, sizeE6, label) {
   ]);
 
   const oracle = PERCOLATOR_PROG;
+  const [slabVaultAuthority] = PublicKey.findProgramAddressSync(
+    [Buffer.from('vault'), SLAB.toBuffer()],
+    PERCOLATOR_PROG,
+  );
   const remaining = [
     { pubkey: perpMapping, isSigner: false, isWritable: true },          // 0
     { pubkey: ownerPda, isSigner: false, isWritable: true },             // 1
@@ -196,6 +200,7 @@ async function openForUser(viewingPubHash, sizeE6, label) {
     { pubkey: MATCHER_PROG, isSigner: false, isWritable: false },        // 9
     { pubkey: MATCHER_CTX, isSigner: false, isWritable: true },          // 10
     { pubkey: LP_PDA, isSigner: false, isWritable: true },               // 11
+    { pubkey: slabVaultAuthority, isSigner: false, isWritable: false },  // 12 RA_SLAB_VAULT_AUTHORITY
   ];
 
   const executeIx = new TransactionInstruction({

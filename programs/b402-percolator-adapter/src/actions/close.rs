@@ -28,7 +28,7 @@ use anchor_spl::token::{self, Transfer};
 use crate::actions::open::{
     RA_CLOCK, RA_LP_OWNER, RA_LP_PDA, RA_MAPPING, RA_MATCHER_CONTEXT, RA_MATCHER_PROGRAM,
     RA_MATCHER_TAIL_START, RA_ORACLE, RA_OWNER_PDA, RA_PERCOLATOR_PROGRAM, RA_SLAB,
-    RA_SLAB_VAULT, RA_USER_PERCOLATOR_ATA,
+    RA_SLAB_VAULT, RA_SLAB_VAULT_AUTHORITY, RA_USER_PERCOLATOR_ATA,
 };
 use crate::actions::validate_lp_idx;
 use crate::cpi as percolator_cpi;
@@ -67,6 +67,7 @@ pub fn handle_close<'info>(
     let matcher_program = &ctx.remaining_accounts[RA_MATCHER_PROGRAM];
     let matcher_context = &ctx.remaining_accounts[RA_MATCHER_CONTEXT];
     let lp_pda = &ctx.remaining_accounts[RA_LP_PDA];
+    let slab_vault_authority = &ctx.remaining_accounts[RA_SLAB_VAULT_AUTHORITY];
     let matcher_tail = if ctx.remaining_accounts.len() > RA_MATCHER_TAIL_START {
         &ctx.remaining_accounts[RA_MATCHER_TAIL_START..]
     } else {
@@ -179,10 +180,15 @@ pub fn handle_close<'info>(
             percolator_program,
             owner_pda_acc,
             slab_acc,
-            user_pcl_ata,
             slab_vault,
+            user_pcl_ata,
+            slab_vault_authority,
             &token_program_ai,
             clock,
+            // Hyperp markets don't dereference oracle_idx; the slab pubkey
+            // is a safe placeholder. Non-Hyperp variants would pass the
+            // configured Pyth/Chainlink account here.
+            oracle,
             user_idx,
             withdraw_amount,
             owner_signer_seeds,
