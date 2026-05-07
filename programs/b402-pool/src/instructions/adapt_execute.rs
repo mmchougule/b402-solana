@@ -1036,7 +1036,12 @@ fn is_stateful_adapter(program_id: &Pubkey) -> bool {
     // Kamino lend adapter — per-user Obligation under PRD-33 §3.3.
     const KAMINO_ADAPTER: Pubkey =
         anchor_lang::pubkey!("2enwFgcGKJDqruHpCtvmhtxe3DYcV3k72VTvoGcdt2rX");
-    program_id == &KAMINO_ADAPTER
+    // Percolator perp adapter — per-user slab slot under PRD-36.
+    // Pool prepends `out_spending_pub` (32 LE bytes from proof PI #23) to
+    // action_payload; the adapter strips it via decode_per_user_payload.
+    const PERCOLATOR_ADAPTER: Pubkey =
+        anchor_lang::pubkey!("65NRt6GpeakqXhqvKcN3knohzKEZT37arUyQi3SZwfxv");
+    program_id == &KAMINO_ADAPTER || program_id == &PERCOLATOR_ADAPTER
 }
 
 /// PRD-33 §6.5 — voucher mints issued by stateful adapters' privateLend

@@ -111,8 +111,27 @@ import {
   buildNullifierCpiPayload,
   getValidityProofForNullifier,
 } from './light-nullifier.js';
+import {
+  buildPercolatorOpenActionPayload,
+  buildPercolatorCloseActionPayload,
+  buildPercolatorExecuteIxData,
+  buildPercolatorPerUserRemainingAccounts,
+  derivePercolatorAdapterAuthority,
+  type PercolatorPerUserAccounts,
+} from './percolator.js';
 
 const SYSVAR_INSTRUCTIONS = new PublicKey('Sysvar1nstructions1111111111111111111111111');
+
+/** USDC mint on Solana mainnet. */
+const USDC_MAINNET = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+
+/**
+ * `b402_percolator_adapter` program ID. Pinned in
+ * `programs/b402-percolator-adapter/src/lib.rs::declare_id!`.
+ * Override per-cluster via `req.adapterProgramId` until devnet/mainnet
+ * deployments diverge.
+ */
+const PERCOLATOR_ADAPTER_PROGRAM_ID = '65NRt6GpeakqXhqvKcN3knohzKEZT37arUyQi3SZwfxv';
 
 export interface B402SolanaConfig {
   cluster: 'mainnet' | 'devnet' | 'localnet';
@@ -272,6 +291,87 @@ export interface PrivateSwapRequest {
    *  Pool MUST be built with `--features prd_35_pending_inputs` for this
    *  to work (default off in current mainnet pool). */
   pendingInputsMode?: boolean;
+}
+
+/**
+ * `B402Solana.privatePerpOpen` request shape (PRD-36 §5.4).
+ *
+ * All percolator-side accounts are pre-resolved by the caller via
+ * `perUserAccts`. Slice 4-γ adds a TS slab parser that resolves them
+ * from the slab pubkey alone; until then callers wire the fields by
+ * reading the slab account themselves (the slice 5 surfpool harness has
+ * reference code).
+ */
+export interface PrivatePerpOpenRequest {
+  /** Index of the LP in `slab.accounts` to trade against. */
+  lpIdx: number;
+  /** Signed position size (e6 fixed-point). Positive = long, negative = short. */
+  sizeE6: bigint;
+  /** Slippage bound (e6 fixed-point). */
+  limitPriceE6: bigint;
+  /** USDC margin to deposit, smallest units. Bound by the proof. */
+  marginAmount: bigint;
+  /** Per-call fee passed to `InitUser` if the slot must be claimed. Set to
+   *  0n on subsequent opens for the same `viewing_pub_hash`/slab. */
+  feePaymentIfInit?: bigint;
+
+  /** Pre-resolved percolator-side accounts (RA layout slots 0-11). */
+  perUserAccts: PercolatorPerUserAccounts;
+  /** Optional matcher-defined tail accounts appended after slot 12. */
+  matcherTail?: Array<{ pubkey: PublicKey; isSigner: boolean; isWritable: boolean }>;
+
+  /** Adapter program override. Defaults to `65NRt6Gpe…` (matches the
+   *  keypair at `target/deploy/b402_percolator_adapter-keypair.json`). */
+  adapterProgramId?: PublicKey;
+  /** USDC mint override. Defaults to mainnet USDC. */
+  inMint?: PublicKey;
+  /** ALT for tx-size compression. Required for v0 tx fit. */
+  alt: PublicKey;
+  alts?: PublicKey[];
+
+  /** Optional override for which note to spend as the margin source. */
+  note?: SpendableNote;
+  photonRpc?: unknown;
+
+  pendingInputsMode?: boolean;
+  /** Defaults to `true` (Phase-9 build is the percolator-adapter target). */
+  phase9DualNote?: boolean;
+  inlineCpiNullifier?: boolean;
+}
+
+/**
+ * `B402Solana.privatePerpClose` request shape.
+ *
+ * The adapter handler enforces `in_amount == 0`. Caller must pass a
+ * zero-value USDC `note` — the slice 5 surfpool harness creates one via
+ * a self-swap before close.
+ *
+ * Returns `PrivateSwapResult.outNote` as the reshielded recovered USDC
+ * (= margin + realized PnL). For public delivery, follow with
+ * `unshield()` on that note. PRD-36 §5.4's single-call `to`/`outAmount`/
+ * `realizedPnl` is deferred — needs an adapt-then-unshield pool primitive.
+ */
+export interface PrivatePerpCloseRequest {
+  lpIdx: number;
+  limitPriceE6: bigint;
+  /** Floor on the recovered amount (smallest units). Default 0. */
+  minOut?: bigint;
+
+  perUserAccts: PercolatorPerUserAccounts;
+  matcherTail?: Array<{ pubkey: PublicKey; isSigner: boolean; isWritable: boolean }>;
+
+  adapterProgramId?: PublicKey;
+  inMint?: PublicKey;
+  alt: PublicKey;
+  alts?: PublicKey[];
+
+  /** Required: a zero-value USDC note this client owns. */
+  note?: SpendableNote;
+  photonRpc?: unknown;
+
+  pendingInputsMode?: boolean;
+  phase9DualNote?: boolean;
+  inlineCpiNullifier?: boolean;
 }
 
 export interface PrivateSwapResult {
@@ -1899,6 +1999,134 @@ export class B402Solana {
    */
   async privateRedeem(req: PrivateSwapRequest): Promise<PrivateSwapResult> {
     return this.privateSwap(req);
+  }
+
+  /**
+   * Open a private perpetual position on a percolator slab.
+   *
+   * Mechanically a `privateSwap` with both mints set to USDC and
+   * `expectedOut = 0n` — the adapter consumes `marginAmount` USDC from
+   * the pool's in-vault, claims a slab slot owned by `owner_pda(viewing_pub_hash)`,
+   * deposits collateral, and submits a `TradeCpi(size_e6, lp_idx)`. No
+   * receipt token is reshielded; the position lives in percolator's
+   * slab account and is recovered later via `privatePerpClose`.
+   *
+   * Caller resolves `perUserAccts` (see `PercolatorPerUserAccounts`) by
+   * parsing the slab account off-chain. Slice 4-γ ships a TS slab
+   * parser that does this automatically; until then callers wire it
+   * themselves (the slice 5 surfpool harness has reference code).
+   *
+   * PRD-36 §5.4. The full e2e proof of correctness lives in the slice 5
+   * surfpool harness (`tests/v2/e2e/percolator-perp-fork.test.ts`).
+   */
+  async privatePerpOpen(req: PrivatePerpOpenRequest): Promise<PrivateSwapResult> {
+    const inMint = req.inMint ?? new PublicKey(USDC_MAINNET);
+    const adapterProgramId =
+      req.adapterProgramId ?? new PublicKey(PERCOLATOR_ADAPTER_PROGRAM_ID);
+
+    const actionPayload = buildPercolatorOpenActionPayload({
+      lpIdx: req.lpIdx,
+      sizeE6: req.sizeE6,
+      limitPriceE6: req.limitPriceE6,
+      feePaymentIfInit: req.feePaymentIfInit ?? 0n,
+    });
+
+    const adapterIxData = buildPercolatorExecuteIxData({
+      inAmount: req.marginAmount,
+      expectedOut: 0n,
+      actionPayload,
+    });
+
+    const [adapterAuthority] = derivePercolatorAdapterAuthority(adapterProgramId);
+    const adapterUsdcAta = await getAssociatedTokenAddress(inMint, adapterAuthority, true);
+
+    const remainingAccounts = buildPercolatorPerUserRemainingAccounts({
+      ...req.perUserAccts,
+      matcherTail: req.matcherTail,
+    });
+
+    return this.privateSwap({
+      inMint,
+      outMint: inMint, // percolator opens never reshield a receipt — same mint.
+      amount: req.marginAmount,
+      expectedOut: 0n,
+      adapterProgramId,
+      adapterInTa: adapterUsdcAta,
+      adapterOutTa: adapterUsdcAta,
+      adapterIxData,
+      actionPayload,
+      remainingAccounts,
+      alt: req.alt,
+      alts: req.alts,
+      note: req.note,
+      photonRpc: req.photonRpc,
+      pendingInputsMode: req.pendingInputsMode,
+      phase9DualNote: req.phase9DualNote ?? true,
+      inlineCpiNullifier: req.inlineCpiNullifier,
+    });
+  }
+
+  /**
+   * Close a private perpetual position and reshield the recovered
+   * collateral (= margin + realized PnL) into a new USDC note.
+   *
+   * The adapter handler enforces `in_amount == 0` (`CloseHasNonzeroInput`,
+   * error 6003) — caller MUST supply a zero-value USDC note via
+   * `req.note`, otherwise the adapter rejects. The slice 5 surfpool
+   * harness creates this note via a one-shot self-swap before close.
+   *
+   * Returns USDC reshielded into a new note. To then deliver USDC to a
+   * public address, follow with `unshield()` to that recipient.
+   *
+   * PRD-36 §5.4. Note `to`/`outAmount`/`realizedPnl` from the PRD's
+   * single-call surface are deferred — they require a pool-side
+   * "adapt-then-unshield" fused tx that hasn't shipped yet. Two-step
+   * (close + unshield) is the slice 4-β shape.
+   */
+  async privatePerpClose(req: PrivatePerpCloseRequest): Promise<PrivateSwapResult> {
+    const inMint = req.inMint ?? new PublicKey(USDC_MAINNET);
+    const adapterProgramId =
+      req.adapterProgramId ?? new PublicKey(PERCOLATOR_ADAPTER_PROGRAM_ID);
+
+    const actionPayload = buildPercolatorCloseActionPayload({
+      lpIdx: req.lpIdx,
+      limitPriceE6: req.limitPriceE6,
+    });
+
+    const expectedOut = req.minOut ?? 0n;
+    const adapterIxData = buildPercolatorExecuteIxData({
+      inAmount: 0n,
+      expectedOut,
+      actionPayload,
+    });
+
+    const [adapterAuthority] = derivePercolatorAdapterAuthority(adapterProgramId);
+    const adapterUsdcAta = await getAssociatedTokenAddress(inMint, adapterAuthority, true);
+
+    const remainingAccounts = buildPercolatorPerUserRemainingAccounts({
+      ...req.perUserAccts,
+      matcherTail: req.matcherTail,
+    });
+
+    return this.privateSwap({
+      inMint,
+      outMint: inMint,
+      amount: 0n,
+      expectedOut,
+      adapterProgramId,
+      adapterInTa: adapterUsdcAta,
+      adapterOutTa: adapterUsdcAta,
+      adapterIxData,
+      actionPayload,
+      remainingAccounts,
+      alt: req.alt,
+      alts: req.alts,
+      note: req.note, // caller-supplied 0-value USDC note
+      photonRpc: req.photonRpc,
+      pendingInputsMode: req.pendingInputsMode,
+      phase9DualNote: req.phase9DualNote ?? true,
+      inlineCpiNullifier: req.inlineCpiNullifier,
+    });
   }
 
   get wallet(): Wallet {

@@ -1,0 +1,39 @@
+[package]
+name = "b402-percolator-adapter"
+version.workspace = true
+edition.workspace = true
+description = "b402 Percolator perp adapter (per PRD-36, Option B: shielded user / private positions)"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "b402_percolator_adapter"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+# PRD-36 §5: restrict execute() to CPI calls from b402_pool only.
+# Without this, anyone with a depositor's public viewing_pub_hash can
+# call execute(ClosePosition) directly and walk a user's slab slot.
+# Production deploys MUST include this feature; default off only for
+# unit tests that don't simulate the pool wrapper.
+cpi-only = []
+
+[dependencies]
+anchor-lang.workspace = true
+anchor-spl.workspace = true
+# Percolator perp risk-engine library (Toly's repo). Pinned to a specific
+# commit hash so layout/ABI drift forces an explicit bump here. Used at
+# compile time for `size_of` / `offset_of` introspection of the slab's
+# Account table and MarketConfig fields; the lib is no_std + no runtime
+# deps and embeds cleanly into the BPF binary.
+percolator = { git = "https://github.com/aeyakovenko/percolator", rev = "f6b13f5751a11176afd070f6e89c6aaa77a886f1" }
+bytemuck = { workspace = true }
+
+[dev-dependencies]
+proptest = "1.4"
+
+[lints]
+workspace = true
