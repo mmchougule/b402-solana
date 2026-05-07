@@ -429,14 +429,23 @@ pub mod b402_kamino_adapter {
                 require!(*act_in == in_amount, KaminoAdapterError::AmountMismatch);
                 #[cfg(feature = "per_user_obligation")]
                 {
+                    // Read liquidity_mint from the reserve account in
+                    // remaining_accounts[ra_deposit::RESERVE]. Required as a
+                    // PDA seed so each (viewing_key, mint) gets its own
+                    // independent Kamino obligation — preventing the
+                    // refresh_obligation walks-all-reserves problem and
+                    // making positions independently redeemable.
+                    let liquidity_mint =
+                        read_reserve_liquidity_mint(&ctx, ra_deposit::RESERVE)?;
                     let (expected_owner_pda, owner_bump) =
-                        derive_owner_pda(&crate::ID, &viewing_pub_hash);
+                        derive_owner_pda(&crate::ID, &viewing_pub_hash, &liquidity_mint);
                     handle_deposit_per_user(
                         &ctx,
                         *reserve,
                         *act_in,
                         *min_kt_out,
                         &viewing_pub_hash,
+                        liquidity_mint,
                         expected_owner_pda,
                         owner_bump,
                         bump,
@@ -453,14 +462,19 @@ pub mod b402_kamino_adapter {
                 require!(*kt_in == in_amount, KaminoAdapterError::AmountMismatch);
                 #[cfg(feature = "per_user_obligation")]
                 {
+                    // Same per-mint derivation as deposit. RA layout for
+                    // withdraw also has reserve at slot 0.
+                    let liquidity_mint =
+                        read_reserve_liquidity_mint(&ctx, ra_withdraw_per_user::WITHDRAW_RESERVE)?;
                     let (expected_owner_pda, owner_bump) =
-                        derive_owner_pda(&crate::ID, &viewing_pub_hash);
+                        derive_owner_pda(&crate::ID, &viewing_pub_hash, &liquidity_mint);
                     handle_withdraw_per_user(
                         &ctx,
                         *reserve,
                         *kt_in,
                         *min_underlying_out,
                         &viewing_pub_hash,
+                        liquidity_mint,
                         expected_owner_pda,
                         owner_bump,
                         bump,
@@ -1120,6 +1134,7 @@ fn handle_deposit_per_user<'info>(
     in_amount: u64,
     _min_kt_out: u64,
     viewing_pub_hash: &[u8; 32],
+    mint: Pubkey,
     expected_owner_pda: Pubkey,
     owner_bump: u8,
     auth_bump: u8,
@@ -1148,10 +1163,12 @@ fn handle_deposit_per_user<'info>(
     // post-CPI sweep). `owner_seeds` signs for `owner_pda` (Kamino-side
     // obligation owner). PRD-33 §3.3.
     let auth_seeds: &[&[u8]] = &[VERSION_PREFIX, SEED_ADAPTER, &[auth_bump]];
+    let mint_seed = mint.as_ref();
     let owner_seeds: &[&[u8]] = &[
         VERSION_PREFIX,
         SEED_ADAPTER_OWNER,
         viewing_pub_hash.as_ref(),
+        mint_seed,
         &[owner_bump],
     ];
     let signer_seeds: &[&[&[u8]]] = &[auth_seeds, owner_seeds];
@@ -1428,6 +1445,7 @@ fn handle_withdraw_per_user<'info>(
     kt_in: u64,
     _min_underlying_out: u64,
     viewing_pub_hash: &[u8; 32],
+    mint: Pubkey,
     expected_owner_pda: Pubkey,
     owner_bump: u8,
     auth_bump: u8,
@@ -1450,10 +1468,12 @@ fn handle_withdraw_per_user<'info>(
     let owner_key = owner_pda_info.key();
 
     let auth_seeds: &[&[u8]] = &[VERSION_PREFIX, SEED_ADAPTER, &[auth_bump]];
+    let mint_seed = mint.as_ref();
     let owner_seeds: &[&[u8]] = &[
         VERSION_PREFIX,
         SEED_ADAPTER_OWNER,
         viewing_pub_hash.as_ref(),
+        mint_seed,
         &[owner_bump],
     ];
     let signer_seeds: &[&[&[u8]]] = &[auth_seeds, owner_seeds];
@@ -1870,9 +1890,19 @@ pub enum KaminoAdapterError {
 /// own `program_id`) makes the same `viewing_pub_hash` resolve to a
 /// DIFFERENT `owner_pda` on Drift / Marginfi adapters — cross-protocol
 /// correlation by `owner_pda` alone is impossible.
-pub fn derive_owner_pda(adapter_program_id: &Pubkey, viewing_pub_hash: &[u8; 32]) -> (Pubkey, u8) {
+/// Derive the per-(viewing_key, mint) `owner_pda`. Each lending position
+/// keyed by liquidity mint gets its own Kamino UserMetadata + Obligation,
+/// so positions across mints (USDC, SOL, JitoSOL, …) are structurally
+/// independent — no shared collateralization, no Klend's `RefreshObligation`
+/// having to walk every existing reserve when adding a new one. PRD-33 §3.3
+/// (extended).
+pub fn derive_owner_pda(
+    adapter_program_id: &Pubkey,
+    viewing_pub_hash: &[u8; 32],
+    mint: &Pubkey,
+) -> (Pubkey, u8) {
     Pubkey::find_program_address(
-        &[VERSION_PREFIX, SEED_ADAPTER_OWNER, viewing_pub_hash.as_ref()],
+        &[VERSION_PREFIX, SEED_ADAPTER_OWNER, viewing_pub_hash.as_ref(), mint.as_ref()],
         adapter_program_id,
     )
 }

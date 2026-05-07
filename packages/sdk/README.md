@@ -11,34 +11,55 @@ npm install @b402ai/solana
 - **Shield** SPL tokens into a private balance
 - **Unshield** to any public address
 - **Private swap** through registered adapters (Jupiter on mainnet, mock on devnet)
+- **Private lend** USDC into Kamino V2 from a shielded note (per-user obligation, mainnet)
+- **Private redeem** a kUSDC voucher back into a shielded USDC note (mainnet)
 - **Read** your private balance / per-deposit holdings without leaking ZK plumbing
 - **Watch** for new private deposits via cursor-based polling
 - **Quote** swaps via Jupiter Lite API before executing
 
 ## Quick start
 
-```ts
-import { Keypair, PublicKey } from '@solana/web3.js';
-import { B402Solana } from '@b402ai/solana';
+Three-line private swap on mainnet:
 
-const b402 = new B402Solana({
-  cluster: 'devnet',
-  keypair: Keypair.fromSecretKey(/* ... */),
-  proverArtifacts: {
-    wasmPath: '/abs/path/to/circuits/build/transact_js/transact.wasm',
-    zkeyPath: '/abs/path/to/circuits/build/ceremony/transact_final.zkey',
-  },
-});
+```ts
+import { B402Solana } from '@b402ai/solana';
+import { Keypair, PublicKey } from '@solana/web3.js';
+
+const b402 = new B402Solana({ cluster: 'mainnet', rpcUrl, keypair });
 await b402.ready();
 
-const usdc = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
-const { signature } = await b402.shield({ mint: usdc, amount: 1_000_000n });
-console.log('shielded:', signature);
+const USDC = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+const SOL  = new PublicKey('So11111111111111111111111111111111111111112');
 
-const { balances } = await b402.balance({ mint: usdc });
-console.log('private balance:', balances);
+// Move public USDC into the shielded pool (user signs, one-time).
+await b402.shield({ mint: USDC, amount: 1_000_000n });
 
-await b402.unshield({ to: keypair.publicKey });
+// Private swap. Hosted relayer signs + pays gas; user wallet stays off-chain.
+const { signature, outAmount } = await b402.swap({
+  inMint: USDC, outMint: SOL, amount: 1_000_000n,
+});
+```
+
+Full walkthrough: [`docs/getting-started.md`](https://github.com/mmchougule/b402-solana/blob/main/docs/getting-started.md).
+Runnable example: [`examples/quickstart-private-swap.ts`](https://github.com/mmchougule/b402-solana/blob/main/examples/quickstart-private-swap.ts).
+
+### Lend privately on Kamino
+
+`b402.lend()` auto-discovers the deepest Kamino reserve for the mint
+across all 182 LendingMarkets — no static reserve list. Pass `market`
+to pin a specific one.
+
+```ts
+const lend = await b402.lend({ mint: USDC, amount: 1_000_000n });
+const redeem = await b402.redeem({ mint: USDC });
+```
+
+### Withdraw to a different recipient
+
+```ts
+// The SOL note from `swap` can land at ANY public address — breaking
+// the on-chain edge between depositor and recipient.
+await b402.unshield({ to: someOtherWallet, mint: SOL });
 ```
 
 For a working scaffold:

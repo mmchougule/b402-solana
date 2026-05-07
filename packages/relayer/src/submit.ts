@@ -99,20 +99,24 @@ export class RpcSubmitter implements Submitter {
     }
 
     // Reshape the client account list:
-    //   - the pool requires account[0] = relayer (signer + writable);
-    //     overwrite the pubkey there with our relayer key so the client can
-    //     pass any placeholder.
+    //   - find the FIRST signer+writable slot — that's the relayer slot.
+    //     For shield/unshield/transact/adapt that's accountKeys[0]; for
+    //     pool::commit_inputs it's accountKeys[1] (slot 0 is the
+    //     pending-inputs PDA, writable but NOT signer).
+    //   - overwrite the pubkey at the relayer slot with our relayer key
+    //     so the client can pass any placeholder.
     //   - everything else is forwarded verbatim.
     if (input.accountKeys.length === 0) {
       throw Errors.badRequest('accountKeys must include at least the fee payer');
     }
-    const first = input.accountKeys[0]!;
-    if (!first.isSigner || !first.isWritable) {
-      throw Errors.badRequest('accountKeys[0] must be marked isSigner=true, isWritable=true (relayer slot)');
+    const relayerSlotIndex = input.accountKeys.findIndex((k) => k.isSigner && k.isWritable);
+    if (relayerSlotIndex === -1) {
+      throw Errors.badRequest('accountKeys must include at least one signer+writable slot (relayer slot)');
     }
+    const first = input.accountKeys[relayerSlotIndex]!;
 
     const keys = input.accountKeys.map((k, i) => ({
-      pubkey: i === 0 ? relayer.publicKey : new PublicKey(k.pubkey),
+      pubkey: i === relayerSlotIndex ? relayer.publicKey : new PublicKey(k.pubkey),
       isSigner: k.isSigner,
       isWritable: k.isWritable,
     }));
@@ -182,13 +186,17 @@ export class RpcSubmitter implements Submitter {
     } catch (e) {
       throw Errors.rpcFailure(`sendRawTransaction failed: ${(e as Error).message}`);
     }
-    const conf = await connection.confirmTransaction(sig, 'confirmed');
-    if (conf.value.err) {
-      throw Errors.rpcFailure(`tx failed on-chain: ${JSON.stringify(conf.value.err)}`, { signature: sig });
+    // Use HTTP-poll confirmation instead of confirmTransaction's WS path.
+    // WS subscriptions get rate-limited hard on Helius's free tier (we
+    // observed 19+ ws 429s per attempt under load). Polling is a single
+    // getSignatureStatuses HTTP call per check — way friendlier.
+    const conf = await pollForConfirmation(connection, sig, 90_000);
+    if (conf.err) {
+      throw Errors.rpcFailure(`tx failed on-chain: ${JSON.stringify(conf.err)}`, { signature: sig });
     }
     return {
       signature: sig,
-      slot: conf.context.slot,
+      slot: conf.slot,
       confirmedAt: new Date().toISOString(),
     };
   }
@@ -220,16 +228,57 @@ export class RpcSubmitter implements Submitter {
     // polled via getSignatureStatuses against the embedded tx — here we
     // recompute the signature locally from the wire bytes.
     const sig = recoverFirstSignature(wire);
-    const confirmed = await this.deps.connection.confirmTransaction(sig, 'confirmed');
-    if (confirmed.value.err) {
-      throw Errors.rpcFailure(`tx failed on-chain (jito): ${JSON.stringify(confirmed.value.err)}`, { signature: sig });
+    const confirmed = await pollForConfirmation(this.deps.connection, sig, 90_000);
+    if (confirmed.err) {
+      throw Errors.rpcFailure(`tx failed on-chain (jito): ${JSON.stringify(confirmed.err)}`, { signature: sig });
     }
     return {
       signature: sig,
-      slot: confirmed.context.slot,
+      slot: confirmed.slot,
       confirmedAt: new Date().toISOString(),
     };
   }
+}
+
+/**
+ * HTTP-poll for a tx signature reaching `confirmed` status. Replaces
+ * `connection.confirmTransaction` for relayer use because the latter
+ * uses a WebSocket subscription that gets rate-limited on shared RPC
+ * endpoints (Helius free tier returns 429 on the ws upgrade after a
+ * few open subs, leaving the SDK never seeing the confirmation event
+ * even when the tx Finalized 60s ago).
+ *
+ * Strategy: getSignatureStatuses every `interval` ms with a gentle
+ * backoff up to 5s. One HTTP call per poll, no WS state held open.
+ *
+ * Note: `confirmed` is sufficient for our pool-ix flows — adapter CPIs
+ * land or revert atomically; once a tx is confirmed it won't reorg out
+ * in practice (Solana finality after 31 confirmations ~ 13s).
+ */
+async function pollForConfirmation(
+  connection: import('@solana/web3.js').Connection,
+  signature: string,
+  timeoutMs: number,
+): Promise<{ slot: number; err: unknown }> {
+  const start = Date.now();
+  let interval = 2000;
+  while (Date.now() - start < timeoutMs) {
+    const res = await connection.getSignatureStatuses([signature], { searchTransactionHistory: false });
+    const s = res.value[0];
+    if (s) {
+      if (s.err) return { slot: s.slot, err: s.err };
+      if (s.confirmationStatus === 'confirmed' || s.confirmationStatus === 'finalized') {
+        return { slot: s.slot, err: null };
+      }
+    }
+    await new Promise((r) => setTimeout(r, interval));
+    // Gentle backoff: 2s → 2.4 → 2.88 → 3.46 → 4.15 → 4.99 → 5 (capped).
+    interval = Math.min(interval * 1.2, 5000);
+  }
+  throw Errors.rpcFailure(
+    `tx not confirmed within ${timeoutMs / 1000}s — check signature on Solscan, may have landed but poll timed out`,
+    { signature },
+  );
 }
 
 /** Recover the first signature from a serialised v0 tx — the fee-payer sig.

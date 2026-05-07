@@ -23,6 +23,7 @@ import { registerShield } from './routes/shield.js';
 import { registerUnshield } from './routes/unshield.js';
 import { registerTransact } from './routes/transact.js';
 import { registerAdapt } from './routes/adapt.js';
+import { registerPoolIx } from './routes/pool-ix.js';
 
 export async function buildServer() {
   const cfg = loadConfig();
@@ -45,7 +46,16 @@ export async function buildServer() {
     trustProxy: true,
   });
 
-  const connection = new Connection(cfg.rpcUrl, 'confirmed');
+  // confirmTransactionInitialTimeout = how long web3.js waits for the
+  // first confirmation before declaring the tx unconfirmed. The default
+  // (~30s) is too tight for current mainnet — Kamino lend's commit_inputs
+  // sub-tx can take 25-40s under typical Helius load and the strict 30s
+  // races the network. 90s gives enough buffer that the relayer surfaces
+  // the actual signature back to the SDK before timing out.
+  const connection = new Connection(cfg.rpcUrl, {
+    commitment: 'confirmed',
+    confirmTransactionInitialTimeout: 90_000,
+  });
   const auth = new Authenticator(cfg);
   const submitter = new RpcSubmitter({
     connection,
@@ -65,6 +75,7 @@ export async function buildServer() {
   registerUnshield(fastify, { cfg, auth, submitter });
   registerTransact(fastify, { cfg, auth, submitter });
   registerAdapt(fastify, { cfg, auth, submitter });
+  registerPoolIx(fastify, { cfg, auth, submitter });
 
   fastify.log.info(
     {

@@ -19,6 +19,8 @@ Then in any Claude Code session: `"What's my private balance on b402?"` → tool
 | `shield` | Move SPL tokens from the wallet into a private balance |
 | `unshield` | Withdraw a private deposit to a public address |
 | `private_swap` | Atomic private swap through a registered adapter (Jupiter on mainnet, mock on devnet) |
+| `private_lend` | Atomic private USDC deposit into Kamino V2 (mainnet only): spends a shielded USDC note, deposits into Kamino, mints a kUSDC voucher commitment in one tx. Each viewing key gets its own Kamino Obligation (PRD-33 per-user obligation). First call by a viewing key pays a one-time ~0.04 SOL for UserMetadata + Obligation rent. |
+| `private_redeem` | Atomic Kamino V2 → private USDC (mainnet only): burns a kUSDC voucher minted by a prior `private_lend`, withdraws the underlying USDC from the per-user obligation, reshields the proceeds as a fresh USDC note. |
 | `status` | Wallet pubkey + private balances by mint |
 | `holdings` | Per-deposit private holdings (id, mint, amount) |
 | `balance` | Aggregate private balance per mint |

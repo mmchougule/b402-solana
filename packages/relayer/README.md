@@ -70,12 +70,20 @@ Pass via `Authorization: Bearer kp_3f9b1a2c0d4e6f78` or `x-api-key: ...`.
 
 ## Endpoints
 
+| Route | Forwards to | Notes |
+|---|---|---|
+| `POST /relay/shield` | pool `shield` | Fee-extracting; per-feature checks. |
+| `POST /relay/unshield` | pool `unshield` | Fee-extracting; per-feature checks. |
+| `POST /relay/transact` | pool `transact` | Fee-extracting; per-feature checks. |
+| `POST /relay/adapt` | pool `adapt_execute` | Adapter allowlist enforced (`JUPITER_ADAPTER_ID` / `MOCK_ADAPTER_ID` / `EXTRA_ADAPTER_IDS`). |
+| `POST /relay/pool-ix` | any pool ix targeting `cfg.poolProgramId` | Generic; no fee floor (for pool-internal ixs without a fee field, e.g. PRD-35 `commit_inputs`). Auth + rate-limit still enforced. `programId` is taken from operator config, never from the request body. |
+
 All relay endpoints share one body shape and one response shape.
 
 ### Request
 
 ```ts
-POST /relay/{shield|unshield|transact|adapt}
+POST /relay/{shield|unshield|transact|adapt|pool-ix}
 Content-Type: application/json
 Authorization: Bearer <api-key>
 

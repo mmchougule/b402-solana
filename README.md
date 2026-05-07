@@ -45,11 +45,16 @@ RPC_URL=https://api.devnet.solana.com pnpm --filter=@b402ai/solana-examples e2e
 Shield 100, unshield 100 to a fresh recipient. Sender and recipient share no
 on-chain edge.
 
-## Run private lending (mainnet-fork, ~2 minutes)
+## Run private lending (mainnet, live)
 
-Kamino isn't on devnet, so we boot a local validator with Kamino's mainnet
-program + USDC reserve + Pyth oracle cloned in. No real funds — the local
-validator mints alice 100 USDC.
+Kamino V2 USDC lend + redeem are exposed as `private_lend` / `private_redeem`
+through `@b402ai/solana@0.0.20` and `@b402ai/solana-mcp@0.0.27`. Each viewing
+key gets its own Kamino `Obligation` (PRD-33 per-user obligation, `owner_pda`
+derived from `outSpendingPub`). Verified end-to-end on mainnet:
+`private_lend` `4PVuzkJmFF2x...qoCR` (Finalized), `private_redeem`
+`279hTmsJ2y...c457` (Finalized).
+
+For mainnet-fork hacking against the same bytecode without spending real funds:
 
 ```bash
 ./ops/setup-kamino-fork.sh                            # clones state, boots validator
@@ -59,16 +64,11 @@ pnpm tsx examples/kamino-adapter-fork-deposit.ts      # private 1 USDC deposit
 Goes through `b402_kamino_adapter::execute` → 7 nested CPIs into Kamino
 (`init_user_metadata`, `init_obligation`, `init_obligation_farms_for_reserve`,
 `refresh_reserve`, `refresh_obligation`, `deposit_v2`, sweep). Obligation account
-grows 0 → 3,344 B in a single tx.
+grows 0 → 3,344 B in a single tx, owned by the per-user `owner_pda`.
 
-What this proves: real Kamino bytecode accepts the adapter's CPI sequence; the
-obligation is owned by the adapter PDA, not Alice — so Kamino's lending records
-reference the adapter PDA rather than the user wallet. What this does **not** prove:
-end-to-end pool-to-Kamino unlinkability. That requires shield → `adapt_execute` →
-adapter, where a relayer signs and the user's wallet doesn't appear in the tx
-at all. The pool path runs on devnet today through the mock adapter
-(`pnpm swap-e2e`); a Kamino-on-mainnet-fork variant of the same shielded path
-is the next integration milestone.
+Kamino lending currently exposed for the main USDC reserve only at the SDK/MCP
+layer. The adapter itself is reserve-generic; multi-market discovery is the
+next task.
 
 For the private swap variant (Jupiter v6 on mainnet-fork): [Quickstart](#quickstart)
 step 8. Instruction layout for `adapt_execute`: [`docs/TX-WALKTHROUGH.md`](docs/TX-WALKTHROUGH.md).
@@ -147,27 +147,30 @@ v2 ABI extension that makes this strictly true going forward.
 
 | Adapter | Status | What it enables |
 |---|---|---|
-| Jupiter v6 | devnet + mainnet-fork integration tests | private swap on any Jupiter route |
-| Kamino lend | mainnet-fork through `b402_kamino_adapter::execute` | private deposit (v0.1 alpha; withdraw / borrow / repay are gated to `NotYetImplemented` until mainnet-fork integration tests cover them) |
+| Jupiter v6 | mainnet (live) | private swap on any Jupiter route |
+| Kamino lend | mainnet (live) — `private_lend` + `private_redeem` on USDC reserve, per-user obligation | private deposit + redeem; borrow / repay handlers are scaffolded but gated `NotYetImplemented` |
 | Mock | live on devnet | adapter ABI invariant tests |
-| Adrena perps | scaffold; discriminators verified vs Adrena IDL | private leveraged trading (impl in progress) |
+| Adrena perps | scaffold; discriminators verified vs Adrena IDL | private leveraged trading |
 | Orca LP | scaffold | private whirlpool positions |
 | Jupiter perps | scaffold | private perps via JLP (request-queue model — pending v2 ABI two-phase claim notes) |
 | Drift perps | spec only | deferred pending Drift's post-hack reboot |
 
-## Devnet deployment
+## Mainnet deployment
 
 | Program | ID |
 |---|---|
-| Pool | `42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y` |
+| Pool | `42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y` (finalized slot 417871785, Path A slippage skip + Path B synthetic-mint input transfer skip + per_user_obligation) |
 | Verifier (transact) | `Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK` |
 | Verifier (adapt) | `3Y2tyhNSaUiW5AcZcmFGRyTMdnroxHxc5GqFQPcMTZae` |
 | Jupiter adapter | `3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7` |
-| Kamino adapter | `2enwFgcGKJDqruHpCtvmhtxe3DYcV3k72VTvoGcdt2rX` |
+| Kamino adapter | `2enwFgcGKJDqruHpCtvmhtxe3DYcV3k72VTvoGcdt2rX` (finalized slot 417870483, `per_user_obligation` + `cpi-only` features) |
 | Mock adapter | `89kw33YDcbXfiayVNauz599LaDm51EuU8amWydpjYKgp` |
 | b402 ALT (16 entries) | `9FPYufa1KDkrn1VgfjkR7R667hbnTA7CNtmy38QcsuNj` |
 
-Mainnet alpha deployment in progress. See [`ops/mainnet-deploy.sh`](ops/mainnet-deploy.sh).
+Hosted relayer: Cloud Run revision `b402-solana-relayer-mainnet-00004-w5b`,
+exposes per-feature routes plus the generic `/relay/pool-ix` endpoint
+(any pool ix; auth + rate-limit enforced; `cfg.poolProgramId` operator-fixed).
+See [`ops/mainnet-deploy.sh`](ops/mainnet-deploy.sh).
 
 ## Privacy model
 
@@ -177,7 +180,7 @@ is the link between your wallet and your shielded actions:
 | Layer | What | Today |
 |---|---|---|
 | **L1: wallet ↔ action** | After shielding, your wallet isn't visible as the spend authority on subsequent shielded actions | a public-chain observer cannot cryptographically link a post-shield spend to the original wallet from the shielded action path alone — Groth16 proof binds the spend without revealing which note was spent |
-| **L2: action ↔ action** | Two shielded actions can't be trivially linked | broken at the note layer; per-user adapter PDAs land in v0.2 (helpers in `programs/b402-kamino-adapter/src/lib.rs` already, gated) |
+| **L2: action ↔ action** | Two shielded actions can't be trivially linked | broken at the note layer; per-user adapter PDAs live on mainnet via `per_user_obligation` (Kamino adapter slot 417870483) |
 | **L3: pool-level clustering** | Timing + amount correlation across the pool boundary | scales with anonymity set — small pool weak, large pool strong |
 
 **Defends against:** wallet-watching bots scraping mempool to copy
@@ -185,11 +188,12 @@ strategies, MEV searchers targeting public DEX flow, surveillance-grade
 indexers (Chainalysis, Nansen, Arkham) building wallet-level histories.
 Layer 1 unlinkability covers all of these.
 
-**Does NOT fully defend against (yet):** patient clustering analysts
-running timing-and-amount correlation across the pool boundary at small
-TVL. This is a fundamental property of UTXO-mixer constructions, not a
-b402-specific weakness. It's solved by adoption — every shield strengthens
-every other user's privacy. We cap alpha TVL while the anonymity set grows.
+**Does NOT fully defend against:** patient clustering analysts running
+timing-and-amount correlation across the pool boundary at small TVL.
+This is a fundamental property of UTXO-mixer constructions, not a
+b402-specific weakness. Mitigated by anonymity-set growth — every
+shield strengthens every other user's privacy. A soft TVL cap is
+enforced while the set grows.
 
 For autonomous agents specifically — where the adversary is automated
 strategy-copying bots, not patient analysts — Layer 1 is sufficient.
@@ -233,7 +237,8 @@ const unshieldRes = await b402.unshield({ to: recipientPubkey });    // spends t
 
 End-to-end runnable example: `examples/sdk-quick.ts`. Wraps wallet build,
 ATA derivation, tree fetch, and merkle-proof construction internally.
-`privateSwap` / `privateLend` / `redeem` on the same class — coming soon.
+`privateSwap`, `privateLend`, `privateRedeem` are exposed on the same class
+(shipped in `@b402ai/solana@0.0.20`).
 
 Lower-level building blocks (use these for paths the class doesn't cover yet):
 - `shield(params)` / `unshield(params)` — standalone action functions
@@ -325,7 +330,7 @@ b402-solana/
 │   ├── b402-verifier-transact/    Groth16 verifier, 18 PI (transact circuit)
 │   ├── b402-verifier-adapt/       Groth16 verifier, 23 PI (adapt circuit)
 │   ├── b402-jupiter-adapter/      Jupiter v6 CPI wrapper
-│   ├── b402-kamino-adapter/       Kamino lend CPI wrapper (deposit gated v0.1)
+│   ├── b402-kamino-adapter/       Kamino lend CPI wrapper (deposit + redeem live, per_user_obligation + cpi-only)
 │   ├── b402-mock-adapter/         test-only delta-invariant adapter
 │   ├── b402-adrena-adapter/       scaffold — perps, PRD-16
 │   ├── b402-orca-adapter/         scaffold — whirlpool LP
@@ -365,12 +370,15 @@ b402-solana/
 
 ## Status
 
-Alpha. Single-key admin during alpha → 3-of-5 multisig migration scheduled.
-Throwaway trusted-setup VK → multi-party ceremony in progress. External
-audits scoped with Veridise / Trail of Bits / Zellic — reports linked here
-when they land. Soft TVL cap during alpha; hard cap lands in `PoolConfig`
-before community-promoted deposits. Stealth-address bech32 encoding +
-production relayer hardening are next.
+Mainnet. Pool + verifiers + Jupiter adapter + Kamino adapter (per-user
+obligation) live; `private_swap`, `private_lend`, `private_redeem` proven
+end-to-end on mainnet with finalized signatures. Single-key admin today;
+3-of-5 multisig migration is the next operational milestone. Throwaway
+trusted-setup VK; multi-party ceremony pending. External audits scoped
+with Veridise / Trail of Bits / Zellic — reports linked here when they
+land. Soft TVL cap enforced; hard cap lands in `PoolConfig` before
+community-promoted deposits. Stealth-address bech32 encoding is the
+remaining SDK gap.
 
 Read the full [PRD set](docs/prds/) for the design rationale behind every
 decision. Issues + PRs welcome — adapter additions are the easiest contribution.

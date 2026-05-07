@@ -10,7 +10,7 @@
  *   model as the Solana keypair file the wallet was derived from.
  */
 
-import type { Connection, Logs, PublicKey } from '@solana/web3.js';
+import type { Connection, PublicKey } from '@solana/web3.js';
 
 // Lazy node-only deps. Persistence is a Node feature (atomic JSON file
 // per viewing-pub). Browsers can use NoteStore without persistence; we
@@ -87,7 +87,6 @@ export class NoteStore {
   private readonly opts: NoteStoreOptions;
   private readonly notesByCommitment = new Map<string, SpendableNote>();
   private readonly spentNullifiers = new Set<string>();
-  private _logsSubId: number | null = null;
   private _lastScannedSlot = 0n;
   private _persistPath: string | null = null;
   /** Newest pool signature processed by backfill — used as the `until:`
@@ -102,23 +101,13 @@ export class NoteStore {
     }
   }
 
-  /** Live subscribe to pool program logs + hydrate persisted state if any. */
+  /** Hydrate persisted state if any. */
   async start(): Promise<void> {
     if (this._persistPath) this._hydrate();
-    const { connection, poolProgramId } = this.opts;
-    this._logsSubId = connection.onLogs(poolProgramId, (logs) => {
-      this.handleLogs(logs).catch((e) => {
-        // eslint-disable-next-line no-console
-        console.warn('b402 note scanner:', e);
-      });
-    }, 'confirmed');
   }
 
   async stop(): Promise<void> {
-    if (this._logsSubId != null) {
-      await this.opts.connection.removeOnLogsListener(this._logsSubId);
-      this._logsSubId = null;
-    }
+    /* no live subscription to tear down */
   }
 
   /** Spendable notes for a given mint (Fr-reduced). */
@@ -254,8 +243,16 @@ export class NoteStore {
       // page only — that's the cursor we'll persist after processing.
       if (page === 0) newestSig = sigs[0].signature;
 
-      const BATCH = 5;
+      // Tuned for free-tier RPC: BATCH=2 + 100ms inter-batch gap stays
+      // under ~15 req/s sustained, well below Helius free's 10 req/s
+      // soft limit when combined with Connection's built-in 429 backoff.
+      // First-run cost on a 30-sig page: 30 * (50ms tx + 100ms gap) ≈ 4.5s,
+      // acceptable for a one-time bootstrap. Subsequent calls hit the
+      // cursor early and do 0–2 tx fetches.
+      const BATCH = 2;
+      const INTER_BATCH_MS = 100;
       for (let i = 0; i < sigs.length; i += BATCH) {
+        if (i > 0) await new Promise((r) => setTimeout(r, INTER_BATCH_MS));
         const batch = sigs.slice(i, i + BATCH);
         const txs = await Promise.allSettled(
           batch.map((sig) =>
@@ -317,16 +314,6 @@ export class NoteStore {
     return { txsScanned, eventsSeen, notesIngested, cursorAdvanced, truncated };
   }
 
-  private async handleLogs(_logs: Logs): Promise<void> {
-    // v0: Anchor-emitted events are base64-encoded in program logs.
-    // Proper decoding requires the IDL. For scaffold, we acknowledge this
-    // is where the decode-and-index lives; full implementation in a follow-up
-    // once Anchor IDL is checked in.
-    //
-    // Intentionally a no-op body rather than silent drop: the subscription
-    // keeps pressure on the connection and proves the wiring works.
-    this._lastScannedSlot = BigInt(Date.now());
-  }
 
   /**
    * Test helper / direct ingestion for when logs have been parsed elsewhere.

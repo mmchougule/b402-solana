@@ -43,6 +43,18 @@ function fakeConnection(overrides: Partial<{
       value: { err: confirmErr },
       context: { slot },
     })),
+    // pollForConfirmation in submit.ts uses getSignatureStatuses now
+    // (replaces the WS-based confirmTransaction). Fake confirms on first
+    // poll so tests don't sleep through the backoff loop.
+    getSignatureStatuses: vi.fn(async (_sigs: string[]) => ({
+      value: [{
+        slot,
+        confirmations: 1,
+        err: confirmErr,
+        confirmationStatus: 'confirmed',
+      }],
+      context: { slot },
+    })),
     getSlot: vi.fn(async () => slot),
     getBalance: vi.fn(async () => 1_000_000_000),
   } as unknown as Connection;
@@ -87,7 +99,7 @@ describe('RpcSubmitter', () => {
     expect(vtx.message.staticAccountKeys[0]!.toBase58()).toBe(relayer.publicKey.toBase58());
   });
 
-  it('rejects when accountKeys[0] is not a signer/writable', async () => {
+  it('rejects when no accountKey is signer+writable (no relayer slot)', async () => {
     const submitter = new RpcSubmitter({
       connection: fakeConnection(),
       relayer: Keypair.generate(),
@@ -100,10 +112,54 @@ describe('RpcSubmitter', () => {
       ixData: new Uint8Array(32),
       accountKeys: [
         { pubkey: '11111111111111111111111111111111', isSigner: false, isWritable: false },
+        { pubkey: 'SysvarRent111111111111111111111111111111111', isSigner: false, isWritable: false },
       ],
       altAddresses: [],
       computeUnitLimit: 200_000,
     })).rejects.toBeInstanceOf(RelayerError);
+  });
+
+  it('finds the relayer slot at any index — supports commit_inputs ix layout', async () => {
+    // commit_inputs places pendingInputsPda at [0] (writable, NOT signer)
+    // and the relayer at [1] (signer + writable). Submitter must scan
+    // for the first signer+writable slot and substitute the relayer there.
+    const relayer = Keypair.generate();
+    let captured: Uint8Array | null = null;
+    const conn = fakeConnection({
+      sendRawTransaction: async (wire: Uint8Array) => {
+        captured = wire;
+        return 'sig-commit-inputs';
+      },
+    });
+
+    const submitter = new RpcSubmitter({
+      connection: conn,
+      relayer,
+      maxTxSize: 1232,
+      jitoBundleUrl: null,
+    });
+
+    const result = await submitter.submit({
+      programId: new PublicKey('11111111111111111111111111111111'),
+      ixData: new Uint8Array(64),
+      accountKeys: [
+        // Slot 0: pending-inputs PDA (writable, not signer)
+        { pubkey: 'SysvarRent111111111111111111111111111111111', isSigner: false, isWritable: true },
+        // Slot 1: relayer placeholder (signer + writable) — must be remapped
+        { pubkey: '11111111111111111111111111111111', isSigner: true, isWritable: true },
+        // Slot 2: system program
+        { pubkey: '11111111111111111111111111111111', isSigner: false, isWritable: false },
+      ],
+      altAddresses: [],
+      computeUnitLimit: 200_000,
+    });
+
+    expect(result.signature).toBe('sig-commit-inputs');
+    const vtx = VersionedTransaction.deserialize(captured!);
+    // Fee payer (= staticAccountKeys[0]) is always the first signer+writable
+    // in compiled tx — for this layout that's the relayer placeholder we
+    // remapped, so it lands as relayer.publicKey.
+    expect(vtx.message.staticAccountKeys[0]!.toBase58()).toBe(relayer.publicKey.toBase58());
   });
 
   it('rejects unknown ALT', async () => {

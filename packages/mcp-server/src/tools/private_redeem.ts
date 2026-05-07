@@ -13,8 +13,11 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { Connection, Keypair } from '@solana/web3.js';
-import { getOrCreateAssociatedTokenAccount } from '@solana/spl-token';
+import { Connection, Keypair, PublicKey, Transaction } from '@solana/web3.js';
+import {
+  createAssociatedTokenAccountIdempotentInstruction,
+  getAssociatedTokenAddressSync,
+} from '@solana/spl-token';
 import { createRpc } from '@lightprotocol/stateless.js';
 import {
   poolConfigPda, adapterRegistryPda, treeStatePda,
@@ -25,11 +28,12 @@ import { leToFrReduced, type SpendableNote } from '@b402ai/solana-shared';
 import type { B402Context } from '../context.js';
 import type { PrivateRedeemInput } from '../schemas.js';
 import {
-  POOL, KAMINO_ADAPTER, RESERVE, USDC,
+  POOL, KAMINO_ADAPTER, USDC,
   parseReserve, deriveAllPerUser, ensureAlt, ensurePerUserSetup,
   ensureAdapterScratchAtas, adapterAuthorityPda,
   buildWithdrawPayload, buildAdapterIxData, buildWithdrawRemainingAccounts,
 } from '../kamino-helpers.js';
+import { pickBestKaminoReserveByMint } from '@b402ai/solana';
 
 function loadKeypair(): Keypair {
   const p = path.resolve(
@@ -52,19 +56,26 @@ export async function handlePrivateRedeem(
     throw new Error(`private_redeem is mainnet-only (current cluster: ${ctx.cluster}).`);
   }
 
+  await ctx.b402.ready();
+
   const conn = new Connection(ctx.rpcUrl, 'confirmed');
   const admin = loadKeypair();
-  const inMint = USDC;
+  const inMint = input.mint ? new PublicKey(input.mint) : USDC;
 
-  // 1. Read + parse Kamino reserve.
-  const reserveAcct = await conn.getAccountInfo(RESERVE);
-  if (!reserveAcct) throw new Error(`Kamino USDC reserve ${RESERVE.toBase58()} not on chain`);
-  const reserve = parseReserve(reserveAcct.data);
-  const outMint = reserve.collateralMint; // kUSDC (the input for redeem)
+  // 1. Discover the (market, reserve) tuple — must match what was used at lend.
+  const marketFilter = input.market ? { market: new PublicKey(input.market) } : {};
+  const picked = await pickBestKaminoReserveByMint(conn, inMint, marketFilter);
+  if (!picked) {
+    throw new Error(`no Kamino reserve found for mint ${inMint.toBase58()}${input.market ? ` in market ${input.market}` : ''}`);
+  }
+  const reserveAddr = picked.best.address;
+  const market = picked.best.market;
+  const reserve = parseReserve(picked.best.data, market);
+  const outMint = reserve.collateralMint; // collateral mint (input for redeem — voucher being burned)
 
   // 2. Per-user accounts.
   const spendingPub = ctx.b402.wallet.spendingPub;
-  const perUser = deriveAllPerUser(spendingPub, reserve);
+  const perUser = deriveAllPerUser(spendingPub, reserve, market);
   const adapterAuthority = adapterAuthorityPda();
 
   // 3. Reverse adapter scratch ATAs: adapter_in_ta = kUSDC, adapter_out_ta = USDC.
@@ -78,14 +89,51 @@ export async function handlePrivateRedeem(
   // 4. Per-user setup (idempotent).
   await ensurePerUserSetup({ conn, admin, perUser, reserve, adapterAuthority });
 
-  // 5. Pool's adapt_execute requires fee_ata_sentinel (relayer's ATA for IN
-  //    mint). For redeem, IN mint = kUSDC. Pre-create.
-  await getOrCreateAssociatedTokenAccount(conn, admin, outMint /* kUSDC */, admin.publicKey);
+  // 5. Pool's adapt_execute requires fee_ata_sentinel — the relayer's ATA
+  //    for the IN mint. For redeem, IN mint = kUSDC. The relayer is either
+  //    (a) the hosted HTTP relayer pubkey (default mainnet path), or
+  //    (b) the local SDK relayer keypair (e.g. e2e fork tests). Either
+  //    way, ensure the ATA exists; user (admin) pays the ~0.002 SOL rent
+  //    once. Anyone can be the payer of an ATA owned by anyone else.
+  const sdkInternal = ctx.b402 as unknown as {
+    _relayerHttp?: { client: { pubkey: PublicKey } };
+    relayer?: { publicKey: PublicKey };
+  };
+  const relayerPubkey = sdkInternal._relayerHttp?.client.pubkey
+    ?? sdkInternal.relayer?.publicKey
+    ?? admin.publicKey;
+  // Idempotent ATA create — only sends a tx if missing. Avoids
+  // getOrCreateAssociatedTokenAccount's WS-based confirm.
+  const relayerVoucherAta = getAssociatedTokenAddressSync(outMint, relayerPubkey, true);
+  const existing = await conn.getAccountInfo(relayerVoucherAta);
+  if (!existing) {
+    const tx = new Transaction().add(
+      createAssociatedTokenAccountIdempotentInstruction(
+        admin.publicKey, relayerVoucherAta, relayerPubkey, outMint,
+      ),
+    );
+    const bh = await conn.getLatestBlockhash('confirmed');
+    tx.recentBlockhash = bh.blockhash;
+    tx.feePayer = admin.publicKey;
+    tx.sign(admin);
+    const sig = await conn.sendRawTransaction(tx.serialize(), { skipPreflight: false, preflightCommitment: 'confirmed' });
+    // Poll for confirm without WS subs.
+    const start = Date.now();
+    let interval = 2000;
+    while (Date.now() - start < 90_000) {
+      const r = await conn.getSignatureStatuses([sig], { searchTransactionHistory: false });
+      const s = r.value[0];
+      if (s?.confirmationStatus === 'confirmed' || s?.confirmationStatus === 'finalized') break;
+      if (s?.err) throw new Error(`relayer voucher ATA tx failed: ${JSON.stringify(s.err)}`);
+      await new Promise((r) => setTimeout(r, interval));
+      interval = Math.min(interval * 1.2, 5000);
+    }
+  }
 
-  // 6. ALT (extends with per-user PDAs lazily).
+  // 6. ALT (extends with per-user PDAs lazily, persisted per (market, mint)).
   const [pendingInputsPda] = derivePendingInputsPda(POOL, perUser.ownerPda.toBuffer());
   const altPubkey = await ensureAlt({
-    conn, admin, reserve, perUser, pendingInputsPda,
+    conn, admin, market, reserveAddr, reserve, perUser, pendingInputsPda,
     adapterAuthority,
     adapterInTa: wAdapterInTa, adapterOutTa: wAdapterOutTa,
     outMint: inMint, // for ALT purposes, want USDC + kUSDC token configs both included
@@ -117,9 +165,9 @@ export async function handlePrivateRedeem(
   const ktIn = redeemNote.value;
 
   // 8. Build adapter ix + ra_withdraw_per_user.
-  const actionPayload = buildWithdrawPayload(RESERVE, ktIn);
+  const actionPayload = buildWithdrawPayload(reserveAddr, ktIn);
   const adapterIxData = buildAdapterIxData(ktIn, 0n, actionPayload);
-  const remainingAccounts = buildWithdrawRemainingAccounts({ reserve, perUser });
+  const remainingAccounts = buildWithdrawRemainingAccounts({ market, reserveAddr, reserve, perUser });
 
   // 9. Pool's USDC vault delta — actual USDC redeemed.
   const usdcVaultPda = vaultPda(POOL, inMint);
