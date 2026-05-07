@@ -521,18 +521,22 @@ export class B402Solana {
     }
   }
 
+  /**
+   * Lazily resolve circuit artifacts. Called by methods that actually need
+   * a prover (shield, privateSwap). Read-only methods (balance, holdings)
+   * don't trigger the fetch — and unit tests that just exercise wallet
+   * setup never hit the network.
+   */
+  private async _ensureProvers(): Promise<void> {
+    if (this._prover && this._adaptProver) return;
+    const { resolveAllCircuits } = await import('./circuits.js');
+    const c = await resolveAllCircuits();
+    if (!this._prover) this._prover = new TransactProver(c.transact);
+    if (!this._adaptProver) this._adaptProver = new AdaptProver(c.adapt);
+  }
+
   /** Lazy-init wallet + note store. Idempotent. */
   async ready(): Promise<void> {
-    // Auto-resolve circuit artifacts on first ready() if the caller didn't
-    // pass any. Cached at ~/.b402ai/circuits/<sha>/ — first install pays
-    // a one-time ~36MB fetch from the GitHub release; subsequent runs are
-    // local. Hashes are pinned in src/circuits.ts and verified before use.
-    if (!this._prover || !this._adaptProver) {
-      const { resolveAllCircuits } = await import('./circuits.js');
-      const c = await resolveAllCircuits();
-      if (!this._prover) this._prover = new TransactProver(c.transact);
-      if (!this._adaptProver) this._adaptProver = new AdaptProver(c.adapt);
-    }
     if (!this._wallet) {
       // Deterministic b402 wallet seeded from the active signer. For
       // KeypairSigner this is `keypair.secretKey[0..32]` (preserves
@@ -661,6 +665,7 @@ export class B402Solana {
   /** Shield `amount` of `mint` from this caller's ATA into the pool. */
   async shield(req: ShieldRequest): Promise<ShieldResult> {
     await this.ready();
+    await this._ensureProvers();
     if (!this._prover) {
       throw new B402Error(
         B402ErrorCode.InvalidConfig,
@@ -738,6 +743,7 @@ export class B402Solana {
    */
   async unshield(req: UnshieldRequest): Promise<UnshieldResult> {
     await this.ready();
+    await this._ensureProvers();
     if (!this._prover) {
       throw new B402Error(
         B402ErrorCode.InvalidConfig,
@@ -920,6 +926,7 @@ export class B402Solana {
    */
   async privateSwap(req: PrivateSwapRequest): Promise<PrivateSwapResult> {
     await this.ready();
+    await this._ensureProvers();
     // Relayer pubkey bound into the ix's account[0] + relayer_fee_recipient
     // placeholder + feeAtaSentinel derivation. When the HTTP relayer is in
     // use, we use ITS pubkey so on-chain accounts match the actual fee payer.
