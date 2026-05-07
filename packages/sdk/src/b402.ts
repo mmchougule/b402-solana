@@ -44,6 +44,32 @@ function nodeRandomBytes(n: number): Uint8Array {
   (globalThis.crypto as Crypto).getRandomValues(out);
   return out;
 }
+
+/**
+ * Poll for tx confirmation via getSignatureStatuses. Avoids the
+ * signatureSubscribe WebSocket that confirmTransaction opens, which
+ * keeps the Node event loop alive past the user's last `await` and
+ * makes short scripts hang on exit.
+ */
+async function pollConfirm(
+  conn: Connection,
+  sig: string,
+  timeoutMs: number,
+): Promise<void> {
+  const start = Date.now();
+  let interval = 1500;
+  while (Date.now() - start < timeoutMs) {
+    const r = await conn.getSignatureStatuses([sig], { searchTransactionHistory: false });
+    const s = r.value[0];
+    if (s?.confirmationStatus === 'confirmed' || s?.confirmationStatus === 'finalized') {
+      if (s.err) throw new Error(`tx ${sig} landed with err ${JSON.stringify(s.err)}`);
+      return;
+    }
+    await new Promise((res) => setTimeout(res, interval));
+    interval = Math.min(interval * 1.2, 4000);
+  }
+  throw new Error(`tx ${sig} not confirmed within ${timeoutMs}ms`);
+}
 import { FR_MODULUS, PROGRAM_IDS, B402_ALT_DEVNET, B402_ALT_MAINNET, leToFrReduced } from '@b402ai/solana-shared';
 import type { SpendableNote } from '@b402ai/solana-shared';
 import {
@@ -1155,10 +1181,9 @@ export class B402Solana {
           skipPreflight: false,
           preflightCommitment: 'confirmed',
         });
-        await this.connection.confirmTransaction(
-          { signature: csig, blockhash: commitBh.blockhash, lastValidBlockHeight: commitBh.lastValidBlockHeight },
-          'confirmed',
-        );
+        // Poll-based — see comment in actions/shield.ts on why we avoid
+        // confirmTransaction's WebSocket subscription.
+        await pollConfirm(this.connection, csig, 90_000);
       }
       } // end else (alreadyCommitted check)
     }
@@ -1430,10 +1455,7 @@ export class B402Solana {
         skipPreflight: true,
         preflightCommitment: 'confirmed',
       });
-      await this.connection.confirmTransaction(
-        { signature, blockhash: bh.blockhash, lastValidBlockHeight: bh.lastValidBlockHeight },
-        'confirmed',
-      );
+      await pollConfirm(this.connection, signature, 90_000);
     }
 
     // 13. Compute outAmount from on-chain delta.

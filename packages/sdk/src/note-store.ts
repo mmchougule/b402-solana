@@ -10,7 +10,7 @@
  *   model as the Solana keypair file the wallet was derived from.
  */
 
-import type { Connection, Logs, PublicKey } from '@solana/web3.js';
+import type { Connection, PublicKey } from '@solana/web3.js';
 
 // Lazy node-only deps. Persistence is a Node feature (atomic JSON file
 // per viewing-pub). Browsers can use NoteStore without persistence; we
@@ -87,7 +87,6 @@ export class NoteStore {
   private readonly opts: NoteStoreOptions;
   private readonly notesByCommitment = new Map<string, SpendableNote>();
   private readonly spentNullifiers = new Set<string>();
-  private _logsSubId: number | null = null;
   private _lastScannedSlot = 0n;
   private _persistPath: string | null = null;
   /** Newest pool signature processed by backfill — used as the `until:`
@@ -102,23 +101,13 @@ export class NoteStore {
     }
   }
 
-  /** Live subscribe to pool program logs + hydrate persisted state if any. */
+  /** Hydrate persisted state if any. */
   async start(): Promise<void> {
     if (this._persistPath) this._hydrate();
-    const { connection, poolProgramId } = this.opts;
-    this._logsSubId = connection.onLogs(poolProgramId, (logs) => {
-      this.handleLogs(logs).catch((e) => {
-        // eslint-disable-next-line no-console
-        console.warn('b402 note scanner:', e);
-      });
-    }, 'confirmed');
   }
 
   async stop(): Promise<void> {
-    if (this._logsSubId != null) {
-      await this.opts.connection.removeOnLogsListener(this._logsSubId);
-      this._logsSubId = null;
-    }
+    /* no live subscription to tear down */
   }
 
   /** Spendable notes for a given mint (Fr-reduced). */
@@ -325,16 +314,6 @@ export class NoteStore {
     return { txsScanned, eventsSeen, notesIngested, cursorAdvanced, truncated };
   }
 
-  private async handleLogs(_logs: Logs): Promise<void> {
-    // v0: Anchor-emitted events are base64-encoded in program logs.
-    // Proper decoding requires the IDL. For scaffold, we acknowledge this
-    // is where the decode-and-index lives; full implementation in a follow-up
-    // once Anchor IDL is checked in.
-    //
-    // Intentionally a no-op body rather than silent drop: the subscription
-    // keeps pressure on the connection and proves the wiring works.
-    this._lastScannedSlot = BigInt(Date.now());
-  }
 
   /**
    * Test helper / direct ingestion for when logs have been parsed elsewhere.
