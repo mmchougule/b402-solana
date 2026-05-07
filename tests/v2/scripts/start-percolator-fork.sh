@@ -43,6 +43,7 @@ ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 POOL_ID="42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y"
 NULLIFIER_ID="2AnRZwWu6CTurZs1yQpqrcJWo4yRYL1xpeV78b2siweq"
 VERIFIER_ADAPT_ID="3Y2tyhNSaUiW5AcZcmFGRyTMdnroxHxc5GqFQPcMTZae"
+VERIFIER_TRANSACT_ID="Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK"
 PERCOLATOR_ADAPTER_ID="65NRt6GpeakqXhqvKcN3knohzKEZT37arUyQi3SZwfxv"
 
 # --- percolator IDs (from Toly's keypairs) ---
@@ -53,14 +54,20 @@ PERCOLATOR_MATCH_ID="BoYEMRSe6cRw6jswHtApQVqjLf1PPakfuuDyxgWijYBU"
 USDC_MINT="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 
 # --- .so files ---
-POOL_SO="$ROOT/target/deploy/b402_pool.so"
+# Default to mainnet's binary for the pool — local builds with our feature
+# combo strip panic strings, and the resulting binary fails init_pool with
+# an Access violation at addr 0x32 (Borsh panic dereferences NULL fmt
+# pointer). Mainnet's binary works on this validator. Override with
+# POOL_SO=path/to/local.so if you specifically want to test a local change.
+POOL_SO="${POOL_SO:-/tmp/mainnet_pool.so}"
 NULLIFIER_SO="$ROOT/programs/b402-nullifier/target/deploy/b402_nullifier.so"
 VERIFIER_ADAPT_SO="$ROOT/target/deploy/b402_verifier_adapt.so"
+VERIFIER_TRANSACT_SO="${VERIFIER_TRANSACT_SO:-/tmp/mainnet_verifier_transact.so}"
 PERCOLATOR_ADAPTER_SO="$ROOT/target/deploy/b402_percolator_adapter.so"
 PERCOLATOR_PROG_SO="${PERCOLATOR_PROG_SO:-$HOME/development/ai/percolator-prog/target/deploy/percolator_prog.so}"
 PERCOLATOR_MATCH_SO="${PERCOLATOR_MATCH_SO:-$HOME/development/ai/percolator-match/target/deploy/percolator_match.so}"
 
-for f in "$POOL_SO" "$NULLIFIER_SO" "$VERIFIER_ADAPT_SO" "$PERCOLATOR_ADAPTER_SO" "$PERCOLATOR_PROG_SO" "$PERCOLATOR_MATCH_SO"; do
+for f in "$POOL_SO" "$NULLIFIER_SO" "$VERIFIER_ADAPT_SO" "$VERIFIER_TRANSACT_SO" "$PERCOLATOR_ADAPTER_SO" "$PERCOLATOR_PROG_SO" "$PERCOLATOR_MATCH_SO"; do
   if [[ ! -f "$f" ]]; then
     echo "FAIL: missing $f" >&2
     echo "  - b402 .so: 'anchor build' (and rebuild b402-nullifier separately)" >&2
@@ -94,6 +101,7 @@ echo "    USDC=$USDC_MINT (cloned from mainnet)"
 BOOT_ARGS="\
   --upgradeable-program $POOL_ID $POOL_SO $UPGRADE_AUTH \
   --upgradeable-program $NULLIFIER_ID $NULLIFIER_SO $UPGRADE_AUTH \
+  --upgradeable-program $VERIFIER_TRANSACT_ID $VERIFIER_TRANSACT_SO $UPGRADE_AUTH \
   --upgradeable-program $VERIFIER_ADAPT_ID $VERIFIER_ADAPT_SO $UPGRADE_AUTH \
   --upgradeable-program $PERCOLATOR_ADAPTER_ID $PERCOLATOR_ADAPTER_SO $UPGRADE_AUTH \
   --upgradeable-program $PERCOLATOR_PROG_ID $PERCOLATOR_PROG_SO $UPGRADE_AUTH \

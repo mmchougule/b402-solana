@@ -374,10 +374,20 @@ describe('v2_fork_percolator e2e — TDD ladder', () => {
 
     // Pre-create owner_pda's percolator USDC ATA.
     const { createAssociatedTokenAccountIdempotentInstruction } = await import('@solana/spl-token');
+    // Adapter authority PDA owns the in/out scratch ATAs the pool's
+    // adapt_execute_v2 hands to the percolator-adapter. Same pattern as
+    // kamino: pool sweeps user's deposit → adapter_in_ta, adapter executes
+    // protocol op, sweeps adapter_out_ta back to pool's vault.
+    const SEED_ADAPTER_AUTHORITY = Buffer.from('adapter');
+    const [adapterAuthority] = PublicKey.findProgramAddressSync(
+      [SEED_B402, SEED_ADAPTER_AUTHORITY], PERCOLATOR_ADAPTER_ID,
+    );
+    const adapterInTa = getAssociatedTokenAddressSync(mint, adapterAuthority, true);
+    const adapterOutTa = adapterInTa; // single-mint flow: in = out
     await sendAndConfirmTransaction(conn,
-      new Transaction().add(
-        createAssociatedTokenAccountIdempotentInstruction(admin.publicKey, userPercolatorAta, ownerPda, mint),
-      ),
+      new Transaction()
+        .add(createAssociatedTokenAccountIdempotentInstruction(admin.publicKey, userPercolatorAta, ownerPda, mint))
+        .add(createAssociatedTokenAccountIdempotentInstruction(admin.publicKey, adapterInTa, adapterAuthority, mint)),
       [admin], { commitment: 'confirmed' });
 
     // ─ Pre-call: push fresh Hyperp mark + KeeperCrank so engine envelope
@@ -478,6 +488,12 @@ describe('v2_fork_percolator e2e — TDD ladder', () => {
     // ─ THE CALL ─
     const margin = 5_000_000n; // exactly the shielded note value
     const photonRpc = createRpc(RPC, 'http://127.0.0.1:8784');
+    // SDK's buildPercolatorPerUserRemainingAccounts only emits indexes 0-11;
+    // the adapter pins slabVaultAuthority at index 12 (RA_SLAB_VAULT_AUTHORITY)
+    // and treats matcher_tail as accounts at index 13+. Pass slabVaultAuthority
+    // as the first matcherTail entry so it lands at exactly index 12.
+    // matcherTail goes at the TOP level — privatePerpOpen reads req.matcherTail,
+    // not req.perUserAccts.matcherTail.
     const result = await b402.privatePerpOpen({
       lpIdx: 0,
       sizeE6: 1_000n,
@@ -486,6 +502,7 @@ describe('v2_fork_percolator e2e — TDD ladder', () => {
       feePaymentIfInit: 1_000_000n,
       inMint: mint,                         // local test mint, not mainnet USDC
       perUserAccts,
+      matcherTail: [{ pubkey: slabVaultAuthority, isSigner: false, isWritable: true }],
       alt: altAddr,
       phase9DualNote: true,
       pendingInputsMode: true,              // PRD-35 — public_inputs in a PDA, saves ~700 B

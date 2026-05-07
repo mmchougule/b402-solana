@@ -85,9 +85,13 @@ ark-serialize = "0.5"
 groth16-solana = "0.1.0"
 light-poseidon = "0.4"
 
+# lto="fat" + codegen-units=1 strips panic-format constants. The on-chain
+# runtime needs them to format Borsh-decode errors; without them, any
+# panic dereferences NULL and the program faults with "Access violation
+# at 0x32". Mainnet binary was built with thin LTO (43 KB larger). Match.
 [profile.release]
 overflow-checks = true
-lto = "fat"
+lto = "thin"
 codegen-units = 1
 
 [profile.release.build-override]

@@ -87,8 +87,6 @@ pub mod b402_percolator_adapter {
         // ATA and walks off with the user's collateral. Mirrors the
         // kamino-adapter cpi-only check.
         #[cfg(feature = "cpi-only")]
-        let ctx = _ctx;
-        #[cfg(feature = "cpi-only")]
         {
             use anchor_lang::solana_program::instruction::get_stack_height;
             use anchor_lang::solana_program::sysvar::instructions::{
@@ -98,7 +96,7 @@ pub mod b402_percolator_adapter {
                 get_stack_height() > 1,
                 PercolatorAdapterError::DirectCallRejected
             );
-            let ix_sysvar = &ctx.accounts.ix_sysvar;
+            let ix_sysvar = &_ctx.accounts.ix_sysvar;
             let current_idx = load_current_index_checked(ix_sysvar)? as usize;
             let outer_ix = load_instruction_at_checked(current_idx, ix_sysvar)?;
             require!(
