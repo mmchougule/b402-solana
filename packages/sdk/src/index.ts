@@ -56,6 +56,59 @@ export {
   type KaminoPerUserAccounts,
 } from './kamino.js';
 
+// Jupiter route helper — used internally by `b402.swap()` and exported
+// for callers who want to pre-fetch a quote then call `privateSwap()`.
+export {
+  fetchJupiterRoute,
+  type JupiterRouteRequest,
+  type JupiterRouteResponse,
+} from './jupiter-route.js';
+
+// Kamino mainnet helpers — used internally by `b402.lend()` / `b402.redeem()`.
+// Exported for advanced callers who want to compose Kamino flows manually
+// (e.g. their own multi-mint sweeper or APY-comparison UI).
+export {
+  POOL as KAMINO_POOL,
+  KAMINO_ADAPTER,
+  KLEND,
+  parseReserve,
+  deriveAllPerUser,
+  ensureAlt,
+  ensurePerUserSetup,
+  ensureAdapterScratchAtas,
+  adapterAuthorityPda,
+  buildDepositPayload,
+  buildWithdrawPayload,
+  buildAdapterIxData,
+  buildDepositRemainingAccounts,
+  buildWithdrawRemainingAccounts,
+  type ParsedReserve,
+  type PerUserAccounts,
+} from './kamino-mainnet.js';
+
+// On-chain reserve discovery (no static reserve map).
+export {
+  KLEND_PROGRAM_ID,
+  RESERVE_DISCRIMINATOR,
+  LENDING_MARKET_DISCRIMINATOR,
+  RESERVE_ACCOUNT_SIZE,
+  LENDING_MARKET_ACCOUNT_SIZE,
+  RESERVE_LENDING_MARKET_OFFSET,
+  RESERVE_FARM_COLLATERAL_OFFSET,
+  RESERVE_LIQUIDITY_MINT_OFFSET,
+  RESERVE_TOKEN_INFO_NAME_OFFSET,
+  RESERVE_AVAILABLE_AMOUNT_OFFSET,
+  RESERVE_BORROWED_AMOUNT_SF_OFFSET,
+  discoverKaminoMarkets,
+  discoverKaminoReserves,
+  findKaminoReserveByMint,
+  findAllKaminoReservesByMint,
+  pickBestKaminoReserveByMint,
+  type DiscoveredReserve,
+  type DiscoveredMarket,
+  type DiscoverReservesOptions,
+} from './kamino-discover.js';
+
 /** Solana hard tx-size cap. */
 export const MAX_TX_SIZE = 1232;
 /** Soft ceiling for adapter action_payload. Pool recomputes keccak over it. */
