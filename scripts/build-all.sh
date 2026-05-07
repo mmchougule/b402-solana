@@ -33,10 +33,31 @@ if [[ "${1:-}" == "--all" ]]; then
   PROGRAMS+=("${DEV_ONLY[@]}")
 fi
 
+# Per-program feature sets. Mainnet binaries are built with these flags;
+# local builds MUST match or the SDK's wire format gets rejected by the
+# on-chain Borsh deserializer (Anchor 102). bash 3.2 (macOS default) has
+# no assoc-array support — use case.
+features_for() {
+  case "$1" in
+    b402-pool)             echo "prd_35_pending_inputs,inline_cpi_nullifier,phase_9_dual_note" ;;
+    b402-verifier-adapt)   echo "phase_9_dual_note" ;;
+    b402-nullifier)        echo "cpi-only" ;;
+    b402-kamino-adapter)   echo "per_user_obligation" ;;
+    *)                     echo "" ;;
+  esac
+}
+
 for p in "${PROGRAMS[@]}"; do
   echo ""
   echo "==> $p"
-  cargo build-sbf --tools-version v1.54 --manifest-path "programs/$p/Cargo.toml"
+  feat=$(features_for "$p")
+  if [[ -n "$feat" ]]; then
+    cargo build-sbf --tools-version v1.54 \
+      --manifest-path "programs/$p/Cargo.toml" \
+      -- --features "$feat"
+  else
+    cargo build-sbf --tools-version v1.54 --manifest-path "programs/$p/Cargo.toml"
+  fi
 done
 
 echo ""

@@ -489,6 +489,7 @@ describe('v2_fork_percolator e2e — TDD ladder', () => {
       alt: altAddr,
       phase9DualNote: true,
       pendingInputsMode: true,              // PRD-35 — public_inputs in a PDA, saves ~700 B
+      inlineCpiNullifier: true,             // matches pool build features
       photonRpc,
     });
     expect(result.signature).toBeDefined();
