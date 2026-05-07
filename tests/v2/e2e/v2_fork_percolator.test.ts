@@ -53,8 +53,8 @@ const VERIFIER_T_ID = new PublicKey('Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6Zr
 const VERIFIER_A_ID = new PublicKey('3Y2tyhNSaUiW5AcZcmFGRyTMdnroxHxc5GqFQPcMTZae');
 const PERCOLATOR_ADAPTER_ID = new PublicKey('65NRt6GpeakqXhqvKcN3knohzKEZT37arUyQi3SZwfxv');
 // percolator-prog + matcher are cluster-specific. Local fork uses our
-// own keypairs; devnet uses Toly's deployed program IDs (the same ones
-// listed in his percolator-cli's devnet-market.json).
+// own keypairs; devnet uses the upstream-deployed program IDs (same as
+// listed in percolator-cli's devnet-market.json).
 const PERCOLATOR_PROG_ID = new PublicKey(process.env.PERCOLATOR_PROG_ID
   ?? (CLUSTER === 'devnet'
     ? '4PTXCZ4vLSK6aiUd3fx2dVVYSRNFnMSM4ijhDWkuFi2s'
@@ -164,7 +164,7 @@ describe('v2_fork_percolator e2e — TDD ladder', () => {
   const admin = loadAdmin();
   // MINT_PUBKEY env overrides the keypair-loaded mint. Used when targeting an
   // existing market whose collateral mint we don't control (e.g. wSOL on
-  // Toly's max-risk-market — we can't be the mint authority for wSOL, so
+  // the upstream max-risk-market — we can't be the mint authority for wSOL, so
   // T4 must wrap SOL instead of mintTo'ing).
   const mint = process.env.MINT_PUBKEY
     ? new PublicKey(process.env.MINT_PUBKEY)

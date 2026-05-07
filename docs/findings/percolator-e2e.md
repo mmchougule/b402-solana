@@ -1,11 +1,11 @@
 # Private perps on percolator — end-to-end
 
 End-to-end verification that the b402 shielded pool composes with
-[percolator](https://github.com/aeyakovenko/percolator-prog), Anatoly
-Yakovenko's permissionless perp engine on Solana. A user opens a perp
-position via a relayer-signed transaction; the user's wallet never
-appears on the perp tx; the slab account on percolator records the
-position owned by a PDA derived from the user's private spending key.
+[percolator](https://github.com/aeyakovenko/percolator-prog), a
+permissionless perp engine on Solana. A user opens a perp position
+via a relayer-signed transaction; the user's wallet never appears
+on the perp tx; the slab account on percolator records the position
+owned by a PDA derived from the user's private spending key.
 
 Same primitives this project already uses for kamino lending on mainnet
 ([example tx](https://solscan.io/tx/4gvqUAy7iAMD4qPaSCkfxrqRv4aoNZ1uwQ68wjtPheZ1EVwdRcFwqtVijfD6B6aQYyjUmkDGXVWGnTfMB5q7XM1d)).
@@ -70,10 +70,10 @@ Program 42a3hsCXt…         invoke [1]    ← b402 pool
   Program TokenkegQ…       invoke [2]    ← SPL token transfer (vault → adapter)
   Program 65NRt6Gpe…       invoke [2]    ← b402 percolator adapter
     Instruction: Execute
-    Program DzLTTqyx7t…    invoke [3]    ← Toly's percolator-prog (InitUser)
+    Program DzLTTqyx7t…    invoke [3]    ← percolator-prog (InitUser)
     Program DzLTTqyx7t…    invoke [3]    ← percolator-prog (DepositCollateral)
     Program DzLTTqyx7t…    invoke [3]    ← percolator-prog (TradeCpi)
-      Program BoYEMRSe6…   invoke [4]    ← passive matcher (Toly's match prog)
+      Program BoYEMRSe6…   invoke [4]    ← passive matcher (percolator-match)
 ```
 
 Position landed in the slab; `slab.accounts[1].owner == owner_pda`.
@@ -151,8 +151,9 @@ RPC=https://devnet.helius-rpc.com/?api-key=YOUR_KEY \
 
 The 6 b402 programs are deployed on devnet at the IDs in the program
 stack above. The percolator-prog at `4PTXCZ4vLSK6aiUd3fx2dVVYSRNFnMSM4ijhDWkuFi2s`
-is the same binary deployed by Toly (verifiable via `solana program dump`
-+ SHA-256: `6e2bb5aee602aed1de0b2d80f72f97b6b115e0f536438f76d31e0de06d5b7002`).
+matches the upstream-published binary (verifiable via `solana program dump`
++ SHA-256: `6e2bb5aee602aed1de0b2d80f72f97b6b115e0f536438f76d31e0de06d5b7002`,
+matches `percolator-cli/README.md` build provenance).
 
 ## Operational note on devnet vs mainnet
 
@@ -162,8 +163,8 @@ before each open. Hyperp markets accrue per-slot state and become
 unrevivable past the catchup envelope (200 slots at the engine's
 `CATCHUP_CHUNKS_MAX × max_dt`).
 
-Mainnet doesn't hit this — Toly's deployed markets run keeper bots
-(`percolator-cli/scripts/crank-bot.ts`, cron-installed via
+Mainnet doesn't hit this — the upstream-deployed markets run keeper
+bots (`percolator-cli/scripts/crank-bot.ts`, cron-installed via
 `mainnet-bounty3-cron-install.ts`) that crank continuously, so the
 engine never exits the envelope. The adapter's path is identical;
 only the test harness conditionally runs the primer when `CLUSTER !== 'mainnet'`.

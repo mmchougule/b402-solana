@@ -7,7 +7,7 @@
 #   - b402-nullifier                      (2AnRZwWu6…)
 #   - b402-verifier-adapt                 (3Y2tyhNSa…)
 #   - b402-percolator-adapter             (65NRt6Gpe…) [keypair-derived]
-#   - percolator-prog (Toly's)            (DzLTTqyx7…)
+#   - percolator-prog (upstream)            (DzLTTqyx7…)
 #   - percolator-match passive_lp         (BoYEMRSe6…)
 #
 # What it clones from mainnet:
@@ -46,7 +46,7 @@ VERIFIER_ADAPT_ID="3Y2tyhNSaUiW5AcZcmFGRyTMdnroxHxc5GqFQPcMTZae"
 VERIFIER_TRANSACT_ID="Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK"
 PERCOLATOR_ADAPTER_ID="65NRt6GpeakqXhqvKcN3knohzKEZT37arUyQi3SZwfxv"
 
-# --- percolator IDs (from Toly's keypairs) ---
+# --- percolator IDs (upstream keypairs) ---
 PERCOLATOR_PROG_ID="DzLTTqyx7tFjwseeDTnu4f6c55H5abPgcohRVkNCS4Bn"
 PERCOLATOR_MATCH_ID="BoYEMRSe6cRw6jswHtApQVqjLf1PPakfuuDyxgWijYBU"
 
