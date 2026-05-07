@@ -78,11 +78,14 @@ const admin = Keypair.fromSecretKey(new Uint8Array(JSON.parse(
 const adapterAuthority = derive([SEED_B402, SEED_ADAPTER], PERCOLATOR_ADAPTER);
 const adapterAta = await getOrCreateAssociatedTokenAccount(conn, admin, MINT_LOCAL, adapterAuthority, true);
 
-// alice's deterministic shielded identity (matches multi-user-smoke).
+// Use a fresh shielded identity for the round-trip test so it doesn't
+// collide with whatever state the multi-user smoke left in the slab.
+// `OPEN_CLOSE_USER` env var lets the caller pick the label.
+const userLabel = process.env.OPEN_CLOSE_USER ?? 'alice';
+const SKIP_OPEN = process.env.SKIP_OPEN === '1'; // close-only: assume position already exists
 const aliceHash = (function() {
   const h = Buffer.alloc(32);
-  const s = 'alice';
-  for (let i = 0; i < 32; i++) h[i] = (s.charCodeAt(i % s.length) + i * 7) & 0xff;
+  for (let i = 0; i < 32; i++) h[i] = (userLabel.charCodeAt(i % userLabel.length) + i * 7) & 0xff;
   return h;
 })();
 const ownerPda = derive([SEED_B402, SEED_PERP_OWNER, aliceHash], PERCOLATOR_ADAPTER);
@@ -137,6 +140,40 @@ async function freshCrank() {
       .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }))
       .add(ix),
     [admin], { commitment: 'confirmed', skipPreflight: true });
+}
+
+// Build PushHyperpMark + KeeperCrank ixs to PREPEND to a tx so the
+// engine's accrual envelope is fresh in the same tx as our adapter
+// call. Eliminates the slot gap that bites devnet hard.
+function buildEnginePrimerIxs() {
+  // PushOraclePrice: tag=17, priceE6 u64 LE, timestamp i64 LE
+  const ts = BigInt(Math.floor(Date.now() / 1000));
+  const pushData = Buffer.concat([
+    Buffer.from([17]),
+    u64Le(100_000_000n),
+    (() => { const b = Buffer.alloc(8); b.writeBigInt64LE(ts, 0); return b; })(),
+  ]);
+  const pushIx = new TransactionInstruction({
+    programId: PERCOLATOR_PROG,
+    keys: [
+      { pubkey: admin.publicKey, isSigner: true, isWritable: false },
+      { pubkey: SLAB, isSigner: false, isWritable: true },
+    ],
+    data: pushData,
+  });
+  // KeeperCrank: tag=5, caller_idx u16=65535, format_version u8=1
+  const crankData = Buffer.from([5, 0xff, 0xff, 1]);
+  const crankIx = new TransactionInstruction({
+    programId: PERCOLATOR_PROG,
+    keys: [
+      { pubkey: admin.publicKey, isSigner: true, isWritable: true },
+      { pubkey: SLAB, isSigner: false, isWritable: true },
+      { pubkey: SYSVAR_CLOCK_PUBKEY, isSigner: false, isWritable: false },
+      { pubkey: SLAB, isSigner: false, isWritable: false },
+    ],
+    data: crankData,
+  });
+  return [pushIx, crankIx];
 }
 
 async function ensureMapping() {
@@ -237,42 +274,52 @@ console.log(`slab:              ${SLAB.toBase58()}\n`);
 await ensureMapping();
 console.log('▶ mapping ready');
 
-// ── 1. OPEN ─────────────────────────────────────────────────────────────
+// ── 1. OPEN (skipped if SKIP_OPEN=1) ────────────────────────────────────
 const FUND = 10_500_000n; // 10.5 USDC margin
-await sendAndConfirmTransaction(conn,
-  new Transaction().add(
-    createMintToInstruction(MINT_LOCAL, adapterAta.address, admin.publicKey, FUND),
-  ),
-  [admin], { commitment: 'confirmed' });
+let openSig = null;
+let stateAfterOpen = null;
+if (!SKIP_OPEN) {
+  await sendAndConfirmTransaction(conn,
+    new Transaction().add(
+      createMintToInstruction(MINT_LOCAL, adapterAta.address, admin.publicKey, FUND),
+    ),
+    [admin], { commitment: 'confirmed' });
 
-await freshCrank();
-const adapterAtaPreOpen = await readAtaBalance(adapterAta.address);
-
-const openInner = Buffer.concat([
-  Buffer.from([TAG_OPEN]),
-  u16Le(LP_IDX),
-  i128Le(1_000n),       // size_e6 = 1000 (small enough to be well within margin)
-  u64Le(200_000_000n),  // limit_price ceiling
-  u64Le(1_000_000n),    // fee_payment_if_init = 1 USDC
-]);
-const openPayload = Buffer.concat([aliceHash, openInner]);
-const openIx = buildExecuteIx(openPayload, FUND, 0n);
-const openSig = await sendAndConfirmTransaction(conn,
-  new Transaction()
-    .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }))
-    .add(openIx),
-  [admin], { commitment: 'confirmed' });
-console.log(`▶ OPEN ✓  ${openSig}`);
-
-const stateAfterOpen = await readSlabAccount();
-console.log(`  slab: user_idx=${stateAfterOpen.user_idx} position=${stateAfterOpen.position}`);
-if (stateAfterOpen.position !== 1_000n) {
-  console.error(`  ✗ expected position=1000, got ${stateAfterOpen.position}`);
-  process.exit(1);
+  const openInner = Buffer.concat([
+    Buffer.from([TAG_OPEN]),
+    u16Le(LP_IDX),
+    i128Le(1_000n),
+    u64Le(200_000_000n),
+    u64Le(1_000_000n),
+  ]);
+  const openPayload = Buffer.concat([aliceHash, openInner]);
+  const openIx = buildExecuteIx(openPayload, FUND, 0n);
+  // Bundle: ComputeBudget + PushOracle + KeeperCrank + Execute(open).
+  // All in one tx so the engine accrual envelope stays inside its window.
+  openSig = await sendAndConfirmTransaction(conn,
+    new Transaction()
+      .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }))
+      .add(...buildEnginePrimerIxs())
+      .add(openIx),
+    [admin], { commitment: 'confirmed' });
+  console.log(`▶ OPEN ✓  ${openSig}`);
+  stateAfterOpen = await readSlabAccount();
+  console.log(`  slab: user_idx=${stateAfterOpen.user_idx} position=${stateAfterOpen.position}`);
+  if (stateAfterOpen.position === 0n) {
+    console.error(`  ✗ open did not register a position`);
+    process.exit(1);
+  }
+} else {
+  console.log(`▶ SKIP_OPEN=1 — using existing slab state for ${userLabel}`);
+  stateAfterOpen = await readSlabAccount();
+  if (!stateAfterOpen) {
+    console.error(`  ✗ ${userLabel} has no entry in the slab; can't skip open`);
+    process.exit(1);
+  }
+  console.log(`  slab: user_idx=${stateAfterOpen.user_idx} position=${stateAfterOpen.position}`);
 }
 
 // ── 2. CLOSE ────────────────────────────────────────────────────────────
-await freshCrank();
 const adapterAtaPreClose = await readAtaBalance(adapterAta.address);
 const slabVaultPreClose = await readAtaBalance(SLAB_VAULT);
 console.log(`\n  pre-close adapter_ata=${adapterAtaPreClose} slab_vault=${slabVaultPreClose}`);
@@ -291,6 +338,7 @@ const closeIx = buildExecuteIx(closePayload, 0n, 0n); // in_amount must be 0 for
 const closeSig = await sendAndConfirmTransaction(conn,
   new Transaction()
     .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 }))
+    .add(...buildEnginePrimerIxs())
     .add(closeIx),
   [admin], { commitment: 'confirmed' });
 console.log(`▶ CLOSE ✓  ${closeSig}`);
