@@ -254,8 +254,16 @@ export class NoteStore {
       // page only — that's the cursor we'll persist after processing.
       if (page === 0) newestSig = sigs[0].signature;
 
-      const BATCH = 5;
+      // Tuned for free-tier RPC: BATCH=2 + 100ms inter-batch gap stays
+      // under ~15 req/s sustained, well below Helius free's 10 req/s
+      // soft limit when combined with Connection's built-in 429 backoff.
+      // First-run cost on a 30-sig page: 30 * (50ms tx + 100ms gap) ≈ 4.5s,
+      // acceptable for a one-time bootstrap. Subsequent calls hit the
+      // cursor early and do 0–2 tx fetches.
+      const BATCH = 2;
+      const INTER_BATCH_MS = 100;
       for (let i = 0; i < sigs.length; i += BATCH) {
+        if (i > 0) await new Promise((r) => setTimeout(r, INTER_BATCH_MS));
         const batch = sigs.slice(i, i + BATCH);
         const txs = await Promise.allSettled(
           batch.map((sig) =>

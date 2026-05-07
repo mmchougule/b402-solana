@@ -76,6 +76,8 @@ import { commitmentHash, feeBindHash, nullifierHash, poseidonTagged } from './po
 import { computeExcessCommitment, deriveExcessRandom } from './excess.js';
 import { encryptNote } from './note-encryption.js';
 import { B402Error, B402ErrorCode } from './errors.js';
+import * as nodeOs from 'node:os';
+import * as nodePath from 'node:path';
 import {
   B402_NULLIFIER_PROGRAM_ID,
   buildCreateNullifierIx,
@@ -415,10 +417,42 @@ export class B402Solana {
     // `this.relayer != null` and throw with a clear error pointing to
     // the missing config.
     this.relayer = config.relayer ?? this.keypair ?? null;
-    this.notesPersistDir = config.notesPersistDir;
-    this.relayerHttpUrl = config.relayerHttpUrl;
-    this.relayerApiKey = config.relayerApiKey;
-    this.inlineCpiNullifier = config.inlineCpiNullifier ?? false;
+    // Default note-store persistence to ~/.b402ai/notes/<cluster>/ so the
+    // backfill cursor survives across runs — turning the typical refresh
+    // call from O(30 RPC calls) into O(1). Pass `notesPersistDir: ''` to
+    // disable (e.g. ephemeral CI). Skipped in non-Node envs where `os` is
+    // unavailable.
+    if (config.notesPersistDir !== undefined) {
+      this.notesPersistDir = config.notesPersistDir || undefined;
+    } else {
+      try {
+        this.notesPersistDir = nodePath.join(nodeOs.homedir(), '.b402ai', 'notes', config.cluster);
+      } catch {
+        this.notesPersistDir = undefined;
+      }
+    }
+    // Cluster-aware defaults so app devs don't have to configure a
+    // relayer to do their first private op. Override via config or pass
+    // empty string to disable. Public-tier API key (5 req/min) ships
+    // baked in — same key the MCP server defaults to.
+    const clusterDefaultRelayerUrl: Record<typeof config.cluster, string | undefined> = {
+      mainnet: 'https://b402-solana-relayer-mainnet-62092339396.us-central1.run.app',
+      devnet:  'https://b402-solana-relayer-devnet-62092339396.us-central1.run.app',
+      localnet: undefined,
+    };
+    const clusterDefaultApiKey: Record<typeof config.cluster, string | undefined> = {
+      mainnet: 'kp_53d31f4d4b758ea2',
+      devnet:  'kp_8a28d0e86074cde3',
+      localnet: undefined,
+    };
+    this.relayerHttpUrl = config.relayerHttpUrl === '' ? undefined
+      : (config.relayerHttpUrl ?? clusterDefaultRelayerUrl[config.cluster]);
+    this.relayerApiKey = config.relayerApiKey === '' ? undefined
+      : (config.relayerApiKey ?? clusterDefaultApiKey[config.cluster]);
+    // Phase 7B mainnet pool requires inline-CPI mode; default ON for
+    // mainnet/devnet so the first call works, override only for local
+    // bench-style configurations.
+    this.inlineCpiNullifier = config.inlineCpiNullifier ?? (config.cluster !== 'localnet');
     // Indexer is opt-in. When set, the SDK uses /v1/proof to support
     // spend-any-leaf; on indexer error it logs and falls back to the
     // rightmost-only proveMostRecentLeaf so a transient outage doesn't
@@ -426,9 +460,19 @@ export class B402Solana {
     // NOTE: must be a STATIC import (top of file). The package is
     // `"type": "module"` so `require` is undefined at runtime — using it
     // here was the 0.0.13 bug that broke MCP startup on every tool call.
-    this.indexer = config.indexerUrl
+    // Default indexer URL by cluster — gives `proveMostRecentLeaf`
+    // fallback the indexer-backed real-Merkle-path resolver, so older
+    // (non-rightmost) notes are spendable. Override with empty string.
+    const clusterDefaultIndexerUrl: Record<typeof config.cluster, string | undefined> = {
+      mainnet: 'https://b402-solana-indexer-api-62092339396.us-central1.run.app',
+      devnet: undefined, // no devnet indexer deployed yet
+      localnet: undefined,
+    };
+    const indexerUrl = config.indexerUrl === '' ? undefined
+      : (config.indexerUrl ?? clusterDefaultIndexerUrl[config.cluster]);
+    this.indexer = indexerUrl
       ? new B402Indexer({
-          url: config.indexerUrl,
+          url: indexerUrl,
           connection: this.connection,
           poolProgramId: new PublicKey(this.programIds.b402Pool),
         })
@@ -453,6 +497,16 @@ export class B402Solana {
 
   /** Lazy-init wallet + note store. Idempotent. */
   async ready(): Promise<void> {
+    // Auto-resolve circuit artifacts on first ready() if the caller didn't
+    // pass any. Cached at ~/.b402ai/circuits/<sha>/ — first install pays
+    // a one-time ~36MB fetch from the GitHub release; subsequent runs are
+    // local. Hashes are pinned in src/circuits.ts and verified before use.
+    if (!this._prover || !this._adaptProver) {
+      const { resolveAllCircuits } = await import('./circuits.js');
+      const c = await resolveAllCircuits();
+      if (!this._prover) this._prover = new TransactProver(c.transact);
+      if (!this._adaptProver) this._adaptProver = new AdaptProver(c.adapt);
+    }
     if (!this._wallet) {
       // Deterministic b402 wallet seeded from the active signer. For
       // KeypairSigner this is `keypair.secretKey[0..32]` (preserves
@@ -628,6 +682,26 @@ export class B402Solana {
     this._notes!.insertNote(result.note);
     // Remember the mint for future Fr→base58 resolution.
     this.learnMint(req.mint);
+
+    // Wait until the indexer reflects this shield. Otherwise a follow-up
+    // swap/lend that does `proveLeaf` for the new commitment hits a
+    // 404 and falls through to proveMostRecentLeaf — which then fails
+    // because on-chain TreeState may not have advanced through the user's
+    // RPC yet either. Bounded poll so a slow indexer doesn't hang the
+    // shield call indefinitely.
+    if (this.indexer) {
+      const target = BigInt(result.note.leafIndex);
+      const deadline = Date.now() + 30_000;
+      while (Date.now() < deadline) {
+        try {
+          const s = await this.indexer.state();
+          if (BigInt(s.leafCount) > target) break;
+        } catch {
+          // ignore — try again
+        }
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+    }
     return result;
   }
 
@@ -853,29 +927,60 @@ export class B402Solana {
     if (req.note) {
       note = req.note;
     } else {
-      const candidates = this._notes!.getSpendable(inMintFr);
+      let candidates = this._notes!.getSpendable(inMintFr);
       if (candidates.length === 0) {
         throw new B402Error(
           B402ErrorCode.NoSpendableNotes,
           `no private deposit in mint ${req.inMint.toBase58().slice(0, 8)}…`,
         );
       }
+      // Cross-check the value-matching candidates against the indexer's
+      // spent set. Local `markSpent` only fires after a SDK-orchestrated tx
+      // confirms; notes spent in a prior session (or by a different SDK
+      // instance with the same viewing key) look spendable locally but the
+      // nullifier is already on chain. We probe ONLY notes whose value
+      // matches `req.amount` (those are the actual candidates the picker
+      // below will choose from), in newest-first order, and stop as soon
+      // as we find an unspent one — keeps it to ~1 HTTP call in the happy
+      // path.
+      if (this.indexer) {
+        const matchValue = candidates
+          .filter((n) => n.value === req.amount)
+          .sort((a, b) => Number(BigInt(b.leafIndex) - BigInt(a.leafIndex)));
+        for (const n of matchValue) {
+          try {
+            const nh = await nullifierHash(this._wallet!.spendingPriv, n.leafIndex);
+            if (await this.indexer.isSpent(nh)) {
+              this._notes!.markSpent(n.commitment);
+              continue;
+            }
+            note = n;
+            break;
+          } catch {
+            // Indexer transient failure: fall through, picker below decides.
+            break;
+          }
+        }
+      }
+      // Fall-through picker (no indexer, or indexer probe didn't pick).
       // Exact-value match required. Among matches, pick the rightmost leaf
       // (highest leafIndex) — `proveMostRecentLeaf` only validates for the
       // rightmost; older leaves with newer leaves to their right strand
       // until we ship the indexer-backed real-Merkle-path resolver.
-      const matches = candidates.filter((n) => n.value === req.amount);
-      const sortedDesc = [...matches].sort((a, b) =>
-        Number(BigInt(b.leafIndex) - BigInt(a.leafIndex)),
-      );
-      note = sortedDesc[0];
       if (!note) {
-        const sizes = candidates.map((n) => n.value.toString()).join(', ');
-        throw new B402Error(
-          B402ErrorCode.InvalidConfig,
-          `private_swap requires an exact-match deposit. Available deposit sizes for this mint: [${sizes}]. Requested: ${req.amount}. ` +
-          `To swap a different amount, first shield exactly that amount, or unshield and reshield to split.`,
+        const matches = candidates.filter((n) => n.value === req.amount);
+        const sortedDesc = [...matches].sort((a, b) =>
+          Number(BigInt(b.leafIndex) - BigInt(a.leafIndex)),
         );
+        note = sortedDesc[0];
+        if (!note) {
+          const sizes = candidates.map((n) => n.value.toString()).join(', ');
+          throw new B402Error(
+            B402ErrorCode.InvalidConfig,
+            `private_swap requires an exact-match deposit. Available deposit sizes for this mint: [${sizes}]. Requested: ${req.amount}. ` +
+            `To swap a different amount, first shield exactly that amount, or unshield and reshield to split.`,
+          );
+        }
       }
     }
     if (note.value !== req.amount) {
@@ -1407,14 +1512,349 @@ export class B402Solana {
   }
 
   /**
-   * Lend underlying tokens into a registered yield protocol via its
-   * adapter. Mechanically a `privateSwap`: burns one note in `inMint`
-   * (the underlying), CPIs the adapter with a Deposit action, and
-   * reshields proceeds in `outMint` (the receipt token, e.g. kUSDC).
+   * Atomic private swap with auto-routing. Burns a shielded note in
+   * `inMint`, routes through Jupiter (Phoenix-direct on mainnet), and
+   * reshields the proceeds into a new note in `outMint`. Hosted relayer
+   * pays gas — caller wallet stays off-chain.
    *
-   * Caller still constructs `adapterIxData` + `remainingAccounts` for
-   * the target adapter. For Kamino, see `buildKaminoDepositIx` in
-   * `@b402ai/solana/kamino`.
+   * Minimal call shape:
+   * ```
+   * const r = await b402.swap({ inMint: USDC, outMint: SOL, amount: 1_000_000n });
+   * ```
+   *
+   * On mainnet this fetches a Jupiter quote, builds the adapter ix data
+   * + remaining_accounts from the quote, and calls `privateSwap` under
+   * the hood. On devnet falls through to the constant-rate mock adapter.
+   *
+   * Note value constraint: caller must hold a shielded note in `inMint`
+   * with value EXACTLY equal to `amount`. The SDK selects it
+   * automatically (most-recent leaf wins on ties).
+   */
+  async swap(req: {
+    inMint: PublicKey;
+    outMint: PublicKey;
+    amount: bigint;
+    /** Slippage tolerance in basis points. Default 30 (0.3%). */
+    slippageBps?: number;
+    /** Override expected OUT amount. Default: derived from Jupiter quote
+     *  with `slippageBps` applied as the floor. */
+    expectedOut?: bigint;
+    /** DEX allowlist for Jupiter routing. Default Phoenix (smallest
+     *  account count, fits the 1232 B tx cap reliably). */
+    dexes?: string;
+  }): Promise<PrivateSwapResult> {
+    await this.ready();
+
+    const { fetchJupiterRoute } = await import('./jupiter-route.js');
+    const { B402_ALT_MAINNET, B402_ALT_DEVNET } = await import('@b402ai/solana-shared');
+    const { getAssociatedTokenAddress } = await import('@solana/spl-token');
+    const { createRpc } = await import('@lightprotocol/stateless.js');
+
+    const adapterProgramId = new PublicKey(
+      this.cluster === 'mainnet'
+        ? this.programIds.b402JupiterAdapter
+        : this.programIds.b402MockAdapter,
+    );
+    const adapterAuthority = PublicKey.findProgramAddressSync(
+      [new TextEncoder().encode('b402/v1'), new TextEncoder().encode('adapter')],
+      adapterProgramId,
+    )[0];
+    const adapterInTa = await getAssociatedTokenAddress(req.inMint, adapterAuthority, true);
+    const adapterOutTa = await getAssociatedTokenAddress(req.outMint, adapterAuthority, true);
+
+    const altStr =
+      this.cluster === 'mainnet' ? B402_ALT_MAINNET :
+      this.cluster === 'devnet' ? B402_ALT_DEVNET : '';
+    if (!altStr) {
+      throw new Error(`b402.swap: no canonical Address Lookup Table for cluster ${this.cluster}. Use the lower-level privateSwap() and pass alt explicitly.`);
+    }
+    const alt = new PublicKey(altStr);
+
+    const photonRpc = createRpc(this.connection.rpcEndpoint, this.connection.rpcEndpoint);
+
+    let expectedOut = req.expectedOut;
+    let adapterIxData: Uint8Array | undefined;
+    let actionPayload: Uint8Array | undefined;
+    let remainingAccounts: Array<{ pubkey: PublicKey; isSigner: boolean; isWritable: boolean }> | undefined;
+    let extraAlts: PublicKey[] = [];
+
+    if (this.cluster === 'mainnet') {
+      const slippageBps = req.slippageBps ?? 30;
+      const route = await fetchJupiterRoute({
+        inMint: req.inMint,
+        outMint: req.outMint,
+        amount: req.amount,
+        slippageBps,
+        userPublicKey: adapterAuthority,
+        ...(req.dexes !== undefined ? { dexes: req.dexes } : {}),
+      });
+      const jupIxData = new Uint8Array(Buffer.from(route.swap.swapInstruction.data, 'base64'));
+      const u32Le = (n: number) => { const b = Buffer.alloc(4); b.writeUInt32LE(n, 0); return b; };
+      const u64Le = (v: bigint) => { const b = Buffer.alloc(8); b.writeBigUInt64LE(v, 0); return b; };
+      adapterIxData = new Uint8Array(Buffer.concat([
+        Buffer.from(instructionDiscriminator('execute')),
+        u64Le(req.amount), u64Le(0n),
+        u32Le(jupIxData.length), jupIxData,
+      ]));
+      actionPayload = jupIxData;
+      remainingAccounts = route.swap.swapInstruction.accounts.map((a) => ({
+        pubkey: new PublicKey(a.pubkey), isSigner: false, isWritable: a.isWritable,
+      }));
+      extraAlts = (route.swap.addressLookupTableAddresses ?? []).map((s) => new PublicKey(s));
+      // Pool enforces actual_out >= expected_out. Use Jupiter's
+      // otherAmountThreshold (= outAmount × (1 − slippageBps/10000)).
+      expectedOut = expectedOut ?? BigInt(route.quote.otherAmountThreshold ?? route.quote.outAmount);
+    }
+
+    return this.privateSwap({
+      inMint: req.inMint,
+      outMint: req.outMint,
+      amount: req.amount,
+      adapterProgramId,
+      adapterInTa,
+      adapterOutTa,
+      alt,
+      photonRpc,
+      ...(expectedOut !== undefined ? { expectedOut } : {}),
+      ...(adapterIxData !== undefined ? { adapterIxData } : {}),
+      ...(actionPayload !== undefined ? { actionPayload } : {}),
+      ...(remainingAccounts !== undefined ? { remainingAccounts } : {}),
+      ...(extraAlts.length > 0 ? { alts: extraAlts } : {}),
+      // Phase 9 mainnet pool requires both. Legacy paths only for devnet
+      // mock adapter and historical testing.
+      phase9DualNote: this.cluster === 'mainnet',
+      pendingInputsMode: this.cluster === 'mainnet',
+    });
+  }
+
+  /**
+   * Atomic private lend into a Kamino V2 reserve. Auto-discovers the
+   * deepest reserve for `mint` across all 182 mainnet LendingMarkets,
+   * derives per-(viewing key, mint) Kamino obligation, runs the deposit
+   * + voucher mint in one tx. Pass `market` to pin a specific one
+   * (e.g. JLP-only).
+   *
+   * Minimal call shape:
+   * ```
+   * const r = await b402.lend({ mint: USDC, amount: 1_000_000n });
+   * ```
+   *
+   * First call per (viewing key, mint) tuple incurs ~0.04 SOL one-time
+   * Kamino UserMetadata + Obligation rent (refundable on close).
+   * Subsequent lends in that reserve cost only the relayer's tx fees.
+   *
+   * Mainnet only. Devnet has no Kamino reserves.
+   */
+  async lend(req: {
+    mint: PublicKey;
+    amount: bigint;
+    /** Pin a specific Kamino LendingMarket. If unset, the deepest
+     *  reserve (by available + borrowed total supply) wins. */
+    market?: PublicKey;
+  }): Promise<PrivateSwapResult> {
+    if (this.cluster !== 'mainnet') {
+      throw new B402Error(B402ErrorCode.InvalidConfig,
+        `b402.lend is mainnet-only (current cluster: ${this.cluster}). Kamino reserves don't exist on devnet/localnet.`);
+    }
+    await this.ready();
+    await this.status({ refresh: true });
+    const admin = this._requireRelayer('b402.lend (Kamino setup txs)');
+    const { pickBestKaminoReserveByMint } = await import('./kamino-discover.js');
+    const km = await import('./kamino-mainnet.js');
+    const { createRpc } = await import('@lightprotocol/stateless.js');
+
+    const picked = await pickBestKaminoReserveByMint(
+      this.connection, req.mint,
+      req.market ? { market: req.market } : {},
+    );
+    if (!picked) throw new B402Error(B402ErrorCode.InvalidConfig,
+      `no Kamino reserve found for mint ${req.mint.toBase58()}${req.market ? ` in market ${req.market.toBase58()}` : ''}`);
+
+    const reserveAddr = picked.best.address;
+    const market = picked.best.market;
+    const reserve = km.parseReserve(picked.best.data, market);
+    const outMint = reserve.collateralMint;
+    const perUser = km.deriveAllPerUser(this._wallet!.spendingPub, reserve, market);
+    const adapterAuthority = km.adapterAuthorityPda();
+
+    const { adapterInTa, adapterOutTa } = await km.ensureAdapterScratchAtas({
+      conn: this.connection, admin, adapterAuthority,
+      inMint: req.mint, outMint,
+    });
+    await km.ensurePerUserSetup({
+      conn: this.connection, admin, perUser, reserve, adapterAuthority,
+    });
+
+    const { derivePendingInputsPda } = await import('./commit-inputs.js');
+    const [pendingInputsPda] = derivePendingInputsPda(
+      new PublicKey(this.programIds.b402Pool),
+      perUser.ownerPda.toBuffer(),
+    );
+    const altPubkey = await km.ensureAlt({
+      conn: this.connection, admin, market, reserveAddr, reserve, perUser,
+      pendingInputsPda, adapterAuthority, adapterInTa, adapterOutTa, outMint,
+      poolHelpers: { poolConfigPda, adapterRegistryPda, treeStatePda, tokenConfigPda, vaultPda },
+    });
+
+    const actionPayload = km.buildDepositPayload(reserveAddr, req.amount);
+    const adapterIxData = km.buildAdapterIxData(req.amount, 0n, actionPayload);
+    const remainingAccounts = km.buildDepositRemainingAccounts({ market, reserveAddr, reserve, perUser });
+    const photonRpc = createRpc(this.connection.rpcEndpoint, this.connection.rpcEndpoint);
+
+    return this.privateLend({
+      inMint: req.mint, outMint, amount: req.amount,
+      adapterProgramId: km.KAMINO_ADAPTER,
+      adapterInTa, adapterOutTa,
+      alt: altPubkey, photonRpc,
+      expectedOut: req.amount,
+      adapterIxData, actionPayload, remainingAccounts,
+      phase9DualNote: true, pendingInputsMode: true,
+    });
+  }
+
+  /**
+   * Atomic private redeem from a Kamino V2 reserve. Burns a voucher
+   * commitment minted by `b402.lend()` and reshields the underlying.
+   * Auto-finds the matching voucher in the local note store; pass
+   * `leafIndex` to pick a specific one.
+   *
+   * Mainnet only.
+   */
+  async redeem(req: {
+    /** Underlying mint (the one you lent). Voucher mint is the reserve's
+     *  collateral mint, derived from the discovered reserve. */
+    mint: PublicKey;
+    /** Pin a specific Kamino LendingMarket — must match the one used at
+     *  lend time. */
+    market?: PublicKey;
+    /** Optional Merkle leaf index of the voucher to burn. Default:
+     *  most-recent voucher in the SDK note store. */
+    leafIndex?: number;
+  }): Promise<PrivateSwapResult> {
+    if (this.cluster !== 'mainnet') {
+      throw new B402Error(B402ErrorCode.InvalidConfig,
+        `b402.redeem is mainnet-only (current cluster: ${this.cluster}).`);
+    }
+    await this.ready();
+    await this.status({ refresh: true });
+    const admin = this._requireRelayer('b402.redeem (Kamino setup txs)');
+    const { pickBestKaminoReserveByMint } = await import('./kamino-discover.js');
+    const km = await import('./kamino-mainnet.js');
+    const { createRpc } = await import('@lightprotocol/stateless.js');
+    const { getAssociatedTokenAddressSync, createAssociatedTokenAccountIdempotentInstruction } =
+      await import('@solana/spl-token');
+    const { Transaction } = await import('@solana/web3.js');
+
+    const picked = await pickBestKaminoReserveByMint(
+      this.connection, req.mint,
+      req.market ? { market: req.market } : {},
+    );
+    if (!picked) throw new B402Error(B402ErrorCode.InvalidConfig,
+      `no Kamino reserve found for mint ${req.mint.toBase58()}`);
+
+    const reserveAddr = picked.best.address;
+    const market = picked.best.market;
+    const reserve = km.parseReserve(picked.best.data, market);
+    const outMint = reserve.collateralMint; // voucher mint (input for redeem)
+    const perUser = km.deriveAllPerUser(this._wallet!.spendingPub, reserve, market);
+    const adapterAuthority = km.adapterAuthorityPda();
+
+    // Reverse adapter scratch ATAs: voucher in, underlying out.
+    const { adapterInTa: wAdapterInTa, adapterOutTa: wAdapterOutTa } =
+      await km.ensureAdapterScratchAtas({
+        conn: this.connection, admin, adapterAuthority,
+        inMint: outMint, outMint: req.mint,
+      });
+    await km.ensurePerUserSetup({
+      conn: this.connection, admin, perUser, reserve, adapterAuthority,
+    });
+
+    // The pool's adapt_execute requires fee_ata_sentinel = relayer's ATA
+    // for the IN mint. For redeem, IN mint is the voucher (collateral).
+    // Pre-create idempotently — anyone can pay rent for a relayer-owned ATA.
+    const relayerPubkey = this._relayerHttp?.client.pubkey ?? admin.publicKey;
+    const relayerVoucherAta = getAssociatedTokenAddressSync(outMint, relayerPubkey, true);
+    const existing = await this.connection.getAccountInfo(relayerVoucherAta);
+    if (!existing) {
+      const tx = new Transaction().add(
+        createAssociatedTokenAccountIdempotentInstruction(
+          admin.publicKey, relayerVoucherAta, relayerPubkey, outMint,
+        ),
+      );
+      const bh = await this.connection.getLatestBlockhash('confirmed');
+      tx.recentBlockhash = bh.blockhash;
+      tx.feePayer = admin.publicKey;
+      tx.sign(admin);
+      const sig = await this.connection.sendRawTransaction(tx.serialize(), {
+        skipPreflight: false, preflightCommitment: 'confirmed',
+      });
+      // Poll for confirm without WS subs.
+      const start = Date.now();
+      let interval = 2000;
+      while (Date.now() - start < 90_000) {
+        const r = await this.connection.getSignatureStatuses([sig], { searchTransactionHistory: false });
+        const s = r.value[0];
+        if (s?.confirmationStatus === 'confirmed' || s?.confirmationStatus === 'finalized') break;
+        if (s?.err) throw new Error(`relayer voucher ATA tx failed: ${JSON.stringify(s.err)}`);
+        await new Promise((r) => setTimeout(r, interval));
+        interval = Math.min(interval * 1.2, 5000);
+      }
+    }
+
+    const { derivePendingInputsPda } = await import('./commit-inputs.js');
+    const [pendingInputsPda] = derivePendingInputsPda(
+      new PublicKey(this.programIds.b402Pool),
+      perUser.ownerPda.toBuffer(),
+    );
+    const altPubkey = await km.ensureAlt({
+      conn: this.connection, admin, market, reserveAddr, reserve, perUser,
+      pendingInputsPda, adapterAuthority,
+      adapterInTa: wAdapterInTa, adapterOutTa: wAdapterOutTa, outMint: req.mint,
+      poolHelpers: { poolConfigPda, adapterRegistryPda, treeStatePda, tokenConfigPda, vaultPda },
+    });
+
+    // Pick the voucher note to burn.
+    const { leToFrReduced } = await import('@b402ai/solana-shared');
+    const voucherMintFr = leToFrReduced(outMint.toBytes());
+    const vouchers = this._notes!.getSpendable(voucherMintFr);
+    if (vouchers.length === 0) {
+      throw new B402Error(B402ErrorCode.NoSpendableNotes,
+        `no voucher notes for ${outMint.toBase58().slice(0, 8)}… — call b402.lend first or wait for the lend tx to finalize`);
+    }
+    let redeemNote = vouchers[0];
+    if (req.leafIndex !== undefined) {
+      const target = req.leafIndex;
+      const found = vouchers.find((n) => Number(n.leafIndex) === target);
+      if (!found) throw new B402Error(B402ErrorCode.InvalidConfig,
+        `leafIndex ${target} not in voucher notes`);
+      redeemNote = found;
+    } else {
+      const sorted = [...vouchers].sort((a, b) =>
+        Number(BigInt(b.leafIndex) - BigInt(a.leafIndex)));
+      redeemNote = sorted[0];
+    }
+    const ktIn = redeemNote.value;
+
+    const actionPayload = km.buildWithdrawPayload(reserveAddr, ktIn);
+    const adapterIxData = km.buildAdapterIxData(ktIn, 0n, actionPayload);
+    const remainingAccounts = km.buildWithdrawRemainingAccounts({ market, reserveAddr, reserve, perUser });
+    const photonRpc = createRpc(this.connection.rpcEndpoint, this.connection.rpcEndpoint);
+
+    return this.privateRedeem({
+      inMint: outMint, outMint: req.mint, amount: ktIn, note: redeemNote,
+      adapterProgramId: km.KAMINO_ADAPTER,
+      adapterInTa: wAdapterInTa, adapterOutTa: wAdapterOutTa,
+      alt: altPubkey, photonRpc,
+      expectedOut: 0n,
+      adapterIxData, actionPayload, remainingAccounts,
+      phase9DualNote: true, pendingInputsMode: true,
+    });
+  }
+
+  /**
+   * Lend underlying tokens into a registered yield protocol via its
+   * adapter. Low-level: caller supplies adapter wiring. Use `b402.lend()`
+   * for Kamino with auto-discovery + auto-setup.
    */
   async privateLend(req: PrivateSwapRequest): Promise<PrivateSwapResult> {
     return this.privateSwap(req);

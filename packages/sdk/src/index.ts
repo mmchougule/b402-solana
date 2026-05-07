@@ -56,6 +56,36 @@ export {
   type KaminoPerUserAccounts,
 } from './kamino.js';
 
+// Jupiter route helper — used internally by `b402.swap()` and exported
+// for callers who want to pre-fetch a quote then call `privateSwap()`.
+export {
+  fetchJupiterRoute,
+  type JupiterRouteRequest,
+  type JupiterRouteResponse,
+} from './jupiter-route.js';
+
+// Kamino mainnet helpers — used internally by `b402.lend()` / `b402.redeem()`.
+// Exported for advanced callers who want to compose Kamino flows manually
+// (e.g. their own multi-mint sweeper or APY-comparison UI).
+export {
+  POOL as KAMINO_POOL,
+  KAMINO_ADAPTER,
+  KLEND,
+  parseReserve,
+  deriveAllPerUser,
+  ensureAlt,
+  ensurePerUserSetup,
+  ensureAdapterScratchAtas,
+  adapterAuthorityPda,
+  buildDepositPayload,
+  buildWithdrawPayload,
+  buildAdapterIxData,
+  buildDepositRemainingAccounts,
+  buildWithdrawRemainingAccounts,
+  type ParsedReserve,
+  type PerUserAccounts,
+} from './kamino-mainnet.js';
+
 // On-chain reserve discovery (no static reserve map).
 export {
   KLEND_PROGRAM_ID,
