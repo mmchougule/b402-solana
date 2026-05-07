@@ -31,9 +31,11 @@ use bytemuck::{Pod, Zeroable};
 use core::mem::{align_of, offset_of, size_of};
 use percolator::{Account, RiskEngine, MAX_ACCOUNTS};
 
-/// Slab magic string. Must equal `0x504552434f4c4154` ("PERCOLAT" little-endian).
-/// Pinned at percolator-prog commit a946e550.
-pub const SLAB_MAGIC: u64 = 0x5441_4c4f_4352_4550;
+/// Slab magic string. Matches percolator-prog's `pub const MAGIC: u64 = 0x504552434f4c4154`
+/// (the on-disk bytes are "TALOCREP" — that's "PERCOLAT" reversed because the
+/// integer is stored in native LE byte order; when we read 8 LE bytes from the
+/// account back into a u64 we get this same value).
+pub const SLAB_MAGIC: u64 = 0x5045_5243_4f4c_4154;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SlabError {
@@ -266,9 +268,15 @@ mod tests {
     }
 
     #[test]
-    fn magic_pins_to_percolat_le() {
-        // ASCII "PERCOLAT" little-endian as u64.
-        assert_eq!(SLAB_MAGIC.to_le_bytes(), *b"PERCOLAT");
+    fn magic_pins_to_percolator_prog() {
+        // percolator-prog stores `pub const MAGIC: u64 = 0x504552434f4c4154` in
+        // native (LE) byte order — the bytes on disk are "TALOCREP" ("PERCOLAT"
+        // reversed). When the adapter reads those 8 bytes back as a LE u64 it
+        // recovers the same integer 0x504552434f4c4154. So our SLAB_MAGIC must
+        // equal that integer, NOT the byte-reversed form.
+        assert_eq!(SLAB_MAGIC, 0x5045_5243_4f4c_4154_u64);
+        // Bytes-on-disk view: "TALOCREP" (the BE form of "PERCOLAT").
+        assert_eq!(&SLAB_MAGIC.to_le_bytes(), b"TALOCREP");
     }
 
     #[test]

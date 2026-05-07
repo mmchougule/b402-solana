@@ -29,9 +29,48 @@ percolator deployments (Toly hasn't shipped either yet).
 | Step | Status |
 |---|---|
 | Boot script | ✅ written |
-| Bootstrap script | ⚠️ scaffolded — `init-market` invocation drafted; matcher-init + `init-lp` arg shapes TBD on first manual run |
-| Adapter-direct probe | ✅ scaffolded |
-| Full pool→adapter e2e | ⏸ slice 5-β |
+| Bootstrap script | ✅ runs end-to-end on the fork (slab + InitMarket + KeeperCrank + admin mint + TopUpInsurance + matcher_ctx + InitLP + matcher vAMM init); emits `/tmp/percolator-market.json` |
+| Adapter-direct probe | ⚠️ runs against the bootstrapped market through `init_mapping`; blocked at the 10,240-byte CPI realloc limit when the adapter's `system_instruction::create_account` CPI tries to allocate the 81,968-byte `perp_mapping` account |
+| Full pool→adapter e2e | ⏸ blocked on `init_mapping` fix |
+
+## Open issue: `init_mapping` CPI realloc limit
+
+`programs/b402-percolator-adapter/src/lib.rs::init_mapping` allocates the
+per-slab `perp_mapping` PDA (`HEADER_SIZE + 2048 × 40 = 81,968 B`) via a
+single `system_instruction::create_account` invoke_signed. Solana's
+sBPF runtime caps inner-ix data growth at `MAX_PERMITTED_DATA_INCREASE
+= 10_240`, so a single CPI create at 81,968 B fails with
+`Failed to reallocate account data`.
+
+Two fixes, in order of preference:
+
+1. **Multi-step realloc** — shrink the create to ≤ 10240 B, then issue
+   N additional `solana_program::account_info::AccountInfo::realloc`
+   calls (no CPI; ours after assignment). 81,968 / 10240 ≈ 9 reallocs.
+   Cleanest; preserves MAX_ENTRIES=2048.
+2. **Cap reduction** — drop `MAX_ENTRIES` from 2048 → 252, putting the
+   total under 10240. Halves user capacity per slab (still > kamino's
+   per-user PDA pattern, since each slab can serve 252 users), but
+   single-CPI create works. Future slabs can split if needed.
+
+Production pool will likely choose (1) since 252 cap is too restrictive
+for a "1 mapping per market" design.
+
+## What worked end-to-end already (mainnet-close)
+
+The probe got past:
+- All 6 program deployments at canonical addresses
+- Anchor `execute()` ix discriminator + account list parse
+- Adapter authority writability (Anchor `mut` constraint)
+- Borsh-decode of `[viewing_pub_hash | PercolatorAction::OpenPosition]`
+- `derive_owner_pda` + `derive_perp_mapping` PDA verification
+- Slab `MAGIC` sentinel (after fixing byte-order: `0x504552434f4c4154`,
+  bytes-on-disk are "TALOCREP", the BE form of "PERCOLAT", because
+  percolator-prog stores the u64 in native LE)
+
+This proves the adapter's wire format + slab parsing are byte-correct
+against the live percolator-prog binary — the field-offset pins in
+`slab.rs` (ACCOUNT_OWNER_OFF=200 etc.) hold against production state.
 
 ## Prerequisites
 

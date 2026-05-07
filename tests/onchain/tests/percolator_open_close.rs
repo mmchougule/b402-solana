@@ -43,8 +43,9 @@ const TAG_CLOSE_POSITION: u8 = 1;
 
 // `PERP_MAPPING_ACCOUNT_LEN` from mapping.rs: HEADER_SIZE (48) + MAX_ENTRIES (2048) * ENTRY_SIZE (40).
 const PERP_MAPPING_ACCOUNT_LEN: usize = 48 + 2048 * 40;
-// `SLAB_MAGIC` from slab.rs: u64 LE of "PERCOLAT".
-const SLAB_MAGIC_LE: [u8; 8] = *b"PERCOLAT";
+// `SLAB_MAGIC` from slab.rs — percolator-prog writes its u64 MAGIC in native
+// LE byte order; the bytes on disk read "TALOCREP" (= "PERCOLAT" reversed).
+const SLAB_MAGIC_LE: [u8; 8] = *b"TALOCREP";
 // Minimum slab buffer size — `verify_slab_magic` reads up to
 // `HEADER_LEN` = `size_of::<SlabHeader>()` ≈ 136 bytes. Round to 256
 // to leave headroom for any helper that reads farther into the header

@@ -65,6 +65,9 @@ const MATCHER_PROG = new PublicKey(market.matcher_program);
 const SLAB = new PublicKey(market.slab);
 const SLAB_VAULT = new PublicKey(market.vault);
 const MATCHER_CTX = new PublicKey(market.matcher_context);
+// Local-fork harness uses a custom mint (we own its mint authority);
+// production wires this to USDC mainnet. Field name kept as USDC since
+// the adapter doesn't care about the mint identity, only that it's SPL.
 const USDC = new PublicKey(market.mint);
 
 // PDA seeds — must match programs/b402-percolator-adapter/src/pda.rs.
@@ -133,6 +136,36 @@ const userPercolatorAta = getAssociatedTokenAddressSync(USDC, ownerPda, true);
 const adapterUsdcAta = await getOrCreateAssociatedTokenAccount(
   conn, admin, USDC, adapterAuthority, true,
 );
+
+// 4.5. Init perp_mapping PDA (one-shot per slab). Idempotent — reverts
+// cleanly if already created. We tolerate the "already exists" path by
+// catching `0x0` (system program already-initialized) and continuing.
+//
+// init_mapping discriminator = sha256("global:init_mapping")[..8].
+{
+  const INIT_MAPPING_DISC = Uint8Array.from([119, 15, 30, 99, 8, 143, 191, 70]);
+  const ix = new TransactionInstruction({
+    programId: PERCOLATOR_ADAPTER,
+    keys: [
+      { pubkey: admin.publicKey, isSigner: true, isWritable: true },
+      { pubkey: SLAB, isSigner: false, isWritable: false },
+      { pubkey: perpMapping, isSigner: false, isWritable: true },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    ],
+    data: Buffer.from(INIT_MAPPING_DISC),
+  });
+  try {
+    const sig = await sendAndConfirmTransaction(conn, new Transaction().add(ix), [admin], { commitment: 'confirmed' });
+    console.log(`▶ init_mapping ✓ ${sig.slice(0, 24)}…`);
+  } catch (e) {
+    const logs = (e?.logs ?? []).join('\n');
+    if (logs.includes('already in use') || logs.includes('AccountAlreadyInitialized')) {
+      console.log('  (mapping account already exists, continuing)');
+    } else {
+      throw e;
+    }
+  }
+}
 
 // 5. Fund adapter_in_ta from alice.
 const aliceUsdcAta = getAssociatedTokenAddressSync(USDC, alice.publicKey);
@@ -217,7 +250,7 @@ const remaining = [
 const executeIx = new TransactionInstruction({
   programId: PERCOLATOR_ADAPTER,
   keys: [
-    { pubkey: adapterAuthority, isSigner: false, isWritable: false },
+    { pubkey: adapterAuthority, isSigner: false, isWritable: true },
     { pubkey: adapterUsdcAta.address, isSigner: false, isWritable: true }, // in_vault stub
     { pubkey: adapterUsdcAta.address, isSigner: false, isWritable: true }, // out_vault stub
     { pubkey: adapterUsdcAta.address, isSigner: false, isWritable: true }, // adapter_in_ta

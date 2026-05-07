@@ -118,6 +118,81 @@ pub mod b402_percolator_adapter {
             }
         }
     }
+
+    /// Allocate + initialize the per-slab `perp_mapping` PDA.
+    ///
+    /// One-shot. Caller pays rent. The adapter signs `create_account` as
+    /// the PDA via `invoke_signed`, allocating exactly
+    /// `PERP_MAPPING_ACCOUNT_LEN` (= 81_968 B) and assigning ownership to
+    /// this program. Idempotent: reverts cleanly if already initialized.
+    ///
+    /// Must be called once per slab before the first `execute(OpenPosition)`
+    /// for that slab. The fork harness + slice 4-γ SDK helper invoke this
+    /// directly; the production pool's adapt_execute path will fold it into
+    /// a lazy-init step (PRD-36 §8 follow-up).
+    pub fn init_mapping(ctx: Context<InitMapping>) -> Result<()> {
+        use anchor_lang::solana_program::{program::invoke_signed, system_instruction};
+        use crate::mapping::PERP_MAPPING_ACCOUNT_LEN;
+
+        let mapping_acc = &ctx.accounts.perp_mapping;
+        let payer = &ctx.accounts.payer;
+        let slab_key = ctx.accounts.slab.key();
+        let bump = ctx.bumps.perp_mapping;
+
+        let seeds: &[&[u8]] = &[
+            SEED_B402,
+            crate::pda::SEED_PERP_MAPPING,
+            slab_key.as_ref(),
+            &[bump],
+        ];
+
+        let rent = anchor_lang::solana_program::rent::Rent::get()?
+            .minimum_balance(PERP_MAPPING_ACCOUNT_LEN);
+        let create_ix = system_instruction::create_account(
+            payer.key,
+            mapping_acc.key,
+            rent,
+            PERP_MAPPING_ACCOUNT_LEN as u64,
+            &crate::ID,
+        );
+        invoke_signed(
+            &create_ix,
+            &[
+                payer.to_account_info(),
+                mapping_acc.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ],
+            &[seeds],
+        )?;
+
+        // Header init: zero everything (PerpMapping::from_bytes accepts an
+        // all-zero account as "fresh empty"; len + count both 0).
+        let mut data = mapping_acc.try_borrow_mut_data()?;
+        debug_assert!(data.iter().all(|b| *b == 0));
+        // Future: write a layout-version sentinel here so we can rev the
+        // mapping format without losing existing accounts. v1 keeps it
+        // implicit (all zeros = v1 fresh).
+        let _ = &mut *data;
+        Ok(())
+    }
+}
+
+#[derive(Accounts)]
+pub struct InitMapping<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    /// CHECK: slab pubkey is the seed; no on-chain read here. Layout
+    /// validation happens at `execute()` time via the slab MAGIC sentinel.
+    pub slab: AccountInfo<'info>,
+    /// CHECK: derived + signed via invoke_signed. Will be allocated +
+    /// owner-assigned by the create_account CPI. Must NOT pre-exist.
+    #[account(
+        mut,
+        seeds = [SEED_B402, crate::pda::SEED_PERP_MAPPING, slab.key().as_ref()],
+        bump,
+    )]
+    pub perp_mapping: AccountInfo<'info>,
+    pub system_program: Program<'info, System>,
 }
 
 /// Account struct for `execute`. Variant-specific accounts (slab,
