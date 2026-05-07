@@ -7,7 +7,7 @@
  * End-to-end correctness against the deployed adapter is slice 5
  * (surfpool harness in `tests/v2/e2e/percolator-perp-fork.test.ts`).
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, type MockInstance } from 'vitest';
 import { Keypair, PublicKey } from '@solana/web3.js';
 import { getAssociatedTokenAddress } from '@solana/spl-token';
 import { B402Solana, type PrivatePerpOpenRequest, type PrivatePerpCloseRequest } from '../b402.js';
@@ -48,7 +48,7 @@ function makeSdk(): B402Solana {
 
 describe('B402Solana.privatePerpOpen', () => {
   let sdk: B402Solana;
-  let swapSpy: ReturnType<typeof vi.spyOn>;
+  let swapSpy: MockInstance<B402Solana['privateSwap']>;
 
   beforeEach(() => {
     sdk = makeSdk();
@@ -71,7 +71,7 @@ describe('B402Solana.privatePerpOpen', () => {
     };
     await sdk.privatePerpOpen(req);
     expect(swapSpy).toHaveBeenCalledTimes(1);
-    const call = swapSpy.mock.calls[0][0];
+    const call = swapSpy.mock.calls[0]![0]!;
     expect(call.inMint.equals(USDC_MAINNET)).toBe(true);
     expect(call.outMint.equals(USDC_MAINNET)).toBe(true);
     expect(call.amount).toBe(50_000_000n);
@@ -95,8 +95,8 @@ describe('B402Solana.privatePerpOpen', () => {
       limitPriceE6: 200_000_000n,
       feePaymentIfInit: 100_000n,
     });
-    expect(swapSpy.mock.calls[0][0].actionPayload).toEqual(expected);
-    expect(swapSpy.mock.calls[0][0].actionPayload.length).toBe(35);
+    expect(swapSpy.mock.calls[0]![0]!.actionPayload).toEqual(expected);
+    expect(swapSpy.mock.calls[0]![0]!.actionPayload!.length).toBe(35);
   });
 
   it('builds the correct adapter ix data (execute disc + in_amount + 0 + len + payload)', async () => {
@@ -120,7 +120,7 @@ describe('B402Solana.privatePerpOpen', () => {
       expectedOut: 0n,
       actionPayload: payload,
     });
-    expect(swapSpy.mock.calls[0][0].adapterIxData).toEqual(expected);
+    expect(swapSpy.mock.calls[0]![0]!.adapterIxData).toEqual(expected);
   });
 
   it('feePaymentIfInit defaults to 0n when omitted', async () => {
@@ -140,7 +140,7 @@ describe('B402Solana.privatePerpOpen', () => {
       limitPriceE6: 100_000_000n,
       feePaymentIfInit: 0n,
     });
-    expect(swapSpy.mock.calls[0][0].actionPayload).toEqual(expected);
+    expect(swapSpy.mock.calls[0]![0]!.actionPayload).toEqual(expected);
   });
 
   it('routes adapterInTa=adapterOutTa to the adapter_authority USDC ATA', async () => {
@@ -155,7 +155,7 @@ describe('B402Solana.privatePerpOpen', () => {
     await sdk.privatePerpOpen(req);
     const [adapterAuthority] = derivePercolatorAdapterAuthority(ADAPTER_PROGRAM_ID);
     const expectedAta = await getAssociatedTokenAddress(USDC_MAINNET, adapterAuthority, true);
-    const call = swapSpy.mock.calls[0][0];
+    const call = swapSpy.mock.calls[0]![0]!;
     expect(call.adapterInTa.equals(expectedAta)).toBe(true);
     expect(call.adapterOutTa.equals(expectedAta)).toBe(true);
   });
@@ -170,7 +170,7 @@ describe('B402Solana.privatePerpOpen', () => {
       alt: FAKE_ALT,
     };
     await sdk.privatePerpOpen(req);
-    const ra = swapSpy.mock.calls[0][0].remainingAccounts;
+    const ra = swapSpy.mock.calls[0]![0]!.remainingAccounts!;
     expect(ra).toHaveLength(12);
     // Slot 0 = mapping (filled with byte 1 in fixturePerUser)
     expect(ra[0].pubkey.toBase58()).toBe(new PublicKey(new Uint8Array(32).fill(1)).toBase58());
@@ -192,7 +192,7 @@ describe('B402Solana.privatePerpOpen', () => {
       alt: FAKE_ALT,
     };
     await sdk.privatePerpOpen(req);
-    const ra = swapSpy.mock.calls[0][0].remainingAccounts;
+    const ra = swapSpy.mock.calls[0]![0]!.remainingAccounts!;
     expect(ra).toHaveLength(13);
     expect(ra[12]).toEqual(tail[0]);
   });
@@ -210,8 +210,8 @@ describe('B402Solana.privatePerpOpen', () => {
       alts: [altB],
     };
     await sdk.privatePerpOpen(req);
-    expect(swapSpy.mock.calls[0][0].alt.equals(altA)).toBe(true);
-    expect(swapSpy.mock.calls[0][0].alts).toEqual([altB]);
+    expect(swapSpy.mock.calls[0]![0]!.alt!.equals(altA)).toBe(true);
+    expect(swapSpy.mock.calls[0]![0]!.alts).toEqual([altB]);
   });
 
   it('phase9DualNote defaults to true (percolator targets Phase-9 build)', async () => {
@@ -224,7 +224,7 @@ describe('B402Solana.privatePerpOpen', () => {
       alt: FAKE_ALT,
     };
     await sdk.privatePerpOpen(req);
-    expect(swapSpy.mock.calls[0][0].phase9DualNote).toBe(true);
+    expect(swapSpy.mock.calls[0]![0]!.phase9DualNote).toBe(true);
   });
 
   it('caller can override adapterProgramId', async () => {
@@ -239,8 +239,8 @@ describe('B402Solana.privatePerpOpen', () => {
       alt: FAKE_ALT,
     };
     await sdk.privatePerpOpen(req);
-    const call = swapSpy.mock.calls[0][0];
-    expect(call.adapterProgramId.equals(otherAdapter)).toBe(true);
+    const call = swapSpy.mock.calls[0]![0]!;
+    expect(call.adapterProgramId!.equals(otherAdapter)).toBe(true);
     // ATAs follow the override too.
     const [authOther] = derivePercolatorAdapterAuthority(otherAdapter);
     const expectedAta = await getAssociatedTokenAddress(USDC_MAINNET, authOther, true);
@@ -250,7 +250,7 @@ describe('B402Solana.privatePerpOpen', () => {
 
 describe('B402Solana.privatePerpClose', () => {
   let sdk: B402Solana;
-  let swapSpy: ReturnType<typeof vi.spyOn>;
+  let swapSpy: MockInstance<B402Solana['privateSwap']>;
 
   beforeEach(() => {
     sdk = makeSdk();
@@ -270,7 +270,7 @@ describe('B402Solana.privatePerpClose', () => {
       alt: FAKE_ALT,
     };
     await sdk.privatePerpClose(req);
-    const call = swapSpy.mock.calls[0][0];
+    const call = swapSpy.mock.calls[0]![0]!;
     expect(call.amount).toBe(0n);
     expect(call.expectedOut).toBe(1_000_000n);
     expect(call.inMint.equals(USDC_MAINNET)).toBe(true);
@@ -289,9 +289,9 @@ describe('B402Solana.privatePerpClose', () => {
       lpIdx: 3,
       limitPriceE6: 199_000_000n,
     });
-    expect(swapSpy.mock.calls[0][0].actionPayload).toEqual(expected);
-    expect(swapSpy.mock.calls[0][0].actionPayload[0]).toBe(1); // ClosePosition disc
-    expect(swapSpy.mock.calls[0][0].actionPayload.length).toBe(11);
+    expect(swapSpy.mock.calls[0]![0]!.actionPayload).toEqual(expected);
+    expect(swapSpy.mock.calls[0]![0]!.actionPayload![0]).toBe(1); // ClosePosition disc
+    expect(swapSpy.mock.calls[0]![0]!.actionPayload!.length).toBe(11);
   });
 
   it('minOut defaults to 0n when omitted', async () => {
@@ -302,7 +302,7 @@ describe('B402Solana.privatePerpClose', () => {
       alt: FAKE_ALT,
     };
     await sdk.privatePerpClose(req);
-    expect(swapSpy.mock.calls[0][0].expectedOut).toBe(0n);
+    expect(swapSpy.mock.calls[0]![0]!.expectedOut).toBe(0n);
   });
 
   it('builds adapter ix data with in_amount=0', async () => {
@@ -320,7 +320,7 @@ describe('B402Solana.privatePerpClose', () => {
       expectedOut: 25_000_000n,
       actionPayload: payload,
     });
-    expect(swapSpy.mock.calls[0][0].adapterIxData).toEqual(expected);
+    expect(swapSpy.mock.calls[0]![0]!.adapterIxData).toEqual(expected);
   });
 
   it('forwards caller-supplied note (zero-value note for the burn requirement)', async () => {
@@ -333,6 +333,6 @@ describe('B402Solana.privatePerpClose', () => {
       alt: FAKE_ALT,
     };
     await sdk.privatePerpClose(req);
-    expect(swapSpy.mock.calls[0][0].note).toBe(fakeNote);
+    expect(swapSpy.mock.calls[0]![0]!.note).toBe(fakeNote);
   });
 });
