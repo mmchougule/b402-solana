@@ -174,7 +174,9 @@ pub fn handle_close<'info>(
         slab_mod::read_capital(&slab_data, user_idx)
             .map_err(|_| error!(PercolatorAdapterError::InvalidActionPayload))?
     };
-    let withdraw_amount: u64 = capital.try_into().unwrap_or(u64::MAX);
+    let withdraw_amount: u64 = capital
+        .try_into()
+        .map_err(|_| error!(PercolatorAdapterError::WithdrawAmountOverflow))?;
     if withdraw_amount > 0 {
         percolator_cpi::invoke_withdraw_collateral(
             percolator_program,
@@ -221,10 +223,18 @@ pub fn handle_close<'info>(
             .map_err(|_| error!(PercolatorAdapterError::MappingEntryNotFound))?;
     }
 
+    let flatten_size = if current_position != 0 {
+        current_position
+            .checked_neg()
+            .ok_or_else(|| error!(PercolatorAdapterError::TradeSizeOutOfRange))?
+    } else {
+        0
+    };
     msg!(
-        "[close] user_idx={} flattened_size={} withdrew={} ok",
+        "[close] user_idx={} current_position={} flatten_size={} withdrew={} ok",
         user_idx,
         current_position,
+        flatten_size,
         withdraw_amount
     );
     Ok(())

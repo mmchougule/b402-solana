@@ -39,6 +39,9 @@ pub enum PercolatorAdapterError {
     #[msg("perp-mapping live entry's user_idx contradicts the requested allocation")]
     MappingLiveEntryMismatch,
 
+    #[msg("close-path capital exceeds u64 withdraw amount range")]
+    WithdrawAmountOverflow,
+
     /// CPI-only enforcement: the tx's outer ix must be from b402_pool.
     #[msg("execute() must be invoked via CPI from b402_pool")]
     DirectCallRejected,

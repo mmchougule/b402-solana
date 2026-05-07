@@ -267,14 +267,15 @@ describe('buildPercolatorPerUserRemainingAccounts', () => {
       matcherProgram: k(10),
       matcherContext: k(11),
       lpPda: k(12),
+      slabVaultAuthority: k(13),
     };
   }
 
-  it('emits 12 head slots in pinned order', () => {
+  it('emits 13 head slots in pinned order', () => {
     const ra = buildPercolatorPerUserRemainingAccounts(fixturePerUser());
-    expect(ra.length).toBe(12);
+    expect(ra.length).toBe(13);
     // Verify slot N has pubkey filled with byte (N+1) — matches the fixture.
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < 13; i++) {
       const expected = new PublicKey(new Uint8Array(32).fill(i + 1));
       expect(ra[i].pubkey.toBase58()).toBe(expected.toBase58());
     }
@@ -291,15 +292,15 @@ describe('buildPercolatorPerUserRemainingAccounts', () => {
     }
   });
 
-  it('appends matcher_tail after slot 12 when present', () => {
+  it('appends matcher_tail after slot 13 when present', () => {
     const tail = [
       { pubkey: new PublicKey(new Uint8Array(32).fill(0xfe)), isSigner: false, isWritable: false },
       { pubkey: new PublicKey(new Uint8Array(32).fill(0xff)), isSigner: false, isWritable: true },
     ];
     const ra = buildPercolatorPerUserRemainingAccounts({ ...fixturePerUser(), matcherTail: tail });
-    expect(ra.length).toBe(14);
-    expect(ra[12]).toEqual(tail[0]);
-    expect(ra[13]).toEqual(tail[1]);
+    expect(ra.length).toBe(15);
+    expect(ra[13]).toEqual(tail[0]);
+    expect(ra[14]).toEqual(tail[1]);
   });
 
   it('PERCOLATOR_MAX_ACCOUNTS_DEFAULT pinned to 1024 (matches deployment tier)', () => {

@@ -38,6 +38,7 @@ function fixturePerUser(): PercolatorPerUserAccounts {
     matcherProgram: k(10),
     matcherContext: k(11),
     lpPda: k(12),
+    slabVaultAuthority: k(13),
   };
 }
 
@@ -160,7 +161,7 @@ describe('B402Solana.privatePerpOpen', () => {
     expect(call.adapterOutTa.equals(expectedAta)).toBe(true);
   });
 
-  it('passes 12 head remaining_accounts in pinned RA_* order', async () => {
+  it('passes 13 head remaining_accounts in pinned RA_* order', async () => {
     const req: PrivatePerpOpenRequest = {
       lpIdx: 0,
       sizeE6: 1n,
@@ -171,11 +172,12 @@ describe('B402Solana.privatePerpOpen', () => {
     };
     await sdk.privatePerpOpen(req);
     const ra = swapSpy.mock.calls[0]![0]!.remainingAccounts!;
-    expect(ra).toHaveLength(12);
+    expect(ra).toHaveLength(13);
     // Slot 0 = mapping (filled with byte 1 in fixturePerUser)
     expect(ra[0].pubkey.toBase58()).toBe(new PublicKey(new Uint8Array(32).fill(1)).toBase58());
-    // Slot 11 = lp_pda (byte 12)
+    // Slot 11 = lp_pda (byte 12), slot 12 = slab_vault_authority (byte 13)
     expect(ra[11].pubkey.toBase58()).toBe(new PublicKey(new Uint8Array(32).fill(12)).toBase58());
+    expect(ra[12].pubkey.toBase58()).toBe(new PublicKey(new Uint8Array(32).fill(13)).toBase58());
   });
 
   it('appends matcher_tail when provided', async () => {
@@ -193,8 +195,8 @@ describe('B402Solana.privatePerpOpen', () => {
     };
     await sdk.privatePerpOpen(req);
     const ra = swapSpy.mock.calls[0]![0]!.remainingAccounts!;
-    expect(ra).toHaveLength(13);
-    expect(ra[12]).toEqual(tail[0]);
+    expect(ra).toHaveLength(14);
+    expect(ra[13]).toEqual(tail[0]);
   });
 
   it('forwards the configured ALT and additional ALTs', async () => {

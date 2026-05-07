@@ -263,8 +263,10 @@ export interface PercolatorPerUserAccounts {
   matcherContext: PublicKey;
   /** LP PDA inside the matcher. */
   lpPda: PublicKey;
+  /** Percolator slab vault authority PDA. Read-only in close, ignored in open. */
+  slabVaultAuthority: PublicKey;
   /**
-   * Optional matcher-defined tail accounts appended after slot 12. The
+   * Optional matcher-defined tail accounts appended after slot 13. The
    * matcher CPI variant percolator routes to may need extra accounts
    * (e.g. risk-engine reads). Slice 4-β's SDK will resolve these from
    * the matcher's `--describe` output.
@@ -291,7 +293,8 @@ export interface PercolatorPerUserAccounts {
  *   9 matcher_program
  *  10 matcher_context  — writable
  *  11 lp_pda           — writable
- *  12+ matcher_tail (optional)
+ *  12 slab_vault_authority
+ *  13+ matcher_tail (optional)
  */
 export function buildPercolatorPerUserRemainingAccounts(
   perUser: PercolatorPerUserAccounts,
@@ -309,6 +312,7 @@ export function buildPercolatorPerUserRemainingAccounts(
     { pubkey: perUser.matcherProgram, isSigner: false, isWritable: false },      // 9  RA_MATCHER_PROGRAM
     { pubkey: perUser.matcherContext, isSigner: false, isWritable: true },       // 10 RA_MATCHER_CONTEXT
     { pubkey: perUser.lpPda, isSigner: false, isWritable: true },                // 11 RA_LP_PDA
+    { pubkey: perUser.slabVaultAuthority, isSigner: false, isWritable: false },  // 12 RA_SLAB_VAULT_AUTHORITY
   ];
   return perUser.matcherTail ? [...head, ...perUser.matcherTail] : head;
 }

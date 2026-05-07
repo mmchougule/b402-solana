@@ -36,7 +36,8 @@
 //!  [ 9] matcher_program (TradeCpi only)
 //!  [10] matcher_context (TradeCpi only, mut)
 //!  [11] lp_pda          (TradeCpi only)
-//!  [12..] matcher_tail  (TradeCpi only, variadic — forwarded verbatim)
+//!  [12] slab_vault_authority           — read in close, ignored in open
+//!  [13..] matcher_tail  (TradeCpi only, variadic — forwarded verbatim)
 //! ```
 
 use anchor_lang::prelude::*;

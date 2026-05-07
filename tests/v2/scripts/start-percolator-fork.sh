@@ -97,7 +97,7 @@ echo "    USDC=$USDC_MINT (cloned from mainnet)"
 
 # Boot args: load every program at boot. Keep this list tight — Light's
 # --validator-args has a hard arg-length cap (kamino harness hit it
-# around 7 --clone flags). Six --upgradeable-program entries fits cleanly.
+# around 7 --clone flags). Seven --upgradeable-program entries fit cleanly.
 BOOT_ARGS="\
   --upgradeable-program $POOL_ID $POOL_SO $UPGRADE_AUTH \
   --upgradeable-program $NULLIFIER_ID $NULLIFIER_SO $UPGRADE_AUTH \

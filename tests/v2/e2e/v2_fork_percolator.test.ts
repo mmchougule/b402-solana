@@ -555,6 +555,7 @@ describe('v2_fork_percolator e2e — TDD ladder', () => {
       matcherProgram: MATCHER_PROG_ID,
       matcherContext: matcherCtx,
       lpPda,
+      slabVaultAuthority,
     };
 
     // ─ ALT for variadic accounts + Light/pool/percolator keys ─
@@ -619,12 +620,6 @@ describe('v2_fork_percolator e2e — TDD ladder', () => {
     // ─ THE CALL ─
     const margin = 5_000_000n; // exactly the shielded note value
     const photonRpc = createRpc(RPC, PHOTON_RPC);
-    // SDK's buildPercolatorPerUserRemainingAccounts only emits indexes 0-11;
-    // the adapter pins slabVaultAuthority at index 12 (RA_SLAB_VAULT_AUTHORITY)
-    // and treats matcher_tail as accounts at index 13+. Pass slabVaultAuthority
-    // as the first matcherTail entry so it lands at exactly index 12.
-    // matcherTail goes at the TOP level — privatePerpOpen reads req.matcherTail,
-    // not req.perUserAccts.matcherTail.
     const result = await b402.privatePerpOpen({
       lpIdx: 0,
       sizeE6: 1_000n,
@@ -633,7 +628,6 @@ describe('v2_fork_percolator e2e — TDD ladder', () => {
       feePaymentIfInit: 1_000_000n,
       inMint: mint,                         // local test mint, not mainnet USDC
       perUserAccts,
-      matcherTail: [{ pubkey: slabVaultAuthority, isSigner: false, isWritable: true }],
       alt: altAddr,
       phase9DualNote: true,
       pendingInputsMode: true,              // PRD-35 — public_inputs in a PDA, saves ~700 B
@@ -887,9 +881,8 @@ describe('v2_fork_percolator e2e — TDD ladder', () => {
           mapping: perpMapping, ownerPda, userPercolatorAta, slab, slabVault,
           percolatorProgram: PERCOLATOR_PROG_ID, clock: SYSVAR_CLOCK_PUBKEY,
           lpOwner, oracle: PERCOLATOR_PROG_ID, matcherProgram: MATCHER_PROG_ID,
-          matcherContext: matcherCtx, lpPda,
+          matcherContext: matcherCtx, lpPda, slabVaultAuthority,
         },
-        matcherTail: [{ pubkey: slabVaultAuthority, isSigner: false, isWritable: true }],
         alt: altAddr,
         phase9DualNote: true, pendingInputsMode: true, inlineCpiNullifier: true,
         photonRpc,

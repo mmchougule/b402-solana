@@ -39,7 +39,7 @@ fi
 # no assoc-array support — use case.
 features_for() {
   case "$1" in
-    b402-pool)                echo "prd_35_pending_inputs,inline_cpi_nullifier,phase_9_dual_note" ;;
+    b402-pool)                echo "prd_35_pending_inputs inline_cpi_nullifier phase_9_dual_note" ;;
     b402-verifier-adapt)      echo "phase_9_dual_note" ;;
     b402-nullifier)           echo "cpi-only" ;;
     b402-kamino-adapter)      echo "per_user_obligation" ;;
