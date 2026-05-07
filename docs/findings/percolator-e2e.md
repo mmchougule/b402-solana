@@ -12,36 +12,46 @@ Same primitives this project already uses for kamino lending on mainnet
 
 ## The proof
 
-### Local mainnet-fork — full pool → adapter → percolator open
-
-One signed transaction, on a mainnet-forked validator with the same
-binaries percolator runs in production:
+### Public devnet — full pool → adapter → percolator open
 
 ```
-tx:         3ioH8S77y1mZKkoF7uUFkkJ8M7vxmj42KYduARCgyQ9mG9Gkict81edybxR1pXrFYjPA6orhkqSwDYLh2jpbbnNb
-slab:       BrH8x3hjKBVjwPiN8LhdryG7E5fv7zD9vDJ1pvgHL62Y     (percolator-prog owned)
+tx:         2NwVGzPufiL7W4gneKgSjJNh9fKMnqwKYoL4heNawdWFHmdme6HjhCFzqdYf7i4NUmpCf6v3gUxBsHb4x6Wnb6ZR
+explorer:   https://explorer.solana.com/tx/2NwVGzPufiL7W4gneKgSjJNh9fKMnqwKYoL4heNawdWFHmdme6HjhCFzqdYf7i4NUmpCf6v3gUxBsHb4x6Wnb6ZR?cluster=devnet
+signer:     3zZo85NoPK7HAqaK4DJfsWFbfK5fVbTG1u5HEFYwLUJF (alice's wallet)
+slab:       8Va4vKQk3r1ygrAjoJWHw2usREhwTAAq73jxsWKgjfso     (percolator-prog owned)
 user_idx:   1
-owner_pda:  F3DzhdaFZy8wo1cKPkhvRZAt1goMHDoffEryY3LtwBLP     (PDA derived from spendingPub)
+owner_pda:  4K8dopXjhc8qtBTQEEYAbneaZWJMhKqCg3HQAinwK4Pv     (PDA derived from spendingPub)
 position:   1000  (size_e6, long)
-total CU:   702,785
+total CU:   700,865
 ```
 
-### Public devnet — shielded note via the b402 pool
+One signed transaction containing: pool `AdaptExecuteV2` → verifier-adapt
+Groth16 (213k CU) → b402-nullifier `CreateNullifier` → Light Protocol system
+program `InsertIntoQueues` → SPL transfer → percolator-adapter `Execute`
+→ percolator-prog `InitUser` → `DepositCollateral` → `TradeCpi` → matcher.
 
-A real shielded note created on Solana devnet, signed by alice, hitting
-the pool program at `42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y`:
+### Verification path
 
 ```
-tx:         2b3pj2rCJtStu2nZCmNXtYce6vHUieGQYdi27suiHpamb5MCPvPQMo7tJaT5uki6NHNvu6euNe1bJmf6yEc3iGZ7
-explorer:   https://explorer.solana.com/tx/2b3pj2rCJtStu2nZCmNXtYce6vHUieGQYdi27suiHpamb5MCPvPQMo7tJaT5uki6NHNvu6euNe1bJmf6yEc3iGZ7?cluster=devnet
-signer:     3zZo85NoPK7HAqaK4DJfsWFbfK5fVbTG1u5HEFYwLUJF (alice)
-pool:       42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y
+# 1. The signing wallet
+solana confirm 2NwVGzPufiL7W4gneKgSjJNh9fKMnqwKYoL4heNawdWFHmdme6HjhCFzqdYf7i4NUmpCf6v3gUxBsHb4x6Wnb6ZR \
+  --url devnet -v
+
+# 2. The slab still has alice's position at idx 1; owner = owner_pda
+solana account 8Va4vKQk3r1ygrAjoJWHw2usREhwTAAq73jxsWKgjfso --url devnet
+
+# 3. The position owner is a PDA, not alice's wallet
+#    PDA(["b402/v1", "perp-owner", LE32(spendingPub)], 65NRt6GpeakqXhqvKcN3knohzKEZT37arUyQi3SZwfxv)
+#    = 4K8dopXjhc8qtBTQEEYAbneaZWJMhKqCg3HQAinwK4Pv
+#    Without alice's signing key, F3Dzhda… (or its analog) cannot be derived from 3zZo85No….
 ```
 
-T5 (the perp open) on devnet is gated on a pool program upgrade —
-the on-chain devnet pool predates the `commit_inputs` instruction
-the current SDK uses. Tracking; will replicate the local-fork open
-on devnet next.
+### Local mainnet-fork — open + close round trip
+
+The full open then close, on a Light test-validator with mainnet-state
+binaries, demonstrates the bidirectional path. Reproduction harness:
+`tests/v2/scripts/start-percolator-fork.sh`. Tx hashes from a fork run
+are not externally verifiable, but the harness is byte-deterministic.
 
 ## Program stack invoked (in tx order)
 
@@ -112,13 +122,12 @@ privatePerpOpen (relayer-signed)
             owner = PDA(viewing_pub_hash, adapter_id)
 ```
 
-## Reproduce locally
+## Reproduce
+
+### Local mainnet-fork
 
 ```bash
-# 1. Boot the fork (Light test-validator + photon + prover, all 7 programs).
 tests/v2/scripts/start-percolator-fork.sh
-
-# 2. In a separate shell, run the TDD ladder.
 pnpm exec vitest run tests/v2/e2e/v2_fork_percolator.test.ts
 ```
 
@@ -128,9 +137,36 @@ Expected:
 ✓ T1 — pool initialized + percolator adapter registered + token_config added
 ✓ T2 — percolator market bootstrapped (slab + LP + matcher)
 ✓ T3 — perp_mapping PDA at full PERP_MAPPING_ACCOUNT_LEN (=81968 B)
-✓ T4 — alice b402 wallet shielded a 5 USDC (test mint) note via pool.shield
+✓ T4 — user b402 wallet shielded a 5 USDC (test mint) note via pool.shield
 ✓ T5 — privatePerpOpen lands position on slab; owner = owner_pda(spendingPub)
 ```
+
+### Public devnet
+
+```bash
+RPC=https://devnet.helius-rpc.com/?api-key=YOUR_KEY \
+  PHOTON_RPC=$RPC \
+  pnpm exec vitest run tests/v2/e2e/v2_fork_percolator.test.ts
+```
+
+The 6 b402 programs are deployed on devnet at the IDs in the program
+stack above. The percolator-prog at `4PTXCZ4vLSK6aiUd3fx2dVVYSRNFnMSM4ijhDWkuFi2s`
+is the same binary deployed by Toly (verifiable via `solana program dump`
++ SHA-256: `6e2bb5aee602aed1de0b2d80f72f97b6b115e0f536438f76d31e0de06d5b7002`).
+
+## Operational note on devnet vs mainnet
+
+Devnet runs need a primer step (`crank` ix loop) to walk the percolator
+engine forward to within `MAX_ACCRUAL_DT_SLOTS = 10` of `clock.slot`
+before each open. Hyperp markets accrue per-slot state and become
+unrevivable past the catchup envelope (200 slots at the engine's
+`CATCHUP_CHUNKS_MAX × max_dt`).
+
+Mainnet doesn't hit this — Toly's deployed markets run keeper bots
+(`percolator-cli/scripts/crank-bot.ts`, cron-installed via
+`mainnet-bounty3-cron-install.ts`) that crank continuously, so the
+engine never exits the envelope. The adapter's path is identical;
+only the test harness conditionally runs the primer when `CLUSTER !== 'mainnet'`.
 
 ## Bugs found integrating against percolator-prog
 

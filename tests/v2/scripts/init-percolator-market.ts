@@ -12,25 +12,44 @@ const CLI_ROOT = `${os.homedir()}/development/ai/percolator-cli`;
 
 async function main() {
   const { encodeInitMarket, encodeKeeperCrank, encodeTopUpInsurance, encodeInitLP } =
-    await import(`${CLI_ROOT}/src/abi/instructions.js`);
+    await import(`${CLI_ROOT}/dist-tsc/abi/instructions.js`);
   const {
     ACCOUNTS_INIT_MARKET, ACCOUNTS_KEEPER_CRANK, ACCOUNTS_TOPUP_INSURANCE,
     ACCOUNTS_INIT_LP, buildAccountMetas,
-  } = await import(`${CLI_ROOT}/src/abi/accounts.js`);
-  const { deriveVaultAuthority, deriveLpPda } = await import(`${CLI_ROOT}/src/solana/pda.js`);
-  const { buildIx } = await import(`${CLI_ROOT}/src/runtime/tx.js`);
+  } = await import(`${CLI_ROOT}/dist-tsc/abi/accounts.js`);
+  const { deriveVaultAuthority, deriveLpPda } = await import(`${CLI_ROOT}/dist-tsc/solana/pda.js`);
+  const { buildIx } = await import(`${CLI_ROOT}/dist-tsc/runtime/tx.js`);
 
-  const PERCOLATOR_PROG = new PublicKey('DzLTTqyx7tFjwseeDTnu4f6c55H5abPgcohRVkNCS4Bn');
-  const MATCHER_PROG = new PublicKey('BoYEMRSe6cRw6jswHtApQVqjLf1PPakfuuDyxgWijYBU');
-  const PERCOLATOR_ADAPTER = new PublicKey('65NRt6GpeakqXhqvKcN3knohzKEZT37arUyQi3SZwfxv');
+  // Override via env so the same script works across localnet/devnet/mainnet:
+  //   RPC                  RPC URL (default localhost)
+  //   PERCOLATOR_PROG_ID   percolator-prog deployment to bind this market to
+  //   MATCHER_PROG_ID      matcher-prog deployment for the LP's matcher_context
+  //   MINT_KEYPAIR_PATH    keypair file for the collateral mint
+  //   PERCOLATOR_ADAPTER   b402 adapter pubkey (rarely overridden)
+  //   OUTPUT_PATH          where to write the market.json (default /tmp/percolator-market.json)
+  const PERCOLATOR_PROG = new PublicKey(process.env.PERCOLATOR_PROG_ID
+    ?? 'DzLTTqyx7tFjwseeDTnu4f6c55H5abPgcohRVkNCS4Bn');
+  const MATCHER_PROG = new PublicKey(process.env.MATCHER_PROG_ID
+    ?? 'BoYEMRSe6cRw6jswHtApQVqjLf1PPakfuuDyxgWijYBU');
+  const PERCOLATOR_ADAPTER = new PublicKey(process.env.PERCOLATOR_ADAPTER
+    ?? '65NRt6GpeakqXhqvKcN3knohzKEZT37arUyQi3SZwfxv');
   const SLAB_SIZE = 1_755_376;
   const MATCHER_CTX_SIZE = 320;
-  const conn = new Connection('http://127.0.0.1:8899', 'confirmed');
+  const RPC = process.env.RPC ?? 'http://127.0.0.1:8899';
+  const conn = new Connection(RPC, 'confirmed');
   const payer = Keypair.fromSecretKey(new Uint8Array(JSON.parse(
     fs.readFileSync(`${os.homedir()}/.config/solana/id.json`, 'utf8'))));
+  const MINT_KEYPAIR_PATH = process.env.MINT_KEYPAIR_PATH
+    ?? '/tmp/local-mint-keypair.json';
   const mintKp = Keypair.fromSecretKey(new Uint8Array(JSON.parse(
-    fs.readFileSync('/tmp/local-mint-keypair.json', 'utf8'))));
+    fs.readFileSync(MINT_KEYPAIR_PATH, 'utf8'))));
   const mint = mintKp.publicKey;
+  const OUTPUT_PATH = process.env.OUTPUT_PATH ?? '/tmp/percolator-market.json';
+  console.log(`init-percolator-market on ${RPC}`);
+  console.log(`  percolator: ${PERCOLATOR_PROG.toBase58()}`);
+  console.log(`  matcher   : ${MATCHER_PROG.toBase58()}`);
+  console.log(`  mint      : ${mint.toBase58()}`);
+  console.log(`  output    : ${OUTPUT_PATH}`);
   const cuLimit = (units: number) => ComputeBudgetProgram.setComputeUnitLimit({ units });
 
   // 1. Slab
@@ -52,7 +71,7 @@ async function main() {
   console.log(`vault_pda=${vaultPda.toBase58()} vault=${vaultAta.address.toBase58()}`);
 
   // 3. InitMarket
-  const { defaultInitMarketArgs } = await import(`${CLI_ROOT}/scripts/_default-market.js`);
+  const { defaultInitMarketArgs } = await import(`${CLI_ROOT}/scripts/_default-market.ts`);
   const initMarketData = encodeInitMarket(defaultInitMarketArgs(payer.publicKey, mint));
   await sendAndConfirmTransaction(conn,
     new Transaction()
@@ -140,7 +159,7 @@ async function main() {
 
   // 9. Find LP idx (passive matchers usually land at slot 0).
   const { fetchSlab, parseUsedIndices, parseAccount, AccountKind } =
-    await import(`${CLI_ROOT}/src/solana/slab.js`);
+    await import(`${CLI_ROOT}/src/solana/slab.ts`);
   const slabData = await fetchSlab(conn, slab.publicKey);
   let lpIdx = -1;
   for (const idx of parseUsedIndices(slabData)) {
@@ -190,8 +209,8 @@ async function main() {
     admin: payer.publicKey.toBase58(),
     admin_ata: adminAta.address.toBase58(),
   };
-  fs.writeFileSync('/tmp/percolator-market.json', JSON.stringify(out, null, 2));
-  console.log('\nSUCCESS — market bootstrapped, /tmp/percolator-market.json written');
+  fs.writeFileSync(OUTPUT_PATH, JSON.stringify(out, null, 2));
+  console.log(`\nSUCCESS — market bootstrapped, ${OUTPUT_PATH} written`);
   console.log(JSON.stringify(out, null, 2));
 }
 main().catch((e) => { console.error(e); if (e?.logs) console.error(e.logs.join('\n')); process.exit(1); });

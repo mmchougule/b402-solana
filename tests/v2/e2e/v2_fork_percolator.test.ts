@@ -162,7 +162,15 @@ async function ensureTokenConfig(conn: Connection, admin: Keypair, mint: PublicK
 describe('v2_fork_percolator e2e — TDD ladder', () => {
   const conn = new Connection(RPC, 'confirmed');
   const admin = loadAdmin();
-  const mint = loadMint().publicKey;
+  // MINT_PUBKEY env overrides the keypair-loaded mint. Used when targeting an
+  // existing market whose collateral mint we don't control (e.g. wSOL on
+  // Toly's max-risk-market — we can't be the mint authority for wSOL, so
+  // T4 must wrap SOL instead of mintTo'ing).
+  const mint = process.env.MINT_PUBKEY
+    ? new PublicKey(process.env.MINT_PUBKEY)
+    : loadMint().publicKey;
+  const WSOL = new PublicKey('So11111111111111111111111111111111111111112');
+  const isWsol = mint.equals(WSOL);
 
   beforeAll(async () => {
     // Sanity-check the validator is up + programs deployed before any test.
@@ -278,32 +286,53 @@ describe('v2_fork_percolator e2e — TDD ladder', () => {
     expect(final!.owner.equals(PERCOLATOR_ADAPTER_ID)).toBe(true);
   }, 60_000);
 
-  it('T4 — alice b402 wallet shielded a 5 USDC (test mint) note via pool.shield', async () => {
-    // Use a dedicated alice keypair for this test. Reuse if already exists.
-    const alicePath = '/tmp/b402-alice.json';
+  it('T4 — user b402 wallet shielded a 5 USDC (test mint) note via pool.shield', async () => {
+    // Use a dedicated user keypair for this test. Reuse if already exists.
+    // USER_NAME env var rotates the user (default "alice"); each name gets
+    // its own keypair + NoteStore so multi-user runs keep notes distinct.
+    const USER_NAME = process.env.USER_NAME ?? 'alice';
+    const alicePath = `/tmp/b402-${USER_NAME}.json`;
     if (!fs.existsSync(alicePath)) {
       const kp = Keypair.generate();
       fs.writeFileSync(alicePath, JSON.stringify(Array.from(kp.secretKey)));
     }
     const alice = Keypair.fromSecretKey(new Uint8Array(JSON.parse(
       fs.readFileSync(alicePath, 'utf8'))));
-    // Top up SOL + mint test USDC if needed.
+    // Top up SOL + mint test USDC if needed. Each user only signs the
+    // shield + open txs; ~0.04 SOL covers fees + ATA rent comfortably.
     const aliceBal = await conn.getBalance(alice.publicKey);
-    if (aliceBal < 1 * LAMPORTS_PER_SOL) {
+    if (aliceBal < 0.03 * LAMPORTS_PER_SOL) {
       await sendAndConfirmTransaction(conn,
         new Transaction().add(SystemProgram.transfer({
           fromPubkey: admin.publicKey, toPubkey: alice.publicKey,
-          lamports: 2 * LAMPORTS_PER_SOL,
+          lamports: 0.04 * LAMPORTS_PER_SOL,
         })),
         [admin], { commitment: 'confirmed' });
     }
     const aliceAta = await getOrCreateAssociatedTokenAccount(conn, admin, mint, alice.publicKey);
     if (aliceAta.amount < 10_000_000n) {
-      await sendAndConfirmTransaction(conn,
-        new Transaction().add(
-          createMintToInstruction(mint, aliceAta.address, admin.publicKey, 100_000_000n),
-        ),
-        [admin], { commitment: 'confirmed' });
+      if (isWsol) {
+        // wSOL: wrap by transferring lamports into the ATA + sync_native.
+        // Mint authority is system; we can't mintTo. Need at least
+        // SHIELD_AMT (5_000_000 raw = 0.005 SOL) for the shield.
+        const { createSyncNativeInstruction } = await import('@solana/spl-token');
+        await sendAndConfirmTransaction(conn,
+          new Transaction()
+            .add(SystemProgram.transfer({
+              fromPubkey: alice.publicKey,
+              toPubkey: aliceAta.address,
+              lamports: 100_000_000, // 0.1 SOL — leaves 1.9 SOL for fees etc.
+            }))
+            .add(createSyncNativeInstruction(aliceAta.address)),
+          [alice], { commitment: 'confirmed' });
+      } else {
+        // Custom test mint where admin is the mint authority.
+        await sendAndConfirmTransaction(conn,
+          new Transaction().add(
+            createMintToInstruction(mint, aliceAta.address, admin.publicKey, 100_000_000n),
+          ),
+          [admin], { commitment: 'confirmed' });
+      }
     }
 
     const circuitsDir = path.resolve(__dirname, '../../../circuits/build');
@@ -313,7 +342,7 @@ describe('v2_fork_percolator e2e — TDD ladder', () => {
       rpcUrl: RPC,
       keypair: alice,
       relayer: alice, // self-submit; no hosted relayer needed for shield
-      notesPersistDir: '/tmp/b402-alice-notes', // share NoteStore with T5
+      notesPersistDir: `/tmp/b402-${USER_NAME}-notes`, // share NoteStore with T5
       proverArtifacts: {
         wasmPath: path.join(circuitsDir, 'transact_js/transact.wasm'),
         zkeyPath: path.join(circuitsDir, 'ceremony/transact_final.zkey'),
@@ -338,9 +367,10 @@ describe('v2_fork_percolator e2e — TDD ladder', () => {
   }, 180_000);
 
   it('T5 — privatePerpOpen lands position on slab; owner = owner_pda(spendingPub)', async () => {
-    // ─ Reload alice + market state ─
+    // ─ Reload user + market state ─
+    const USER_NAME = process.env.USER_NAME ?? 'alice';
     const alice = Keypair.fromSecretKey(new Uint8Array(JSON.parse(
-      fs.readFileSync('/tmp/b402-alice.json', 'utf8'))));
+      fs.readFileSync(`/tmp/b402-${USER_NAME}.json`, 'utf8'))));
     const market = JSON.parse(fs.readFileSync('/tmp/percolator-market.json', 'utf8'));
     const slab = new PublicKey(market.slab);
     const slabVault = new PublicKey(market.vault);
@@ -355,7 +385,7 @@ describe('v2_fork_percolator e2e — TDD ladder', () => {
       rpcUrl: RPC,
       keypair: alice,
       relayer: alice,
-      notesPersistDir: '/tmp/b402-alice-notes',  // share notes across test instances
+      notesPersistDir: `/tmp/b402-${USER_NAME}-notes`,  // share notes across test instances
       proverArtifacts: {
         wasmPath: path.join(circuitsDir, 'transact_js/transact.wasm'),
         zkeyPath: path.join(circuitsDir, 'ceremony/transact_final.zkey'),
@@ -436,11 +466,80 @@ describe('v2_fork_percolator e2e — TDD ladder', () => {
       ],
       data: Buffer.from([5, 0xff, 0xff, 1]),
     });
-    const primer = new Transaction()
-      .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }));
-    if (CLUSTER === 'localnet') primer.add(pushIx);
-    primer.add(crankIx);
-    await sendAndConfirmTransaction(conn, primer, [admin], { commitment: 'confirmed', skipPreflight: true });
+    // Primer keeps the engine inside its accrual envelope across the
+    // ~5-10s SDK proof-generation window. Devnet/local markets have no
+    // keeper bot, so we walk the engine forward ourselves: crank-only
+    // loop (each crank advances ≤200 slots, commits partial progress)
+    // until gap < MAX_ACCRUAL_DT_SLOTS, then push+crank to refresh the
+    // hyperp mark before the open. Mainnet has a keeper, so we skip.
+    if (CLUSTER !== 'mainnet') {
+      const isCatchupRequired = (e: any): boolean => {
+        const probe = (x: any): boolean => {
+          if (!x) return false;
+          if (typeof x === 'string') return /Custom"?\s*:\s*29/.test(x);
+          if (x.InstructionError) {
+            const inner = x.InstructionError[1];
+            if (inner && typeof inner === 'object' && inner.Custom === 29) return true;
+          }
+          if (x.err && probe(x.err)) return true;
+          if (x.cause && probe(x.cause)) return true;
+          if (x.message && probe(x.message)) return true;
+          try { return /"Custom":29/.test(JSON.stringify(x)); } catch { return false; }
+        };
+        try { return probe(e); } catch { return false; }
+      };
+      // Walk engine forward via crank-only (no push — push trips 29 on stale
+      // engine). Bounded: 30 cranks × ~200 slots each = up to 6,000 slots of
+      // drift recovery. Sleep 1s/iter for Helius rate budget.
+      for (let i = 0; i < 30; i++) {
+        try {
+          await sendAndConfirmTransaction(conn,
+            new Transaction()
+              .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }))
+              .add(crankIx),
+            [admin], { commitment: 'confirmed', skipPreflight: true });
+          break; // Crank landed → gap is now < envelope.
+        } catch (e: any) {
+          if (!isCatchupRequired(e)) {
+            // Custom 6 (OracleStale) is also expected on a fresh-but-stale
+            // engine; push first, then re-loop. Anything else: throw.
+            const probe = (x: any): boolean => {
+              if (typeof x === 'string') return /Custom"?\s*:\s*6\b/.test(x);
+              if (x?.InstructionError) {
+                const inner = x.InstructionError[1];
+                if (inner && typeof inner === 'object' && inner.Custom === 6) return true;
+              }
+              if (x?.err && probe(x.err)) return true;
+              if (x?.cause && probe(x.cause)) return true;
+              if (x?.message && probe(x.message)) return true;
+              try { return /"Custom":6\b/.test(JSON.stringify(x)); } catch { return false; }
+            };
+            if (probe(e)) {
+              try {
+                await sendAndConfirmTransaction(conn,
+                  new Transaction()
+                    .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }))
+                    .add(pushIx),
+                  [admin], { commitment: 'confirmed', skipPreflight: true });
+              } catch {/* push may also need catchup, fall through */}
+            } else {
+              throw e;
+            }
+          }
+        }
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      // Final push+crank to refresh the hyperp mark before the open.
+      try {
+        await sendAndConfirmTransaction(conn,
+          new Transaction()
+            .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }))
+            .add(pushIx).add(crankIx),
+          [admin], { commitment: 'confirmed', skipPreflight: true });
+      } catch (e: any) {
+        if (!isCatchupRequired(e)) throw e;
+      }
+    }
 
     // ─ Build per-user accounts for the SDK call ─
     const perUserAccts = {
@@ -505,6 +604,18 @@ describe('v2_fork_percolator e2e — TDD ladder', () => {
     // Wait for ALT warmup.
     await new Promise((res) => setTimeout(res, 3000));
 
+    // ─ Last-mile crank: refresh engine RIGHT BEFORE the open so SDK's
+    //   proof-generation window doesn't drift past MAX_ACCRUAL_DT_SLOTS=10.
+    if (CLUSTER !== 'mainnet') {
+      try {
+        await sendAndConfirmTransaction(conn,
+          new Transaction()
+            .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }))
+            .add(pushIx).add(crankIx),
+          [admin], { commitment: 'confirmed', skipPreflight: true });
+      } catch {/* engine may already be inside envelope; open will fail loudly if not */}
+    }
+
     // ─ THE CALL ─
     const margin = 5_000_000n; // exactly the shielded note value
     const photonRpc = createRpc(RPC, PHOTON_RPC);
@@ -546,9 +657,9 @@ describe('v2_fork_percolator e2e — TDD ladder', () => {
     }
     expect(foundIdx, 'alice owner_pda must be present in slab').toBeGreaterThanOrEqual(1);
 
-    // Persist alice's tx hash + state for the post / runbook.
+    // Persist user's tx hash + state for the post / runbook.
     const out = JSON.parse(fs.readFileSync('/tmp/percolator-market.json', 'utf8'));
-    out.alice = { sig: result.signature, owner_pda: ownerPda.toBase58(), user_idx: foundIdx };
+    out[USER_NAME] = { sig: result.signature, owner_pda: ownerPda.toBase58(), user_idx: foundIdx };
     fs.writeFileSync('/tmp/percolator-market.json', JSON.stringify(out, null, 2));
   }, 600_000);
 
@@ -558,7 +669,11 @@ describe('v2_fork_percolator e2e — TDD ladder', () => {
   // tighter crank-then-open window than vitest+ALT-warmup gives us today.
   // Devnet smoke (`examples/percolator-multi-user-smoke.mjs`) already shows
   // 4 distinct PDAs at 4 distinct slab slots via the adapter-direct path.
-  it.skip('T6 — multi-user privacy: bob + carol open via the same pool stack, distinct slab slots', async () => {
+  // T6: tight in-test multi-user loop hammers the RPC and races engine
+  // accrual envelope. Use the rotating-user shell loop instead
+  // (`scripts/multi-user-devnet.sh`) — runs T4+T5 once per user with
+  // backoff between users.
+  it.skip('T6 — multi-user privacy: N users open via the same pool stack, distinct slab slots', async () => {
     const market = JSON.parse(fs.readFileSync('/tmp/percolator-market.json', 'utf8'));
     const slab = new PublicKey(market.slab);
     const slabVault = new PublicKey(market.vault);
@@ -603,7 +718,9 @@ describe('v2_fork_percolator e2e — TDD ladder', () => {
     type UserCtx = { name: string; sig: string; ownerPda: string; userIdx: number };
     const results: UserCtx[] = [];
 
-    for (const name of ['bob', 'carol']) {
+    const T6_USERS = (process.env.T6_USERS ?? 'bob,carol,dave,eve,frank,grace,henry,ivy,jack')
+      .split(',').map(s => s.trim()).filter(Boolean);
+    for (const name of T6_USERS) {
       const kpPath = `/tmp/b402-${name}.json`;
       if (!fs.existsSync(kpPath)) {
         const fresh = Keypair.generate();
@@ -611,10 +728,10 @@ describe('v2_fork_percolator e2e — TDD ladder', () => {
       }
       const user = Keypair.fromSecretKey(new Uint8Array(JSON.parse(fs.readFileSync(kpPath, 'utf8'))));
       const userBal = await conn.getBalance(user.publicKey);
-      if (userBal < 1 * LAMPORTS_PER_SOL) {
+      if (userBal < 0.04 * LAMPORTS_PER_SOL) {
         await sendAndConfirmTransaction(conn,
           new Transaction().add(SystemProgram.transfer({
-            fromPubkey: admin.publicKey, toPubkey: user.publicKey, lamports: 2 * LAMPORTS_PER_SOL,
+            fromPubkey: admin.publicKey, toPubkey: user.publicKey, lamports: 0.05 * LAMPORTS_PER_SOL,
           })),
           [admin], { commitment: 'confirmed' });
       }
@@ -723,14 +840,39 @@ describe('v2_fork_percolator e2e — TDD ladder', () => {
         ],
         data: Buffer.from([5, 0xff, 0xff, 1]),
       });
-      // Run push+crank TWICE in succession to walk the engine clock forward
-      // past any latent envelope gap from prior tests. Cheap (~50k CU each).
-      for (let i = 0; i < 2; i++) {
-        await sendAndConfirmTransaction(conn,
-          new Transaction()
-            .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }))
-            .add(pushIx).add(crankIx),
-          [admin], { commitment: 'confirmed', skipPreflight: true });
+      // Walk the engine clock forward past any latent envelope gap. Each
+      // crank advances at most MAX_ACCRUAL_DT_SLOTS=10 slots; gaps can be
+      // hundreds of slots between users on devnet, so retry liberally and
+      // swallow CatchupRequired (29) — that's the "still walking" signal.
+      const isCatchupRequired = (e: any): boolean => {
+        try {
+          // SendTransactionError has e.err = { InstructionError: [n, {Custom: 29}] }.
+          // Plain throws may put the same shape on e itself or e.cause. Walk all.
+          const probe = (x: any): boolean => {
+            if (!x) return false;
+            if (typeof x === 'string') return /Custom"?\s*:\s*29/.test(x);
+            if (x.InstructionError) {
+              const inner = x.InstructionError[1];
+              if (inner && typeof inner === 'object' && inner.Custom === 29) return true;
+            }
+            if (x.err && probe(x.err)) return true;
+            if (x.cause && probe(x.cause)) return true;
+            if (x.message && probe(x.message)) return true;
+            try { return /"Custom":29/.test(JSON.stringify(x)); } catch { return false; }
+          };
+          return probe(e);
+        } catch { return false; }
+      };
+      for (let i = 0; i < 30; i++) {
+        try {
+          await sendAndConfirmTransaction(conn,
+            new Transaction()
+              .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }))
+              .add(pushIx).add(crankIx),
+            [admin], { commitment: 'confirmed', skipPreflight: true });
+        } catch (e: any) {
+          if (!isCatchupRequired(e)) throw e;
+        }
       }
 
       // The privatePerpOpen. Retry once on CatchupRequired (Custom 29) —
@@ -752,25 +894,30 @@ describe('v2_fork_percolator e2e — TDD ladder', () => {
         phase9DualNote: true, pendingInputsMode: true, inlineCpiNullifier: true,
         photonRpc,
       });
-      let r;
-      try {
-        r = await tryOpen();
-      } catch (e: any) {
-        const msg = String(e?.message ?? '');
-        if (msg.includes('"Custom":29')) {
-          // Crank twice more, retry.
-          for (let i = 0; i < 2; i++) {
-            await sendAndConfirmTransaction(conn,
-              new Transaction()
-                .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }))
-                .add(pushIx).add(crankIx),
-              [admin], { commitment: 'confirmed', skipPreflight: true });
+      // SDK proof generation takes 5-10s — engine clock drifts past
+      // MAX_ACCRUAL_DT_SLOTS=10 in that window. Crank+retry up to 8×.
+      let r: any;
+      let lastErr: any;
+      for (let attempt = 0; attempt < 8; attempt++) {
+        try { r = await tryOpen(); break; }
+        catch (e: any) {
+          lastErr = e;
+          if (!isCatchupRequired(e)) throw e;
+          // Crank back to inside envelope, then retry.
+          for (let i = 0; i < 30; i++) {
+            try {
+              await sendAndConfirmTransaction(conn,
+                new Transaction()
+                  .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }))
+                  .add(pushIx).add(crankIx),
+                [admin], { commitment: 'confirmed', skipPreflight: true });
+            } catch (ce: any) {
+              if (!isCatchupRequired(ce)) throw ce;
+            }
           }
-          r = await tryOpen();
-        } else {
-          throw e;
         }
       }
+      if (!r) throw lastErr ?? new Error('open failed after 8 catchup retries');
       expect(r.signature).toBeDefined();
 
       // Verify on slab.
@@ -789,15 +936,15 @@ describe('v2_fork_percolator e2e — TDD ladder', () => {
     }
 
     // Distinct user_idx + distinct owner_pdas.
+    const expectedDistinct = T6_USERS.length + 1; // +1 for alice from T5
     const ownerSet = new Set([aliceOwnerPda, ...results.map(r => r.ownerPda)]);
     const idxSet = new Set([market.alice?.user_idx, ...results.map(r => r.userIdx)]);
-    expect(ownerSet.size, 'each user has a distinct owner_pda').toBe(3);
-    expect(idxSet.size, 'each user has a distinct slab user_idx').toBe(3);
+    expect(ownerSet.size, 'each user has a distinct owner_pda').toBe(expectedDistinct);
+    expect(idxSet.size, 'each user has a distinct slab user_idx').toBe(expectedDistinct);
 
     // Persist for the post.
     const m = JSON.parse(fs.readFileSync('/tmp/percolator-market.json', 'utf8'));
-    m.bob = results[0];
-    m.carol = results[1];
+    for (const r of results) m[r.name] = r;
     fs.writeFileSync('/tmp/percolator-market.json', JSON.stringify(m, null, 2));
   }, 900_000);
 });
