@@ -12,6 +12,8 @@ Same primitives this project already uses for kamino lending on mainnet
 
 ## The proof
 
+### Local mainnet-fork — full pool → adapter → percolator open
+
 One signed transaction, on a mainnet-forked validator with the same
 binaries percolator runs in production:
 
@@ -23,6 +25,23 @@ owner_pda:  F3DzhdaFZy8wo1cKPkhvRZAt1goMHDoffEryY3LtwBLP     (PDA derived from s
 position:   1000  (size_e6, long)
 total CU:   702,785
 ```
+
+### Public devnet — shielded note via the b402 pool
+
+A real shielded note created on Solana devnet, signed by alice, hitting
+the pool program at `42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y`:
+
+```
+tx:         2b3pj2rCJtStu2nZCmNXtYce6vHUieGQYdi27suiHpamb5MCPvPQMo7tJaT5uki6NHNvu6euNe1bJmf6yEc3iGZ7
+explorer:   https://explorer.solana.com/tx/2b3pj2rCJtStu2nZCmNXtYce6vHUieGQYdi27suiHpamb5MCPvPQMo7tJaT5uki6NHNvu6euNe1bJmf6yEc3iGZ7?cluster=devnet
+signer:     3zZo85NoPK7HAqaK4DJfsWFbfK5fVbTG1u5HEFYwLUJF (alice)
+pool:       42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y
+```
+
+T5 (the perp open) on devnet is gated on a pool program upgrade —
+the on-chain devnet pool predates the `commit_inputs` instruction
+the current SDK uses. Tracking; will replicate the local-fork open
+on devnet next.
 
 ## Program stack invoked (in tx order)
 

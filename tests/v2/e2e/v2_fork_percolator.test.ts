@@ -39,15 +39,32 @@ import {
 import { B402Solana } from '../../../packages/sdk/src/b402.js';
 import { createRpc } from '@lightprotocol/stateless.js';
 
-const RPC = 'http://127.0.0.1:8899';
+// Cluster pointer. Defaults to local fork; override for devnet via env:
+//   RPC=https://devnet.helius-rpc.com/?api-key=…  PHOTON_RPC=<same>  pnpm vitest run …
+const RPC = process.env.RPC ?? 'http://127.0.0.1:8899';
+const PHOTON_RPC = process.env.PHOTON_RPC ?? RPC.replace('8899', '8784');
+const CLUSTER: 'localnet' | 'devnet' | 'mainnet' =
+  RPC.includes('127.0.0.1') ? 'localnet'
+  : RPC.includes('devnet') ? 'devnet'
+  : 'mainnet';
 const POOL_ID = new PublicKey('42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y');
 const NULLIFIER_ID = new PublicKey('2AnRZwWu6CTurZs1yQpqrcJWo4yRYL1xpeV78b2siweq');
 const VERIFIER_T_ID = new PublicKey('Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK');
 const VERIFIER_A_ID = new PublicKey('3Y2tyhNSaUiW5AcZcmFGRyTMdnroxHxc5GqFQPcMTZae');
 const PERCOLATOR_ADAPTER_ID = new PublicKey('65NRt6GpeakqXhqvKcN3knohzKEZT37arUyQi3SZwfxv');
-const PERCOLATOR_PROG_ID = new PublicKey('DzLTTqyx7tFjwseeDTnu4f6c55H5abPgcohRVkNCS4Bn');
-const MATCHER_PROG_ID = new PublicKey('BoYEMRSe6cRw6jswHtApQVqjLf1PPakfuuDyxgWijYBU');
-const MINT_KEYPAIR_PATH = '/tmp/local-mint-keypair.json';
+// percolator-prog + matcher are cluster-specific. Local fork uses our
+// own keypairs; devnet uses Toly's deployed program IDs (the same ones
+// listed in his percolator-cli's devnet-market.json).
+const PERCOLATOR_PROG_ID = new PublicKey(process.env.PERCOLATOR_PROG_ID
+  ?? (CLUSTER === 'devnet'
+    ? '4PTXCZ4vLSK6aiUd3fx2dVVYSRNFnMSM4ijhDWkuFi2s'
+    : 'DzLTTqyx7tFjwseeDTnu4f6c55H5abPgcohRVkNCS4Bn'));
+const MATCHER_PROG_ID = new PublicKey(process.env.MATCHER_PROG_ID
+  ?? (CLUSTER === 'devnet'
+    ? '5ogNxr4uFXZXoeJ4cP89kKZkx1FkbaD2FBQr91KoYZep'
+    : 'BoYEMRSe6cRw6jswHtApQVqjLf1PPakfuuDyxgWijYBU'));
+const MINT_KEYPAIR_PATH = process.env.MINT_KEYPAIR_PATH
+  ?? (CLUSTER === 'devnet' ? '/tmp/devnet-mint-keypair.json' : '/tmp/local-mint-keypair.json');
 
 const EXECUTE_DISC = Uint8Array.from([130, 221, 242, 154, 13, 193, 189, 29]);
 
@@ -291,7 +308,8 @@ describe('v2_fork_percolator e2e — TDD ladder', () => {
 
     const circuitsDir = path.resolve(__dirname, '../../../circuits/build');
     const b402 = new B402Solana({
-      cluster: 'localnet',
+      cluster: CLUSTER,
+      relayerHttpUrl: '', // self-submit; b402 admin signs the perp tx
       rpcUrl: RPC,
       keypair: alice,
       relayer: alice, // self-submit; no hosted relayer needed for shield
@@ -332,7 +350,8 @@ describe('v2_fork_percolator e2e — TDD ladder', () => {
 
     const circuitsDir = path.resolve(__dirname, '../../../circuits/build');
     const b402 = new B402Solana({
-      cluster: 'localnet',
+      cluster: CLUSTER,
+      relayerHttpUrl: '', // self-submit; b402 admin signs the perp tx
       rpcUrl: RPC,
       keypair: alice,
       relayer: alice,
@@ -390,10 +409,12 @@ describe('v2_fork_percolator e2e — TDD ladder', () => {
         .add(createAssociatedTokenAccountIdempotentInstruction(admin.publicKey, adapterInTa, adapterAuthority, mint)),
       [admin], { commitment: 'confirmed' });
 
-    // ─ Pre-call: push fresh Hyperp mark + KeeperCrank so engine envelope
-    //   stays inside its window for the privatePerpOpen tx that follows.
+    // ─ Pre-call: keep engine envelope fresh.
+    //   On localnet we own the hyperp_authority so we can also push a
+    //   fresh mark; on devnet/mainnet the authority may be burned, so
+    //   we just crank (permissionless).
     const pushPriceData = Buffer.concat([
-      Buffer.from([17]),                                       // tag 17 PushOraclePrice
+      Buffer.from([17]),
       (() => { const b = Buffer.alloc(8); b.writeBigUInt64LE(100_000_000n, 0); return b; })(),
       (() => { const b = Buffer.alloc(8); b.writeBigInt64LE(BigInt(Math.floor(Date.now() / 1000)), 0); return b; })(),
     ]);
@@ -415,12 +436,11 @@ describe('v2_fork_percolator e2e — TDD ladder', () => {
       ],
       data: Buffer.from([5, 0xff, 0xff, 1]),
     });
-    await sendAndConfirmTransaction(conn,
-      new Transaction()
-        .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }))
-        .add(pushIx)
-        .add(crankIx),
-      [admin], { commitment: 'confirmed', skipPreflight: true });
+    const primer = new Transaction()
+      .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 400_000 }));
+    if (CLUSTER === 'localnet') primer.add(pushIx);
+    primer.add(crankIx);
+    await sendAndConfirmTransaction(conn, primer, [admin], { commitment: 'confirmed', skipPreflight: true });
 
     // ─ Build per-user accounts for the SDK call ─
     const perUserAccts = {
@@ -487,7 +507,7 @@ describe('v2_fork_percolator e2e — TDD ladder', () => {
 
     // ─ THE CALL ─
     const margin = 5_000_000n; // exactly the shielded note value
-    const photonRpc = createRpc(RPC, 'http://127.0.0.1:8784');
+    const photonRpc = createRpc(RPC, PHOTON_RPC);
     // SDK's buildPercolatorPerUserRemainingAccounts only emits indexes 0-11;
     // the adapter pins slabVaultAuthority at index 12 (RA_SLAB_VAULT_AUTHORITY)
     // and treats matcher_tail as accounts at index 13+. Pass slabVaultAuthority
@@ -606,7 +626,8 @@ describe('v2_fork_percolator e2e — TDD ladder', () => {
       }
 
       const b402 = new B402Solana({
-        cluster: 'localnet',
+        cluster: CLUSTER,
+      relayerHttpUrl: '', // self-submit; b402 admin signs the perp tx
         rpcUrl: RPC,
         keypair: user,
         relayer: user,
@@ -715,7 +736,7 @@ describe('v2_fork_percolator e2e — TDD ladder', () => {
       // The privatePerpOpen. Retry once on CatchupRequired (Custom 29) —
       // multi-user runs can drift past envelope between commit_inputs and
       // adapt_execute_v2 even with two prior cranks.
-      const photonRpc = createRpc(RPC, 'http://127.0.0.1:8784');
+      const photonRpc = createRpc(RPC, PHOTON_RPC);
       const tryOpen = () => b402.privatePerpOpen({
         lpIdx: 0, sizeE6: 1_000n, limitPriceE6: 200_000_000n,
         marginAmount: 5_000_000n, feePaymentIfInit: 1_000_000n,
