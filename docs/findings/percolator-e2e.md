@@ -2,13 +2,27 @@
 
 End-to-end verification that the b402 shielded pool composes with
 [percolator](https://github.com/aeyakovenko/percolator-prog), a
-permissionless perp engine on Solana. A user opens a perp position
-via a relayer-signed transaction; the user's wallet never appears
-on the perp tx; the slab account on percolator records the position
-owned by a PDA derived from the user's private spending key.
+permissionless perp engine on Solana. The slab account on percolator
+records each position owned by a PDA derived from the user's private
+spending key, not by their wallet.
 
-Same primitives this project already uses for kamino lending on mainnet
-([example tx](https://solscan.io/tx/4gvqUAy7iAMD4qPaSCkfxrqRv4aoNZ1uwQ68wjtPheZ1EVwdRcFwqtVijfD6B6aQYyjUmkDGXVWGnTfMB5q7XM1d)).
+Two artifacts demonstrate the property in two halves:
+
+- **Devnet keystone tx** (this PR) — the full pool → adapter →
+  percolator-prog stack runs end-to-end on a public devnet validator.
+  Single tx, real Phase-9 Groth16 verify, real Light V2 nullifier insert,
+  real percolator `InitUser`+`DepositCollateral`+`TradeCpi`. Self-submitted
+  by the user because devnet has no hosted-relayer instance.
+- **Mainnet kamino tx**
+  ([`5aVtM9Vc…`](https://solscan.io/tx/5aVtM9Vc3eSgakTwv8vNG2snokQCWZhc8D6vfLTYigJRTkW2eZ8Ymv5gYawD81qCfAyj3KzhvHJqvGA1znpLKUhB))
+  — the same SDK, same b402 pool, signed by the b402 hosted relayer
+  (`7f6gRiX56dMQ…`), not the trader's wallet. Demonstrates the
+  wallet-isolation property in production.
+
+Same code path in both. The percolator-mainnet equivalent of `5aVtM9Vc…`
+is the same SDK call against a percolator market with the hosted relayer
+configured — what's missing today is a percolator market deployed on
+mainnet to call into.
 
 ## The proof
 
@@ -17,7 +31,7 @@ Same primitives this project already uses for kamino lending on mainnet
 ```
 tx:         2NwVGzPufiL7W4gneKgSjJNh9fKMnqwKYoL4heNawdWFHmdme6HjhCFzqdYf7i4NUmpCf6v3gUxBsHb4x6Wnb6ZR
 explorer:   https://explorer.solana.com/tx/2NwVGzPufiL7W4gneKgSjJNh9fKMnqwKYoL4heNawdWFHmdme6HjhCFzqdYf7i4NUmpCf6v3gUxBsHb4x6Wnb6ZR?cluster=devnet
-signer:     3zZo85NoPK7HAqaK4DJfsWFbfK5fVbTG1u5HEFYwLUJF (alice's wallet)
+signer:     77zbXcUG72nYuMdsZ9LZgQZZUNVyUTfYZJQpunGky3sx (alice — self-submit, no devnet relayer)
 slab:       8Va4vKQk3r1ygrAjoJWHw2usREhwTAAq73jxsWKgjfso     (percolator-prog owned)
 user_idx:   1
 owner_pda:  4K8dopXjhc8qtBTQEEYAbneaZWJMhKqCg3HQAinwK4Pv     (PDA derived from spendingPub)
@@ -43,7 +57,7 @@ solana account 8Va4vKQk3r1ygrAjoJWHw2usREhwTAAq73jxsWKgjfso --url devnet
 # 3. The position owner is a PDA, not alice's wallet
 #    PDA(["b402/v1", "perp-owner", LE32(spendingPub)], 65NRt6GpeakqXhqvKcN3knohzKEZT37arUyQi3SZwfxv)
 #    = 4K8dopXjhc8qtBTQEEYAbneaZWJMhKqCg3HQAinwK4Pv
-#    Without alice's signing key, F3Dzhda… (or its analog) cannot be derived from 3zZo85No….
+#    The slab-side owner is unlinkable to 77zbXcUG… without the spending key.
 ```
 
 ### Local mainnet-fork — open + close round trip
@@ -56,50 +70,78 @@ are not externally verifiable, but the harness is byte-deterministic.
 ## Program stack invoked (in tx order)
 
 ```
-Program 42a3hsCXt…         invoke [1]    ← b402 pool
+Program 42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y     invoke [1]    ← b402 pool
   Instruction: AdaptExecuteV2
-  Program 3Y2tyhNSa…       invoke [2]    ← b402 verifier
+  Program 3Y2tyhNSaUiW5AcZcmFGRyTMdnroxHxc5GqFQPcMTZae   invoke [2]    ← b402 verifier
     Instruction: VerifyWithAccountInputs
-    consumed: 213,320 CU                  (real Groth16 zk proof verification)
-  Program 2AnRZwWu6…       invoke [2]    ← b402 nullifier
+    consumed: 213,320 CU                                                (Groth16 zk proof verification)
+  Program 2AnRZwWu6CTurZs1yQpqrcJWo4yRYL1xpeV78b2siweq   invoke [2]    ← b402 nullifier
     Instruction: CreateNullifier
-    Program SySTEM1eSU…    invoke [3]    ← Light Protocol system program
-      Program 11111111…    invoke [4]
-      Program compr6CUs…   invoke [4]    ← Light account compression
-        Instruction: InsertIntoQueues       (writes nullifier into address tree)
-  Program TokenkegQ…       invoke [2]    ← SPL token transfer (vault → adapter)
-  Program 65NRt6Gpe…       invoke [2]    ← b402 percolator adapter
+    Program SySTEM1eSU2p4BGQfQpimFEWWSC1XDFeun3Nqzz3rT7  invoke [3]    ← Light Protocol system program
+      Program 11111111111111111111111111111111           invoke [4]    ← System Program
+      Program compr6CUsB5m2jS4Y3831ztGSTnDpnKJTKS95d64XVq invoke [4]   ← Light account compression
+        Instruction: InsertIntoQueues                                   (writes nullifier into address tree)
+  Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA    invoke [2]   ← SPL token transfer (vault → adapter)
+  Program 65NRt6GpeakqXhqvKcN3knohzKEZT37arUyQi3SZwfxv   invoke [2]   ← b402 percolator adapter
     Instruction: Execute
-    Program DzLTTqyx7t…    invoke [3]    ← percolator-prog (InitUser)
-    Program DzLTTqyx7t…    invoke [3]    ← percolator-prog (DepositCollateral)
-    Program DzLTTqyx7t…    invoke [3]    ← percolator-prog (TradeCpi)
-      Program BoYEMRSe6…   invoke [4]    ← passive matcher (percolator-match)
+    Program 4PTXCZ4vLSK6aiUd3fx2dVVYSRNFnMSM4ijhDWkuFi2s invoke [3]   ← percolator-prog (InitUser)
+    Program 4PTXCZ4vLSK6aiUd3fx2dVVYSRNFnMSM4ijhDWkuFi2s invoke [3]   ← percolator-prog (DepositCollateral)
+    Program 4PTXCZ4vLSK6aiUd3fx2dVVYSRNFnMSM4ijhDWkuFi2s invoke [3]   ← percolator-prog (TradeCpi)
+      Program 5ogNxr4uFXZXoeJ4cP89kKZkx1FkbaD2FBQr91KoYZep invoke [4] ← passive matcher (percolator-match)
 ```
+
+Programs in the stack (clickable on Solana Explorer, devnet):
+
+| Program | Address |
+|---|---|
+| b402-pool | [`42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y`](https://explorer.solana.com/address/42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y?cluster=devnet) |
+| b402-verifier-adapt | [`3Y2tyhNSaUiW5AcZcmFGRyTMdnroxHxc5GqFQPcMTZae`](https://explorer.solana.com/address/3Y2tyhNSaUiW5AcZcmFGRyTMdnroxHxc5GqFQPcMTZae?cluster=devnet) |
+| b402-nullifier | [`2AnRZwWu6CTurZs1yQpqrcJWo4yRYL1xpeV78b2siweq`](https://explorer.solana.com/address/2AnRZwWu6CTurZs1yQpqrcJWo4yRYL1xpeV78b2siweq?cluster=devnet) |
+| b402-percolator-adapter | [`65NRt6GpeakqXhqvKcN3knohzKEZT37arUyQi3SZwfxv`](https://explorer.solana.com/address/65NRt6GpeakqXhqvKcN3knohzKEZT37arUyQi3SZwfxv?cluster=devnet) |
+| percolator-prog (devnet) | [`4PTXCZ4vLSK6aiUd3fx2dVVYSRNFnMSM4ijhDWkuFi2s`](https://explorer.solana.com/address/4PTXCZ4vLSK6aiUd3fx2dVVYSRNFnMSM4ijhDWkuFi2s?cluster=devnet) |
+| percolator-match (devnet) | [`5ogNxr4uFXZXoeJ4cP89kKZkx1FkbaD2FBQr91KoYZep`](https://explorer.solana.com/address/5ogNxr4uFXZXoeJ4cP89kKZkx1FkbaD2FBQr91KoYZep?cluster=devnet) |
+| Light Protocol system | [`SySTEM1eSU2p4BGQfQpimFEWWSC1XDFeun3Nqzz3rT7`](https://explorer.solana.com/address/SySTEM1eSU2p4BGQfQpimFEWWSC1XDFeun3Nqzz3rT7?cluster=devnet) |
+| Light account compression | [`compr6CUsB5m2jS4Y3831ztGSTnDpnKJTKS95d64XVq`](https://explorer.solana.com/address/compr6CUsB5m2jS4Y3831ztGSTnDpnKJTKS95d64XVq?cluster=devnet) |
+| SPL Token | [`TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA`](https://explorer.solana.com/address/TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA?cluster=devnet) |
+
+Devnet percolator-prog binary SHA-256 = `6e2bb5aee602aed1de0b2d80f72f97b6b115e0f536438f76d31e0de06d5b7002`, byte-matching the build provenance declared in [`percolator-cli/README.md`](https://github.com/aeyakovenko/percolator-cli/blob/master/README.md) (`04b854e + engine 5059332f8a`). The on-chain upgrade authority is the upstream deployer, not us — confirming the program is unmodified upstream code.
 
 Position landed in the slab; `slab.accounts[1].owner == owner_pda`.
 
 ## Privacy properties
 
-What's hidden (relative to a vanilla perp open):
+Two independent properties; each demonstrated by one of the artifacts above.
 
-- **Tx fee payer != trader.** A relayer signs and pays for the perp
-  open. The trader signed only the initial USDC shield (a separate tx).
-- **Trader's wallet is not in the perp tx.** Anyone scraping the chain
-  and looking at this perp tx sees the relayer + the slab + the
-  adapter + the verifier + the matcher. No link to the trader's wallet.
-- **The slab sees a PDA, not a wallet.** `slab.accounts[user_idx].owner`
-  is `PDA(viewing_pub_hash, adapter_program_id)`. Different traders →
-  different PDAs → different slab slots, by construction.
+### Slab-state unlinkability — proven by the devnet keystone tx
 
-What's NOT hidden:
+`slab.accounts[user_idx].owner` is a PDA derived from the user's private
+spending key, not their wallet:
 
-- **The viewing_pub_hash is on chain** (in the tx args + as a public
-  input bound by the proof). It uniquely identifies "the same trader"
-  across re-opens. Linkability between a trader's first and second
-  perp tx is intentional (so the engine can find their slot) — but
-  not back to a wallet.
-- **Trade size + lp + limit price are public.** Same exposure as any
-  on-book perp DEX.
+```
+owner = PDA(["b402/v1", "perp-owner", LE32(spendingPub)], adapter_program_id)
+```
+
+For the devnet tx: `slab.accounts[1].owner == 4K8dopXjhc8qtBTQEEYAbneaZWJMhKqCg3HQAinwK4Pv`,
+not `77zbXcUG…`. Different spending keys → different PDAs → different slab slots,
+by construction. An observer reading the slab cannot map slots back to wallets
+without the spending keys.
+
+### Tx-level wallet isolation — proven by the kamino mainnet tx
+
+When the b402 hosted relayer is configured (mainnet), the trader's wallet
+does not appear in the post-shield tx. The kamino mainnet artifact
+`5aVtM9Vc…` is signed solely by `7f6gRiX56dMQGrPERNBKuzFsvagFTM1U4LMAAN9rsiNM`
+(the b402 relayer); the user wallet `4ym542u…` is not in the signer set.
+Same SDK code path that the devnet keystone tx exercised; the only
+difference is `relayerHttpUrl` was empty on devnet because no relayer
+instance is hosted there.
+
+### What's not hidden either way
+
+- **The viewing_pub_hash is on chain.** It links a trader's repeated
+  perp opens to each other (so the engine can find their slot) — not
+  back to a wallet.
+- **Trade size, lp, limit price.** Same exposure as any on-book perp DEX.
 
 ## How the e2e is wired
 
@@ -108,7 +150,7 @@ shield (user-signed)
   USDC ──► b402 shielded pool   (Light Protocol nullifier set)
                               │
                               │
-privatePerpOpen (relayer-signed)
+privatePerpOpen (relayer-signed on mainnet; self-submit on devnet, no relayer)
   ZK proof ─► verifier_adapt   (Groth16, 213k CU on-chain)
   ↓
   pool::adapt_execute_v2
