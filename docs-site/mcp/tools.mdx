@@ -1,0 +1,174 @@
+---
+title: Tool Reference
+description: "The 11 tools registered by @b402ai/solana-mcp — inputs, outputs, side-effect costs."
+---
+
+Schemas defined in [`packages/mcp-server/src/schemas.ts`](https://github.com/mmchougule/b402-solana/blob/main/packages/mcp-server/src/schemas.ts).
+Tool registration in [`packages/mcp-server/src/index.ts`](https://github.com/mmchougule/b402-solana/blob/main/packages/mcp-server/src/index.ts).
+
+## Read tools
+
+No on-chain side effect. Cheap (sub-second on a warm NoteStore).
+
+### `status`
+
+Cheapest overview tool — call this first when unsure.
+
+| | |
+|---|---|
+| Input | `{ refresh?: boolean }` |
+| Output | `{ pubkey, balances: [{ mint, amount, depositCount }] }` |
+| Cost | 0 SOL |
+| Notes | Sub-millisecond by default (reads the persistent NoteStore). Pass `refresh: true` to re-sync from on-chain history (useful when notes may have arrived from another machine). |
+
+### `wallet_balance`
+
+Public-side balance: SOL + every SPL token account in the user's
+normal Solana wallet.
+
+| | |
+|---|---|
+| Input | `{}` |
+| Output | `{ sol, tokens: [{ mint, amount, decimals, ata }] }` |
+| Cost | 0 SOL |
+| Notes | Use before sizing a `shield`, or to verify post-`unshield`. |
+
+### `balance`
+
+Aggregate shielded balance grouped by mint.
+
+| | |
+|---|---|
+| Input | `{ mint?: base58, refresh?: boolean }` |
+| Output | `[{ mint, amount, depositCount }]` |
+| Cost | 0 SOL |
+| Notes | Pass `mint` to filter to a single mint. Without a filter, mints are returned as opaque short labels (stable keys for agents to compare across calls). |
+
+### `holdings`
+
+Per-deposit list — one row per shielded deposit.
+
+| | |
+|---|---|
+| Input | `{ mint?: base58, refresh?: boolean }` |
+| Output | `[{ id, mint, amount }]` |
+| Cost | 0 SOL |
+| Notes | For totals prefer `balance`. `holdings` is for reasoning about individual deposits (partial unshield strategy, rebalancing). |
+
+### `watch_incoming`
+
+Cursor-paginated poll for new shielded deposits since the last call.
+
+| | |
+|---|---|
+| Input | `{ cursor?: string, mint?: base58, refresh?: boolean }` |
+| Output | `{ deposits: [...], cursor: string }` |
+| Cost | 0 SOL |
+| Notes | Build agentic loops that react to incoming deposits. Omit cursor on first call. Sleep ~2-3s between calls. The SDK already updates state on `shield` — this is for deposits arriving from elsewhere. |
+
+### `quote_swap`
+
+Jupiter Lite quote — expected out, slippage, price impact, route hops.
+
+| | |
+|---|---|
+| Input | `{ inMint, outMint, amount, slippageBps? }` |
+| Output | `{ outAmount, slippageBps, priceImpact, routeHops, ... }` |
+| Cost | 0 SOL |
+| Mainnet only | Devnet returns no-route. |
+| Notes | Use before `private_swap` to predict outcome and bound slippage. May differ from on-chain execution by up to `slippageBps`. |
+
+## Write tools
+
+On-chain tx. Cost in lamports unless the hosted relayer pays.
+
+### `shield`
+
+Move SPL tokens from the user's wallet into a shielded deposit.
+Public → private.
+
+| | |
+|---|---|
+| Input | `{ mint: base58, amount: u64string }` |
+| Output | `{ signature, commitment, leafIndex }` |
+| Cost | ~5,000 lamports (user pays — depositor signs the SPL transfer). |
+| Privacy | Depositor wallet IS visible on this tx. Anchor requires the depositor's signature for SPL transfer auth. |
+| Preconditions | Wallet holds ≥ `amount` of `mint`. Token config registered on the pool for `mint`. |
+
+### `unshield`
+
+Withdraw a shielded deposit to any public address. Private → public.
+
+| | |
+|---|---|
+| Input | `{ to: base58, mint: base58 }` |
+| Output | `{ signature }` |
+| Cost | Hosted relayer pays gas (mainnet/devnet). User pays if `B402_RELAYER_HTTP_URL=none`. |
+| Privacy | Recipient need not be the depositor — that's the privacy win. The hosted relayer signs the tx; user wallet does NOT appear on the unshield. |
+| Constraint | Spends the WHOLE deposit (most-recent for that mint). For partial amounts, split the deposit by unshielding + reshielding the desired chunk. |
+| Behaviour | Auto-creates recipient token account if missing. |
+
+### `private_swap`
+
+Swap one shielded mint for another via a registered adapter.
+Private → private (atomic).
+
+| | |
+|---|---|
+| Input | `{ inMint, outMint, amount, slippageBps?, adapterProgramId?, adapterInTa?, adapterOutTa?, alt?, expectedOut? }` |
+| Output | `{ signature, outAmount, outDepositId, ... }` |
+| Cost | Hosted relayer pays gas. |
+| Privacy | Relayer signs; user wallet absent from tx. |
+| **Critical constraint** | `amount` must EXACTLY match a deposit value. `private_swap` spends the WHOLE deposit; partial spends are not supported in v1. Call `holdings { mint: inMint }` first to read available deposit sizes. |
+| Adapter resolution | Auto-resolved from cluster (Jupiter mainnet, mock devnet). Override with `adapterProgramId` etc. |
+| Recommended | Call `quote_swap` first on mainnet to bound slippage. Default `slippageBps = 30` (0.3%). |
+
+### `private_lend`
+
+Lend a shielded USDC note into a Kamino V2 reserve. Private → Kamino
+(atomic).
+
+| | |
+|---|---|
+| Input | `{ amount: u64string, mint?: base58, market?: base58, leafIndex?: number }` |
+| Output | `{ signature, voucherDepositId, obligationPda, ownerPda, inAmount, outVaultDelta, setupTxs }` |
+| Cost | First call: ~0.04 SOL one-time rent (Kamino UserMetadata + Obligation account). Charged to adapter authority, pre-funded by user. Subsequent calls: ~$0.003 in tx fees. |
+| Mainnet only | Kamino lives on mainnet. |
+| Privacy | Each viewing key gets its own Kamino Obligation, derived from `owner_pda`. Independent positions, no shared state across users. |
+| Preconditions | Caller holds a spendable shielded `mint` note ≥ `amount`. Default mint = USDC mainnet (`EPjFWdd5...`). `amount` must match a spendable note value (auto-picks exact-match → most-recent fallback). |
+| Output mint | Mints a kUSDC voucher commitment, redeemable via `private_redeem`. |
+
+### `private_redeem`
+
+Burn a kUSDC voucher commitment + withdraw the underlying USDC from
+the per-user Kamino obligation + reshield the proceeds. Kamino V2 →
+private USDC (atomic).
+
+| | |
+|---|---|
+| Input | `{ mint?: base58, market?: base58, leafIndex?: number }` |
+| Output | `{ signature, redeemedDepositId, obligationPda, usdcVaultDelta, redeemedAmount }` |
+| Cost | Hosted relayer pays gas. |
+| Mainnet only | Same reason as `private_lend`. |
+| Preconditions | Caller has at least one kUSDC voucher note from a prior `private_lend` with the SAME viewing key. |
+| Slippage | Typically 1 raw unit (Kamino reserve rounding). For $1 deposits that's 0.0001%. |
+| Behaviour | Defaults to most-recent kUSDC voucher when `leafIndex` omitted. |
+
+## Tool selection guide
+
+Common-case branches:
+
+| Question / intent | First call |
+|---|---|
+| "What do I have?" | `status` (then `wallet_balance` if public side matters) |
+| "What's in the pool?" | `balance` |
+| "Show me each deposit" | `holdings` |
+| "What's the swap price?" | `quote_swap` (mainnet) |
+| "Move money in" | `shield` |
+| "Move money out" | `unshield` |
+| "Swap privately" | `quote_swap` then `private_swap` |
+| "Lend privately" | `private_lend` (mainnet) |
+| "Withdraw a Kamino position" | `private_redeem` (mainnet) |
+| "Watch for new deposits" | `watch_incoming` (loop) |
+
+For copy-pasteable end-to-end agent prompts, see [Prompt Patterns](/mcp/prompt-patterns).

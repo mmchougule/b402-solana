@@ -1,174 +1,187 @@
 ---
 title: Shield & Unshield
-description: "The two base SDK operations and their underlying instruction shape."
+description: "Move SPL tokens between public ATAs and the shielded pool via the B402Solana class."
 ---
 
-`shield` deposits a public token amount into the pool and emits a
-shielded note. `unshield` spends one or more shielded notes and emits a
-public token transfer to a clear recipient ATA.
+`shield` deposits a public SPL amount into the pool, mints a fresh
+shielded note for the caller, and inserts it into the local note
+store. `unshield` spends one of the caller's shielded notes and
+transfers the underlying tokens to a public ATA — the recipient can
+be anyone, not just the depositor.
 
-These are the only two operations that exchange shielded ↔ public state.
-Everything else (`transact`, `adapt_execute`) keeps state shielded.
+These are the only two operations that cross the public/private
+boundary. Everything else (`swap`, `lend`, `redeem`) keeps state
+shielded.
 
-## `shield`
+## `b402.shield`
 
-```typescript
-import { shield, type ShieldParams } from '@b402ai/solana';
+```ts
+import { B402Solana } from '@b402ai/solana';
+import { Keypair, PublicKey } from '@solana/web3.js';
 
-const result = await shield({
-  connection,
-  wallet,                // buildWallet(seed) result
-  pool,                  // pool program ID
-  verifierTransact,      // verifier_transact program ID
-  prover,                // TransactProver instance
-  mint,                  // SPL mint to shield
-  amount,                // bigint, in mint base units
-  depositor,             // Keypair (signer)
-  relayer,               // Keypair (fee payer; can be same as depositor)
-  recipient,             // {spendingPub, viewingPub} for the future note
-  noteRandom,            // optional: 32-byte CSPRNG; SDK generates if omitted
+const b402 = new B402Solana({ cluster: 'mainnet', rpcUrl, keypair });
+await b402.ready();
+
+const USDC = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+
+const result = await b402.shield({
+  mint: USDC,
+  amount: 1_000_000n, // 1 USDC, smallest units
 });
+
+console.log(result.signature);   // string
+console.log(result.commitment);  // bigint, the new note's Poseidon commitment
+console.log(result.leafIndex);   // bigint, position in the Merkle tree
 ```
 
-Returns:
+`ShieldRequest`
+([`b402.ts:186`](https://github.com/mmchougule/b402-solana/blob/main/packages/sdk/src/b402.ts)):
 
-```typescript
-type ShieldResult = {
+```ts
+interface ShieldRequest {
+  mint: PublicKey;
+  amount: bigint;
+  /** Skip on-chain encrypted-note publication (~120 B). Default false —
+   *  the ciphertext is published so notes are recoverable from chain alone. */
+  omitEncryptedNotes?: boolean;
+}
+```
+
+`ShieldResult`
+([`actions/shield.ts:87`](https://github.com/mmchougule/b402-solana/blob/main/packages/sdk/src/actions/shield.ts)):
+
+```ts
+interface ShieldResult {
   signature: string;
+  commitment: bigint;
   leafIndex: bigint;
-  commitment: Uint8Array;     // 32 bytes
-  encryptedNote: EncryptedNote;
-  treeRootAfter: Uint8Array;
-};
+  note: SpendableNote; // inserted into b402.notes for you
+}
 ```
 
-### What happens under the hood
+Shield is **user-signed**: the SPL transfer out of the depositor's
+ATA requires the depositor's signature, so this op cannot route
+through the hosted relayer in the same way as the post-shield flows.
+The user pays SOL fees for the shield transaction.
 
-1. SDK fetches the current `merkle_root` from `TreeState` PDA.
-2. SDK builds a `Note { tokenMint, value: amount, random, spendingPub:
-   recipient.spendingPub }`.
-3. Computes `commitment = Poseidon_5("b402/v1/commit", ...)`.
-4. Encrypts the note with ChaCha20-Poly1305 against
-   `recipient.viewingPub`. Computes the 2-byte viewing tag.
-5. Calls `TransactProver.prove(witness)` with the shield-shape
-   public/private inputs. Wall time ~800 ms in snarkjs WASM.
-6. Builds the `Shield` instruction (Anchor discriminator + Borsh args)
-   and submits via the chosen relayer (or self-submits if no relayer).
+After the call returns, the SDK has already inserted the new
+`SpendableNote` into the in-memory `NoteStore`, so subsequent
+`balance` / `holdings` / `unshield` calls see it without an indexer
+round-trip.
 
-### Source
+## `b402.unshield`
 
-- High-level: [`packages/sdk/src/actions/shield.ts`](https://github.com/b402-ai/b402-solana/blob/main/packages/sdk/src/actions/shield.ts)
-- Low-level wallet: [`packages/sdk/src/wallet.ts`](https://github.com/b402-ai/b402-solana/blob/main/packages/sdk/src/wallet.ts)
-- Prover: [`packages/prover/src/index.ts`](https://github.com/b402-ai/b402-solana/blob/main/packages/prover/src/index.ts)
+```ts
+const recipient = new PublicKey('...'); // any public Solana address
 
-## `unshield`
-
-```typescript
-import { unshield } from '@b402ai/solana';
-
-const result = await unshield({
-  connection,
-  wallet,
-  pool,
-  verifierTransact,
-  prover,
-  inputNotes,            // [Note, ...] — the user's spendable notes
-  merkleProofs,           // optional override; ClientMerkleTree if absent
-  recipientTokenAccount,  // where the unshielded tokens land
-  publicAmountOut,        // total leaving the pool
-  relayerFee,             // amount routed to relayer fee recipient
-  relayerFeeRecipient,    // pubkey of relayer's fee ATA owner
-  changeRecipient,        // {spendingPub, viewingPub} for change note (optional)
+const result = await b402.unshield({
+  mint: USDC,
+  to: recipient,
 });
+
+console.log(result.signature);
+console.log(result.amountTransferred); // bigint
+console.log(result.nullifier);         // bigint
 ```
 
-Returns:
+`UnshieldRequest`
+([`b402.ts:340`](https://github.com/mmchougule/b402-solana/blob/main/packages/sdk/src/b402.ts)):
 
-```typescript
-type UnshieldResult = {
+```ts
+interface UnshieldRequest {
+  /** Owner of the destination token account. Recipient can be anyone. */
+  to: PublicKey;
+  /** Override the destination ATA. Defaults to the canonical ATA of `to` for `mint`. */
+  recipientAta?: PublicKey;
+  /** Note to spend. Default: highest-leafIndex spendable note in `mint`. */
+  note?: SpendableNote;
+  /** Mint of the note. Required when passing `note` explicitly. */
+  mint?: PublicKey;
+  // ... advanced fields (photonRpc, alt, inlineCpiNullifier) — see source.
+}
+```
+
+`UnshieldResult`
+([`actions/unshield.ts:118`](https://github.com/mmchougule/b402-solana/blob/main/packages/sdk/src/actions/unshield.ts)):
+
+```ts
+interface UnshieldResult {
   signature: string;
-  spentNullifiers: Uint8Array[];
-  changeCommitment?: Uint8Array;
-  encryptedChangeNote?: EncryptedNote;
-};
+  nullifier: bigint;
+  amountTransferred: bigint;
+}
 ```
 
-### What happens
+Unshield is **relayer-signed by default**. With a configured
+`relayerHttpUrl` (the cluster default points at the hosted relayer
+on Cloud Run), the on-chain fee payer is the relayer's wallet — the
+user's keypair is never present in the resulting transaction. To
+self-submit instead, construct the SDK with
+`relayerHttpUrl: ''` and a local `relayer` keypair.
 
-1. SDK assembles 2 input slots from `inputNotes` (dummies fill empty
-   slots). Computes nullifiers via `Poseidon_3("b402/v1/null",
-   spendingPriv, leafIndex)` per note.
-2. Computes a change note for `Σ inputs - publicAmountOut - relayerFee`
-   if non-zero. Encrypts to `changeRecipient.viewingPub`.
-3. Computes `recipient_bind = Poseidon_3("b402/v1/recipient-bind",
-   recipient_owner_low, recipient_owner_high)` from the
-   recipientTokenAccount's owner pubkey, split into two 128-bit halves.
-4. Computes `relayer_fee_bind = Poseidon_3("b402/v1/fee-bind",
-   relayer_fee_recipient_Fr, relayer_fee)`.
-5. Generates merkle inclusion proofs for each non-dummy input. Default
-   is `ClientMerkleTree.proveLeaf(leafIndex)`; override with
-   `merkleProofs` if you've reconstructed the tree externally.
-6. Calls `TransactProver.prove` with public + private inputs.
-7. Builds the `Unshield` ix, includes the right `NullifierShard`
-   accounts (one per nullifier prefix), submits.
+### Recipient can be anyone
 
-### Self-submission vs relayer
+The `to` field decouples the depositor from the recipient. A note
+shielded from wallet A can be unshielded directly to wallet B with no
+on-chain edge connecting them — the only link is the
+`recipient_bind` public input the proof commits to, which is opaque
+to chain observers.
 
-The SDK supports both:
-
-```typescript
-// Self-submit (user pays SOL fee, no relayer fee)
-await unshield({
-  ...,
-  relayerFee: 0n,
-  relayerFeeRecipient: depositor.publicKey,
-  // 'relayer' parameter on the tx defaults to depositor
-});
-
-// Relayer-submit
-const relayerClient = new RelayerHttpClient('http://...');
-await relayerClient.submitUnshield({ ix, accountKeys, ... });
+```ts
+// Shield from this wallet, withdraw to a different one.
+await b402.shield({ mint: USDC, amount: 1_000_000n });
+await b402.unshield({ mint: USDC, to: someOtherWallet });
 ```
 
-For the relayer client surface, see [Relayer](/sdk/relayer).
+### Picking which note to spend
 
-## Note storage
+Without `note`, the SDK picks the highest-leafIndex spendable note
+for `mint` from the local `NoteStore`
+([`b402.ts:761-783`](https://github.com/mmchougule/b402-solana/blob/main/packages/sdk/src/b402.ts)).
+For multi-note flows where you want explicit control, pass `note`
+plus `mint`:
 
-The SDK does not persist notes for you. Storage is the consumer's
-responsibility:
-
-```typescript
-import { NoteStore } from '@b402ai/solana';
-
-const store = new NoteStore();
-store.add(note, { leafIndex, commitment });
-// ... later:
-const myNotes = store.spendable();
+```ts
+const { holdings } = await b402.holdings({ mint: USDC });
+// pick a specific deposit by id, then spend it
+const target = b402.notes.getAllSpendable().find((n) => /* ... */);
+await b402.unshield({ mint: USDC, to, note: target });
 ```
 
-`NoteStore` is in-memory by default; persistence (IndexedDB, SQLite,
-filesystem) is left to the application. The Scanner emits notes
-into a `NoteStore` automatically — see [Scanner](/sdk/scanner).
+## Where notes live
 
-## Wallet derivation
+The `B402Solana` instance owns a `NoteStore` that holds every note
+the wallet can spend. Two write paths feed it:
 
-`buildWallet(seed)` derives a deterministic wallet from a 32-byte seed:
+1. **Direct insertion.** `shield` inserts the note it just created
+   (its plaintext is known locally — no chain round-trip needed).
+2. **Backfill from chain.** The SDK subscribes to `CommitmentAppended`
+   logs and runs the viewing-tag pre-filter; matches decrypt and
+   land in the store. See [Scanner](/sdk/scanner).
 
-```typescript
-import { buildWallet } from '@b402ai/solana';
+Persistence: by default the store mirrors to
+`~/.b402ai/notes/<cluster>/<viewingPubHex>.json` so deposits survive
+process restart
+([`b402.ts:447-459`](https://github.com/mmchougule/b402-solana/blob/main/packages/sdk/src/b402.ts)).
+Pass `notesPersistDir: ''` to disable, or override with a custom
+directory. The plaintext threat model matches the keypair file the
+wallet was derived from.
 
-const wallet = buildWallet(seed); // seed: Uint8Array(32)
-// wallet.spendingPriv  : Fr
-// wallet.spendingPub   : Fr
-// wallet.viewingPriv   : Curve25519 scalar
-// wallet.viewingPub    : Curve25519 public key
-```
+For cross-device recovery, the SDK can sync from the
+[`B402Indexer`](https://github.com/mmchougule/b402-solana/blob/main/packages/sdk/src/indexer.ts)
+— a typed client for the hosted indexer service. The wallet
+cryptographically verifies every indexer-supplied root against the
+on-chain `TreeState` PDA, so a tampered indexer can DoS but cannot
+forge a spend
+([`indexer.ts:1-22`](https://github.com/mmchougule/b402-solana/blob/main/packages/sdk/src/indexer.ts)).
 
-For agent use, derive `seed` deterministically from the agent's seed
-phrase (`m/44'/501'/0'/0'/b402'`). For human users, the SDK supports
-BIP-39 mnemonics via the same derivation path.
+## Continue reading
 
-The Rust crate `b402-crypto` (`packages/crypto`) is the parity
-reference — both must produce byte-identical wallets given the same
-seed. Tested in 128 fuzzed runs per
-[`reports/invariant-summary.md`](https://github.com/b402-ai/b402-solana-assurance/blob/main/reports/invariant-summary.md).
+<CardGroup cols={2}>
+  <Card title="Private Actions" icon="bolt" href="/sdk/private-actions">
+    `swap`, `lend`, `redeem` against Jupiter and Kamino.
+  </Card>
+  <Card title="Scanner" icon="radar" href="/sdk/scanner">
+    Watch for incoming private deposits.
+  </Card>
+</CardGroup>

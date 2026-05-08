@@ -10,14 +10,14 @@ gated by the pool's proof bindings.
 
 Devnet ID: `3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7`.
 
-Source: [`programs/b402-jupiter-adapter/src/lib.rs`](https://github.com/b402-ai/b402-solana/blob/main/programs/b402-jupiter-adapter/src/lib.rs).
+Source: [`programs/b402-jupiter-adapter/src/lib.rs`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-jupiter-adapter/src/lib.rs).
 
 ## Status
 
 Live on devnet. Validated end-to-end against **real Jupiter V6** on a
 mainnet-forked validator: 0.1 wSOL → 8.549 USDC through SolFi V2,
 running real aggregator bytecode and real pool state cloned from
-mainnet. See [`examples/swap-e2e-jupiter.ts`](https://github.com/b402-ai/b402-solana/blob/main/examples/swap-e2e-jupiter.ts)
+mainnet. See [`examples/swap-e2e-jupiter.ts`](https://github.com/mmchougule/b402-solana/blob/main/examples/swap-e2e-jupiter.ts)
 for the verified flow.
 
 Observed cost (mainnet-fork run):
@@ -96,7 +96,7 @@ expectedOutMint_Fr)` cryptographically pins this exact route.
 
 ## SDK flow
 
-End-to-end from [`examples/swap-e2e-jupiter.ts`](https://github.com/b402-ai/b402-solana/blob/main/examples/swap-e2e-jupiter.ts):
+End-to-end from [`examples/swap-e2e-jupiter.ts`](https://github.com/mmchougule/b402-solana/blob/main/examples/swap-e2e-jupiter.ts):
 
 ```typescript
 // 1. Fetch a live Jupiter quote.
@@ -145,7 +145,7 @@ hops overflow the 1,232 B Solana tx-size cap.
 The SDK includes the ALT in every adapt tx by default. Custom routes
 needing accounts not in the ALT can either fall back to legacy v0 tx
 encoding (for short routes) or extend the ALT via
-[`ops/alt/create-alt.ts`](https://github.com/b402-ai/b402-solana/tree/main/ops/alt).
+[`ops/alt/create-alt.ts`](https://github.com/mmchougule/b402-solana/tree/main/ops/alt).
 
 ## Reproduction
 

@@ -7,9 +7,11 @@ description: "Common questions, especially the privacy and operational ones."
 
 ### Is b402-solana actually private?
 
-Yes for **L1 (wallet → action)** linkage. Partially for **L2
-(action → action)** — Jupiter and mock are L2-private; Kamino in
-v0.1 is **not L2-private** because of single shared obligation.
+Yes for **L1 (wallet → action)** linkage. **L2 (action → action)** is
+protocol-dependent: Jupiter routes give strong unlinkability among users;
+Kamino on mainnet isolates downstream **obligation** state per viewing-key
+pseudonym (`per_user_obligation`), while **repeat actions by the same user**
+remain correlatable via `viewing_pub_hash` (see [Privacy model](/concepts/privacy-model)).
 Scales with adoption for **L3 (pool clustering)**.
 
 See [Privacy Model](/concepts/privacy-model) for the precise framing
@@ -21,28 +23,31 @@ No. Admin scope is bounded by the verifier's immutability. Spending
 requires the `spendingPriv` preimage, which is in-circuit and never
 on chain.
 
-The admin can pause new shields, whitelist mints/adapters, and
-upgrade the program (under a 72-hour timelock for 12 months, then
-permanently revoked). They cannot freeze, redirect, or read user
+The admin can pause subsystems, whitelist mints / adapters, and use
+the standard Solana BPF upgrade-authority flow to upgrade the pool
+program. There is no on-chain timelock between admin signing and the
+upgrade taking effect — admin-key custody is the load-bearing
+assumption today. The admin **cannot** freeze, redirect, or read user
 notes.
 
 ### What happens if the trusted setup is compromised?
 
 The pool becomes forgeable — an attacker who retained toxic waste
-can produce valid-looking proofs that the verifier accepts. The
-attacker can drain the pool.
+can produce valid-looking proofs that the verifier accepts and drain
+the pool.
 
-The current devnet VK is from a **single-contributor throwaway**
-ceremony, so this is a real concern on devnet (the b402 team holds
-the key). Mainnet ships only after a multi-party Phase-2 ceremony
-with ≥ 3 contributors, ≥ 1 external organization, public
-hash-chained transcript, and air-gapped contribution machines per
-[`PRD-08`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-08-audit-launch.md).
+The current mainnet VK is from a **single-contributor Phase-2** run
+by the b402 team. The same VK is on devnet and mainnet today. This
+is the largest unmitigated risk in the current deployment. Replacing
+it with a multi-party ceremony VK (≥ 3 contributors, ≥ 1 external
+organization, hash-chained transcript) and rotating verifier programs
+via `set_verifier` is on the hardening roadmap per
+[`PRD-08`](https://github.com/mmchougule/b402-solana/blob/main/docs/prds/PRD-08-audit-launch.md).
 
 ### Why isn't there a relayer allowlist?
 
 By design. Privacy.cash uses a CipherOwl-screened single relayer.
-b402's stance, per [`PRD-01 §7.3`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-01-architecture.md):
+b402's stance, per [`PRD-01 §7.3`](https://github.com/mmchougule/b402-solana/blob/main/docs/prds/PRD-01-architecture.md):
 permissionless, no KYT, no mandatory screening. Any Solana keypair
 can act as a relayer; users can switch freely or self-submit.
 
@@ -88,7 +93,7 @@ Validator processes:             ~30 ms
 Confirmed commitment:            ~400 ms (1 slot + gossip)
 ```
 
-Numbers from [TX-WALKTHROUGH.md](https://github.com/b402-ai/b402-solana/blob/main/docs/TX-WALKTHROUGH.md).
+Numbers from [TX-WALKTHROUGH.md](https://github.com/mmchougule/b402-solana/blob/main/docs/TX-WALKTHROUGH.md).
 
 ### How much does it cost?
 
@@ -102,7 +107,7 @@ Numbers from [TX-WALKTHROUGH.md](https://github.com/b402-ai/b402-solana/blob/mai
 **Protocol fee: 0%.** The v1 pool program has no fee-collection code path
 and no fee field in the public-input layout. Adding one would require a
 circuit-level change (new ceremony, new pool deployment), not an admin
-action. See [`PRD-01 §11`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-01-architecture.md).
+action. See [`PRD-01 §11`](https://github.com/mmchougule/b402-solana/blob/main/docs/prds/PRD-01-architecture.md).
 
 ### Why does `adapt_execute` need so many accounts?
 
@@ -137,7 +142,7 @@ recipient re-derives the commitment and spends as normal.
 
 Yes. Notes hold any `u64` value. Fixed-denomination designs are
 explicitly rejected per
-[`PRD-01 §8`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-01-architecture.md#8-anonymity-set-design)
+[`PRD-01 §8`](https://github.com/mmchougule/b402-solana/blob/main/docs/prds/PRD-01-architecture.md#8-anonymity-set-design)
 — they fragment the anonymity set and make value-based clustering trivial.
 
 ### Can I shield SPL tokens other than USDC and wSOL?
@@ -190,11 +195,11 @@ and reproduction commands.
 
 ### Where do I find canonical examples?
 
-- [`examples/swap-e2e-jupiter.ts`](https://github.com/b402-ai/b402-solana/blob/main/examples/swap-e2e-jupiter.ts)
+- [`examples/swap-e2e-jupiter.ts`](https://github.com/mmchougule/b402-solana/blob/main/examples/swap-e2e-jupiter.ts)
   — real Jupiter swap on mainnet-fork.
-- [`examples/scanner-e2e.ts`](https://github.com/b402-ai/b402-solana/blob/main/examples/scanner-e2e.ts)
+- [`examples/scanner-e2e.ts`](https://github.com/mmchougule/b402-solana/blob/main/examples/scanner-e2e.ts)
   — Alice → Bob → Charlie auto-discovery.
-- [`examples/kamino-adapter-fork-deposit.ts`](https://github.com/b402-ai/b402-solana/blob/main/examples/kamino-adapter-fork-deposit.ts)
+- [`examples/kamino-adapter-fork-deposit.ts`](https://github.com/mmchougule/b402-solana/blob/main/examples/kamino-adapter-fork-deposit.ts)
   — Kamino deposit through the adapter (mainnet-fork verified).
 
 ### Where do I find the canonical tests?
@@ -208,14 +213,17 @@ and reproduction commands.
 
 ### What's the upgrade authority on the pool?
 
-For 12 months post-mainnet: 3-of-5 multisig with 72-hour timelock.
-After 12 months: permanently revoked (`set_authority(None)`). This
-is a hard lock — once revoked, even the multisig cannot upgrade.
+The standard Solana BPF upgrade authority — currently held by the
+key that deployed the program. There is no on-chain timelock or
+custom multisig enforcement in the shipped program; the
+`admin_multisig` field on `PoolConfig` is reserved for a future
+co-signer pattern. Hardening this (real multisig, timelock, eventual
+revocation) is on the roadmap.
 
 ### Why Anchor?
 
 Mature framework, well-audited account macros, idiomatic event/error
-patterns. The decision is in [`PRD-01 §5`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-01-architecture.md);
+patterns. The decision is in [`PRD-01 §5`](https://github.com/mmchougule/b402-solana/blob/main/docs/prds/PRD-01-architecture.md);
 alternatives (raw Solana programs, native account discrimination)
 were rejected for code-review surface.
 

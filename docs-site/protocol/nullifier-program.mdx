@@ -1,0 +1,189 @@
+---
+title: b402-nullifier program
+description: "Domain-tagged fork of Lightprotocol/nullifier-program. The CPI target the pool uses to insert nullifiers into Light V2's address tree."
+---
+
+`b402-nullifier` is a separate Anchor program at
+[`2AnRZwWu6CTurZs1yQpqrcJWo4yRYL1xpeV78b2siweq`](https://explorer.solana.com/address/2AnRZwWu6CTurZs1yQpqrcJWo4yRYL1xpeV78b2siweq).
+Under the **mainnet `inline_cpi_nullifier` build** of `b402-pool`, the
+pool no longer mutates an internal sharded set — it CPIs into this
+program, which in turn CPIs into [Light Protocol](https://lightprotocol.com)'s
+system program to insert a leaf into the V2 address tree.
+
+If a nullifier `id` was already inserted, Light's verifier rejects the
+insert and the entire transaction reverts. That's the double-spend
+check.
+
+Source: [`programs/b402-nullifier/src/lib.rs`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-nullifier/src/lib.rs).
+For the older pool-internal sharded set (still defined in pool state
+for the non-inline path), see [Nullifier Set & Merkle Tree](/protocol/nullifier-tree).
+
+## Why a separate program
+
+In the mainnet build (`feature = "inline_cpi_nullifier"`), the pool
+keeps tree state local but delegates **nullifier set membership** to
+Light V2's compressed address tree. The win:
+
+- The nullifier set is no longer bounded by Solana's 10 MB account
+  cap. Light V2 IMT is a depth-40 indexed Merkle tree → ~10¹² capacity
+  across the address space.
+- Inserts cost ~5 µS in proof-verify time on Light's side, vs the
+  O(n) sorted-shift in the pool's internal `NullifierShard`.
+- The pool's transaction surface shrinks; the nullifier program
+  encapsulates the Light-specific account plumbing.
+
+The pool ships both paths. `inline_cpi_nullifier` is on for
+[mainnet + devnet](https://github.com/mmchougule/b402-solana/blob/main/packages/mcp-server/src/context.ts#L172-L178);
+the older `NullifierShard` path is retained for fork tests and for
+clusters where the Light V2 tree isn't deployed.
+
+## Domain tag
+
+```rust
+pub const SEED_NULL: &[u8] = b"b402/v1/null";
+```
+
+[`programs/b402-nullifier/src/lib.rs:53`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-nullifier/src/lib.rs#L53).
+The address Light derives is
+
+```
+address = derive_address(
+    &[SEED_NULL, &id],
+    &address_tree_pubkey,
+    &b402_nullifier_program_id,
+)
+```
+
+so an arbitrary caller cannot pollute b402's address space — the
+program ID is hashed into the result. Mirrors `DomainTags.nullifier`
+in [`packages/shared/src/constants.ts`](https://github.com/mmchougule/b402-solana/blob/main/packages/shared/src/constants.ts).
+
+## The cpi-only security gate
+
+Built behind `feature = "cpi-only"`. When enabled, `create_nullifier`
+rejects:
+
+1. Direct top-level invocations (`get_stack_height() == 1`).
+2. CPIs whose top-level caller is not `b402-pool`.
+
+```rust
+require!(get_stack_height() > 1, B402NullifierError::DirectCallRejected);
+let outer_ix = load_instruction_at_checked(current_idx, ix_sysvar)?;
+require!(
+    outer_ix.program_id == crate::B402_POOL_PROGRAM_ID,
+    B402NullifierError::CallerNotB402Pool
+);
+```
+
+[`programs/b402-nullifier/src/lib.rs:96-114`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-nullifier/src/lib.rs#L96-L114).
+
+The check uses the [instructions sysvar](https://docs.solanalabs.com/runtime/sysvars#instructions)
+to walk back to the outer ix's `program_id`. The
+`B402_POOL_PROGRAM_ID` constant in
+[lib.rs:62-68](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-nullifier/src/lib.rs#L62-L68)
+is the byte-array form of `42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y`
+(the deployed pool program ID).
+
+This is defence-in-depth on top of the address-derivation isolation —
+the cryptographic isolation already prevents a third party from
+producing addresses in b402's space, but the cpi-only gate also
+prevents a third party from depleting Light's per-tx queue capacity
+by spamming `create_nullifier` calls with fresh `id`s.
+
+## Instruction shape
+
+```rust
+pub fn create_nullifier<'info>(
+    ctx: Context<'_, '_, '_, 'info, CreateNullifier<'info>>,
+    proof: ValidityProof,
+    address_tree_info: PackedAddressTreeInfo,
+    output_state_tree_index: u8,
+    id: [u8; 32],
+) -> Result<()>
+```
+
+[`programs/b402-nullifier/src/lib.rs:81-87`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-nullifier/src/lib.rs#L81-L87).
+
+Accounts:
+
+| Account | Role |
+|---|---|
+| `signer` | Fee payer + Light SDK signer for the inner CPI. **Real Keypair signature**, not a PDA — Light's system program checks the inner-CPI signer at runtime. |
+| `ix_sysvar` (cpi-only) | Address-pinned to `Sysvar1nstructions1111111111111111111111111`. Pool reads top-level ix from here. |
+| `ctx.remaining_accounts` | Light V2 CPI accounts pack: address tree, queue, system program, etc. Forwarded into `CpiAccounts::new`. |
+
+The instruction emits `NullifierInserted { id, address }`
+([`lib.rs:140-143`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-nullifier/src/lib.rs#L140-L143))
+for indexers that watch nullifier writes.
+
+## Light V2 dependency
+
+The CPI chain in a real spend looks like this (from the percolator
+keystone tx — same shape for any spend):
+
+```
+Program 2AnRZwWu6CTurZs1yQpqrcJWo4yRYL1xpeV78b2siweq    invoke [2]   ← b402-nullifier
+  CreateNullifier
+  Program SySTEM1eSU2p4BGQfQpimFEWWSC1XDFeun3Nqzz3rT7   invoke [3]   ← Light Protocol system program
+    Program 11111111111111111111111111111111            invoke [4]   ← System Program
+    Program compr6CUsB5m2jS4Y3831ztGSTnDpnKJTKS95d64XVq invoke [4]   ← Light account compression
+      InsertIntoQueues                                                (writes nullifier into address tree)
+```
+
+Pinned dependency:
+
+| Program | Address |
+|---|---|
+| Light Protocol system | [`SySTEM1eSU2p4BGQfQpimFEWWSC1XDFeun3Nqzz3rT7`](https://explorer.solana.com/address/SySTEM1eSU2p4BGQfQpimFEWWSC1XDFeun3Nqzz3rT7) |
+| Light account compression | [`compr6CUsB5m2jS4Y3831ztGSTnDpnKJTKS95d64XVq`](https://explorer.solana.com/address/compr6CUsB5m2jS4Y3831ztGSTnDpnKJTKS95d64XVq) |
+| `ADDRESS_TREE_V2` | Imported from `light_sdk::constants::ADDRESS_TREE_V2`; pinned via runtime check ([`lib.rs:126-129`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-nullifier/src/lib.rs#L126-L129)). |
+
+The `address_tree_pubkey` runtime check rejects any other tree:
+
+```rust
+if address_tree_pubkey.to_bytes() != ADDRESS_TREE_V2 {
+    return Err(B402NullifierError::WrongAddressTree.into());
+}
+```
+
+## Difference vs upstream Lightprotocol/nullifier-program
+
+Two changes from the [reference fork](https://github.com/Lightprotocol/nullifier-program):
+
+1. `declare_id!` is the b402-controlled ID
+   `2AnRZwWu6CTurZs1yQpqrcJWo4yRYL1xpeV78b2siweq`.
+2. Address-derivation seed is `b"b402/v1/null"`, not `b"nullifier"`.
+   Domain-separates b402's address space from any other Light-built
+   nullifier program in the same V2 tree.
+
+## Comparison with the pool-internal sharded set
+
+[Nullifier Set & Merkle Tree](/protocol/nullifier-tree) describes the
+older path: a sharded `NullifierShard` set living in the pool's own
+account space, 65,536 shards keyed by the high 16 bits of the
+nullifier hash.
+
+| | Pool-internal `NullifierShard` | `b402-nullifier` (Light V2 IMT) |
+|---|---|---|
+| Storage | Pool-owned PDAs, 10,240 B each | Compressed account in Light V2 address tree |
+| Capacity | ~19.6M nullifiers (65536 × 300) | ~10¹² across the address space |
+| Insert cost | O(n) sorted-shift in shard | ZK-verified queue insert |
+| Rent | ~0.07 SOL per shard, lazy-init | Rent-free (Light's compressed account model) |
+| Mainnet usage | Replaced by inline-CPI path | **Active for all mainnet/devnet spends** |
+
+The non-inline path remains in pool state for fork tests and clusters
+where Light V2 isn't deployed (`localnet` without
+`light test-validator`). The structs (`TreeState`, `NullifierShard`)
+in [`programs/b402-pool/src/state.rs`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/state.rs)
+are still defined for that path.
+
+## Continue reading
+
+<CardGroup cols={2}>
+  <Card title="Pool program" icon="cube" href="/protocol/pool-program">
+    Where the pool decides between inline-CPI and the legacy sharded path.
+  </Card>
+  <Card title="Nullifier Set & Merkle Tree" icon="diagram-project" href="/protocol/nullifier-tree">
+    The pool-internal sharded set, kept for the non-inline build.
+  </Card>
+</CardGroup>

@@ -1,0 +1,119 @@
+---
+title: MCP Server Overview
+description: "@b402ai/solana-mcp — Model Context Protocol server exposing b402 confidential DeFi as agent-callable tools."
+---
+
+`@b402ai/solana-mcp` is an [MCP](https://modelcontextprotocol.io)
+stdio server that exposes the [`@b402ai/solana`](/sdk/installation) SDK
+as a set of tools an AI agent can call. Same surface as the SDK
+(`shield`, `unshield`, `private_swap`, `private_lend`,
+`private_redeem`, plus read-only state inspectors), wrapped in MCP
+tool descriptors with zod-typed input schemas.
+
+Source: [`packages/mcp-server/`](https://github.com/mmchougule/b402-solana/tree/main/packages/mcp-server).
+Current version: `@b402ai/solana-mcp@0.0.28`.
+Binary name: `b402-solana-mcp`.
+
+## Audience
+
+Any [MCP runtime](https://modelcontextprotocol.io/clients) that speaks
+stdio:
+
+- **Claude Code** — see [Claude Code Setup](/mcp/claude-code-setup).
+- **Cursor** — see [Cursor Setup](/mcp/cursor-setup).
+- **Claude Desktop** — auto-detected by `--install`.
+- Any other MCP client (Continue, Zed, custom agents) — point at
+  `npx -y @b402ai/solana-mcp` as the command.
+
+## Install
+
+```bash
+npx -y @b402ai/solana-mcp --install
+```
+
+This auto-detects installed MCP runtimes (Claude Code, Claude
+Desktop, Cursor) and writes an `b402-solana` entry into each one's
+config file, idempotently. Restart the runtime to pick up the new
+server.
+
+Source: [`packages/mcp-server/src/install.ts`](https://github.com/mmchougule/b402-solana/blob/main/packages/mcp-server/src/install.ts).
+Each runtime's config file:
+
+| Runtime | Path |
+|---|---|
+| Claude Code | `~/.claude.json` |
+| Cursor | `~/.cursor/mcp.json` |
+| Claude Desktop (mac) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Claude Desktop (linux) | `~/.config/Claude/claude_desktop_config.json` |
+| Claude Desktop (win) | `%APPDATA%\Claude\claude_desktop_config.json` |
+
+The installer skips runtimes whose config doesn't exist (you don't get
+an entry for Cursor if you don't have Cursor installed).
+
+## Defaults
+
+Zero-config: launching the server with no env vars points at mainnet
+and reads `~/.config/solana/id.json` for the user's wallet. The
+hosted relayer URL + a public-tier API key are pre-wired so unshield
+and private_swap work without any user setup.
+
+| Env var | Default | Effect |
+|---|---|---|
+| `B402_CLUSTER` | `mainnet` | `mainnet` / `devnet` / `localnet`. |
+| `B402_RPC_URL` | `https://api.mainnet-beta.solana.com` | Override with Helius / Triton / QuickNode for production agents. The default public RPC throttles ~40 RPS per IP. |
+| `B402_KEYPAIR_PATH` | `~/.config/solana/id.json` | Solana CLI keypair used for shield (depositor SPL transfer signature) and as the relayer fall-back. |
+| `B402_RELAYER_HTTP_URL` | hosted Cloud Run URL per cluster | Set to `none` to disable hosted relayer (user wallet pays gas). |
+| `B402_RELAYER_API_KEY` | embedded public-tier key (5 req/min) | Override with your own tier. |
+| `B402_NOTES_DIR` | `~/.config/b402-solana/notes/<cluster>/` | Persistent NoteStore location. Pass empty string to disable persistence. |
+| `B402_INLINE_CPI` | `1` on mainnet+devnet | Selects the CPI-nullifier path. See [b402-nullifier program](/protocol/nullifier-program). |
+| `B402_INDEXER_URL` | hosted indexer on mainnet | Closes the spend-any-leaf gap for multi-deposit unshield. |
+
+Defaults source: [`packages/mcp-server/src/context.ts`](https://github.com/mmchougule/b402-solana/blob/main/packages/mcp-server/src/context.ts).
+
+## Tools
+
+11 registered tools, split across read (no on-chain side effect) and
+write (on-chain tx).
+
+| Type | Tools |
+|---|---|
+| READ | `status`, `wallet_balance`, `balance`, `holdings`, `watch_incoming`, `quote_swap` |
+| WRITE | `shield`, `unshield`, `private_swap`, `private_lend`, `private_redeem` |
+
+Full schemas, side-effect cost, and preconditions: [Tools](/mcp/tools).
+
+## Telemetry boundary
+
+The server logs only public values:
+
+- Tool name, mint, amount, slippage bps.
+- Tx-shaped fields from responses (`signature`, `commitment`,
+  `leafIndex`, `outAmount`, `quoteOutAmount`, `outDepositId`).
+- Error message + top-of-stack snapshot for debuggability.
+
+It never logs:
+
+- The signing keypair or its bytes.
+- The viewing key or note randomness.
+- Recipient pubkeys passed to `unshield` (the recipient is the one
+  piece treated as private; depositor signs so it's already public).
+
+Source: [`packages/mcp-server/src/index.ts:198-208`](https://github.com/mmchougule/b402-solana/blob/main/packages/mcp-server/src/index.ts#L198-L208).
+Logs go to stderr; stdout is reserved for the MCP transport.
+
+## Continue reading
+
+<CardGroup cols={2}>
+  <Card title="Tool reference" icon="wrench" href="/mcp/tools">
+    Per-tool inputs, outputs, side-effect costs.
+  </Card>
+  <Card title="Claude Code setup" icon="message-bot" href="/mcp/claude-code-setup">
+    Install + restart steps for Claude Code.
+  </Card>
+  <Card title="Cursor setup" icon="terminal" href="/mcp/cursor-setup">
+    Install + restart steps for Cursor.
+  </Card>
+  <Card title="Prompt patterns" icon="comments" href="/mcp/prompt-patterns">
+    Real prompts that produce real tool calls.
+  </Card>
+</CardGroup>

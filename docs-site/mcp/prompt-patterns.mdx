@@ -1,0 +1,187 @@
+---
+title: Prompt Patterns
+description: "Copy-pasteable agent prompts that map to b402-solana MCP tool calls."
+---
+
+These are real prompts that produce real tool calls against
+`@b402ai/solana-mcp`. Each one is small enough to paste straight into
+Claude Code or Cursor agent chat.
+
+## Read-side patterns
+
+### "What's in my private balance?"
+
+```
+What's in my private balance?
+```
+
+Maps to: `status`.
+
+Returns the user's pubkey + per-mint shielded totals. Cheap (no
+on-chain side effect). When the agent needs more detail it follows up
+with `holdings` to enumerate individual deposits.
+
+### "Show me everything I have, public and private"
+
+```
+Show me everything I have — both my normal Solana wallet and my private balances.
+```
+
+Maps to: `wallet_balance` + `balance` (in parallel).
+
+The agent calls both and produces a side-by-side summary. This is the
+canonical "where am I" snapshot.
+
+### "Watch for incoming notes"
+
+```
+Watch for any new private deposits. Poll every 3 seconds for the next minute and tell me when something arrives.
+```
+
+Maps to: `watch_incoming` in a loop.
+
+The agent calls `watch_incoming` with no cursor first, gets back the
+new cursor + 0 deposits, then loops with the cursor + ~3s sleep. When
+new deposits land, the response array is non-empty and the agent
+breaks the loop to report.
+
+## Write-side patterns
+
+### "Shield 1 USDC"
+
+```
+Shield 1 USDC into the private pool.
+```
+
+Maps to: `shield { mint: "EPjFWdd5...", amount: "1000000" }`.
+
+USDC has 6 decimals → `1_000_000` smallest units = 1 USDC. The agent
+infers the mint pubkey for USDC mainnet and the smallest-unit
+conversion automatically. Returns `{ signature, commitment, leafIndex }`.
+
+### "Swap 1 USDC privately to SOL"
+
+```
+I want to swap 1 USDC privately into SOL. Quote first, then execute with a 0.5% slippage.
+```
+
+Maps to:
+
+1. `holdings { mint: "EPjFWdd5..." }` — find a deposit of exactly 1
+   USDC (or instruct the user to shield more if there isn't one).
+2. `quote_swap { inMint: USDC, outMint: SOL, amount: "1000000", slippageBps: 50 }`
+   — read expected out + price impact.
+3. `private_swap { inMint: USDC, outMint: SOL, amount: "1000000", slippageBps: 50 }`
+   — execute.
+
+The exact-match-deposit constraint is critical: `private_swap` spends
+the WHOLE deposit. If the user has a 5 USDC deposit and types "swap 1
+USDC", the agent must either find a 1 USDC deposit or split the
+larger one first.
+
+### "Lend my private USDC on Kamino"
+
+```
+Lend 5 USDC privately into Kamino's main USDC reserve.
+```
+
+Maps to: `private_lend { amount: "5000000" }`.
+
+Mainnet only. First call pays a one-time ~0.04 SOL rent for the
+per-user `UserMetadata` + `Obligation` PDAs derived from the user's
+viewing key. The response includes `obligationPda`, `ownerPda`, and
+the `voucherDepositId` of the kUSDC commitment that represents the
+deposited position.
+
+If the user lacks a 5 USDC shielded note, the agent should `shield`
+first.
+
+### "Withdraw my Kamino position"
+
+```
+Redeem my Kamino position back to private USDC.
+```
+
+Maps to: `private_redeem {}`.
+
+Defaults to the most-recent kUSDC voucher in the SDK note store.
+Burns the voucher, withdraws the underlying USDC from the per-user
+obligation, reshields the proceeds. Returns
+`{ signature, redeemedDepositId, redeemedAmount }`.
+
+### "Unshield to my hardware wallet"
+
+```
+Unshield my USDC to <pubkey>.
+```
+
+Maps to: `unshield { to: "<pubkey>", mint: USDC }`.
+
+Spends the WHOLE most-recent USDC deposit. The hosted relayer signs
++ pays gas; the user's wallet does not appear on the unshield tx —
+that's the privacy property.
+
+## Full e2e: shield → swap → lend → redeem → unshield
+
+The canonical chained agent demo. Each stage waits for the previous
+to confirm:
+
+```
+Run a full b402 demo:
+ 1. Shield 5 USDC into the private pool.
+ 2. Swap 1 USDC privately to SOL using a 0.5% slippage quote.
+ 3. Lend the remaining 4 USDC privately into Kamino.
+ 4. Redeem the Kamino position back to private USDC.
+ 5. Unshield everything to my wallet at 4ym542uPa...
+
+Print the tx signature after each step.
+```
+
+Tool sequence the agent produces:
+
+```
+shield      { mint: USDC, amount: "5000000" }                       → sig1
+holdings    { mint: USDC }                                          → see two notes after split
+quote_swap  { inMint: USDC, outMint: SOL, amount: "1000000" }
+private_swap { inMint: USDC, outMint: SOL, amount: "1000000" }      → sig2
+private_lend { amount: "4000000" }                                  → sig3 (one-time rent on first lend)
+private_redeem {}                                                   → sig4
+unshield    { to: "4ym542uPa...", mint: USDC }                      → sig5
+```
+
+Steps 3 and 4 require mainnet. Step 1 takes ~5s (Groth16 transact
+proof). Step 2 takes ~10-15s (Groth16 adapt proof + Jupiter route
+fetch). Steps 3-5 are similar.
+
+For the agent to reach step 2 with a clean exact-match note, it
+shields 5 then `private_swap`'s 1; the pool's dual-note minting
+splits the 5 USDC note into a 1-USDC spend + a 4-USDC remainder, so
+the agent has a 4-USDC note ready for step 3.
+
+## Tips
+
+- **Give the agent the exact amount in smallest units** if it
+  matters. "Swap 1 USDC" is fine — Claude knows USDC has 6 decimals
+  — but "swap 1.234567 USDC" is unambiguous as `"1234567"`.
+- **Tell the agent your slippage tolerance.** Default
+  `slippageBps = 30` (0.3%) for `private_swap` is conservative.
+  Mention "0.5%" or "1%" if the asset is volatile.
+- **For loops and watchers, set a budget.** "Poll every 3s for 1
+  minute" is a complete instruction. "Poll forever" will run until
+  the agent's tool budget is exhausted.
+- **Mainnet vs devnet.** `private_lend` / `private_redeem` are
+  mainnet-only (Kamino is mainnet). `quote_swap` is mainnet-only
+  (Jupiter route API). On devnet, the agent should fall back to a
+  mock adapter (`B402_CLUSTER=devnet` switches the default adapter
+  resolution).
+
+## Continue reading
+
+<CardGroup cols={2}>
+  <Card title="Tool reference" icon="wrench" href="/mcp/tools">
+    All 11 tools, inputs, outputs, side-effect costs.
+  </Card>
+  <Card title="MCP overview" icon="circle-info" href="/mcp/overview">
+    Defaults, install, telemetry boundary.
+  </Card>
+</CardGroup>

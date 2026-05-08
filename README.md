@@ -3,7 +3,7 @@
 [![ci](https://github.com/mmchougule/b402-solana/actions/workflows/ci.yml/badge.svg)](https://github.com/mmchougule/b402-solana/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**Private DeFi on Solana.** Shield once, then swap, lend, LP, or trade perps
+**Composable Confidential DeFi on Solana.** Shield once, then swap, lend, LP, or trade perps
 from a private balance — without your wallet appearing on-chain as the
 executing party. Single-tx execution, composable with any Solana protocol
 via a registered adapter.

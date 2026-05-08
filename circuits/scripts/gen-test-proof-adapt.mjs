@@ -6,8 +6,8 @@
  *   proof_a_be:    [64]byte hex (big-endian, groth16-solana format)
  *   proof_b_be:    [128]byte hex
  *   proof_c_be:    [64]byte hex
- *   public_inputs_be: [23] 32-byte BE hex strings
- *   public_decimals:  [23] decimal strings (for debugging)
+ *   public_inputs_be: [24] 32-byte BE hex strings
+ *   public_decimals:  [24] decimal strings (for debugging)
  *
  * Scenario: Alice has shielded 100 IN_MINT (one input note at leaf 0).
  * Pool sends 80 IN_MINT to adapter; 20 is the relayer fee. Adapter
@@ -136,6 +136,9 @@ async function buildAdaptInput() {
     expectedOutValue: expectedOutValue.toString(),
     expectedOutMint: outMint.toString(),
     adaptBindTag: tags.adaptBind.toString(),
+    // Phase 9 dual-note 24th public input: the real out-note spending pub
+    // (alias for outSpendingPub[0] — see adapt.circom:101).
+    outSpendingPubA: aliceSpPub.toString(),
     inTokenMint: [inMint.toString(), '0'],
     inValue: [inValue.toString(), '0'],
     inRandom: [inRandom.toString(), '0'],

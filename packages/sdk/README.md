@@ -1,6 +1,6 @@
 # @b402ai/solana
 
-Private DeFi on Solana. Shielded balances + composable adapters + agent-callable surface.
+Composable Confidential DeFi on Solana. Shielded balances + per-protocol adapters + agent-callable surface.
 
 ```bash
 npm install @b402ai/solana

@@ -141,16 +141,17 @@ system_program.
 
 | Instruction | Args |
 |---|---|
-| `pause(which: u8)` | bitmask |
-| `unpause(which: u8)` | bitmask |
-| `register_adapter(info: AdapterInfo)` | adapter info |
-| `disable_adapter(adapter_id: [u8; 32])` | adapter id |
-| `enable_adapter(adapter_id: [u8; 32])` | adapter id |
-| `queue_upgrade(args: QueueUpgradeArgs)` | new program hash, purpose |
-| `activate_upgrade(slot: u64)` | activates queued upgrade |
-| `cancel_upgrade(slot: u64)` | aborts queued upgrade |
-| `revoke_upgrade_authority()` | irreversible |
-| `rotate_admin(new_multisig, new_threshold)` | self-rotation |
+| `pause(which: u8)` | bitmask: which subsystem to pause |
+| `unpause(which: u8)` | bitmask: which subsystem to unpause |
+| `set_verifier(target: VerifierTarget, new_program_id: Pubkey)` | swap verifier program for `transact` or `adapt` |
+| `register_adapter(info: AdapterInfo)` | append-only allowlist add |
+| `add_token_config(args: AddTokenConfigArgs)` | whitelist SPL mint |
+| `set_max_tvl(mint: Pubkey, amount: u64)` | update per-mint TVL cap |
+
+There is no on-chain `disable_adapter`, `enable_adapter`,
+`queue_upgrade`, `activate_upgrade`, `cancel_upgrade`,
+`revoke_upgrade_authority`, or `rotate_admin` instruction. Admin is a
+single key today; multi-signer enforcement is reserved.
 
 ## Adapter instructions
 
@@ -284,7 +285,7 @@ around the Borsh `KaminoAction`).
 
 ## Source
 
-- [`programs/b402-pool/src/instructions/`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-pool/src/instructions)
-- [`programs/b402-jupiter-adapter/src/lib.rs`](https://github.com/b402-ai/b402-solana/blob/main/programs/b402-jupiter-adapter/src/lib.rs)
-- [`programs/b402-kamino-adapter/src/lib.rs`](https://github.com/b402-ai/b402-solana/blob/main/programs/b402-kamino-adapter/src/lib.rs)
-- [`programs/b402-mock-adapter/src/lib.rs`](https://github.com/b402-ai/b402-solana/blob/main/programs/b402-mock-adapter/src/lib.rs)
+- [`programs/b402-pool/src/instructions/`](https://github.com/mmchougule/b402-solana/tree/main/programs/b402-pool/src/instructions)
+- [`programs/b402-jupiter-adapter/src/lib.rs`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-jupiter-adapter/src/lib.rs)
+- [`programs/b402-kamino-adapter/src/lib.rs`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-kamino-adapter/src/lib.rs)
+- [`programs/b402-mock-adapter/src/lib.rs`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-mock-adapter/src/lib.rs)

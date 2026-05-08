@@ -1,0 +1,6 @@
+<svg width="200" height="200" viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Shield badge: flat top, straight sides, V-point bottom -->
+  <path d="M20 10 H180 V130 L100 190 L20 130 Z" rx="8" fill="#F4B526"/>
+  <!-- "402" text -->
+  <text x="100" y="115" font-family="Helvetica Neue, Arial, sans-serif" font-size="68" font-weight="700" fill="white" text-anchor="middle">402</text>
+</svg>

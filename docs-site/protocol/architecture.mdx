@@ -19,26 +19,32 @@ description: "Programs, circuits, verifiers, and adapters at one glance."
                                    ▼
 ┌────────────────────────────────────────────────────────────────────────┐
 │                              b402_pool                                  │
-│  init_pool · shield · transact · unshield · adapt_execute               │
+│  init_pool · add_token_config · set_max_tvl                             │
+│  shield · transact · unshield                                           │
+│  adapt_execute · adapt_execute_v2 · commit_inputs · gc_pending_inputs   │
+│  pause · unpause · set_verifier · register_adapter                      │
 │  PDAs: PoolConfig · TreeState · TokenConfig · Vault                     │
-│        AdapterRegistry · NullifierShard[0..65535]                       │
-└────────────┬──────────────────────┬───────────────────────────────────┘
-             │ CPI (Groth16 verify) │ CPI (adapter)
-             ▼                      ▼
-┌────────────────────────┐  ┌──────────────────────────────────────────┐
-│ b402_verifier_transact │  │ b402_jupiter_adapter   3RHRcbinCmcj...   │
-│  (18 public inputs)    │  │ b402_kamino_adapter    2enwFgcGKJDqr...  │
-│                        │  │ b402_mock_adapter      89kw33YDcbXfi...  │
-│ b402_verifier_adapt    │  │ b402_adrena_adapter    (scaffolded)      │
-│  (23 public inputs)    │  │ b402_orca_adapter      (scaffolded)      │
-└────────────────────────┘  └──────────────────────────────────────────┘
-                                              │
-                                              ▼ CPI
-                                     ┌──────────────────────┐
-                                     │ Jupiter V6, Kamino,  │
-                                     │ Adrena, Orca...      │
-                                     │ (mainnet programs)   │
-                                     └──────────────────────┘
+│        AdapterRegistry · TreasuryConfig · PendingInputs[per-user]       │
+└────────────┬──────────┬────────────────────┬───────────────────────────┘
+             │ CPI      │ CPI (Groth16)      │ CPI (adapter)
+             ▼          ▼                    ▼
+┌───────────────────┐  ┌──────────────────────┐  ┌───────────────────────┐
+│  b402_nullifier   │  │ b402_verifier_adapt  │  │ b402_jupiter_adapter  │
+│  (cpi-only)       │  │  24 inputs (Phase 9) │  │ b402_kamino_adapter   │
+│  CPI → Light V2   │  │ verify +             │  │   (per_user_obligation)│
+│  address tree     │  │ verify_with_account_ │  │ b402_mock_adapter     │
+│                   │  │ inputs (PRD-35)      │  │ b402_adrena/orca/jp   │
+│                   │  │                      │  │   (scaffolded)        │
+│                   │  │ b402_verifier_       │  │                       │
+│                   │  │ transact (18 inputs) │  │                       │
+└───────────────────┘  └──────────────────────┘  └───────────────────────┘
+                                                            │ CPI
+                                                            ▼
+                                                ┌───────────────────────┐
+                                                │ Jupiter V6, Kamino V2,│
+                                                │ Adrena, Orca, ...     │
+                                                │ (mainnet programs)    │
+                                                └───────────────────────┘
 ```
 
 ## Components
@@ -47,181 +53,146 @@ description: "Programs, circuits, verifiers, and adapters at one glance."
 
 | Program | Role | Source |
 |---|---|---|
-| `b402-pool` | Shielded pool: state, custody, dispatch | [`programs/b402-pool/`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-pool) |
-| `b402-verifier-transact` | Groth16 verifier, 18 public inputs, VK baked at build | [`programs/b402-verifier-transact/`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-verifier-transact) |
-| `b402-verifier-adapt` | Groth16 verifier, 23 public inputs, baked from throwaway ceremony | [`programs/b402-verifier-adapt/`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-verifier-adapt) |
-| `b402-jupiter-adapter` | Jupiter V6 swap CPI | [`programs/b402-jupiter-adapter/`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-jupiter-adapter) |
-| `b402-kamino-adapter` | Kamino Lend deposit/withdraw/borrow/repay | [`programs/b402-kamino-adapter/`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-kamino-adapter) |
-| `b402-mock-adapter` | Test-only adapter for delta-invariant tests | [`programs/b402-mock-adapter/`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-mock-adapter) |
-| `b402-adrena-adapter` | Adrena perps (PRD-16, scaffolded, not impl) | [`programs/b402-adrena-adapter/`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-adrena-adapter) |
-| `b402-orca-adapter` | Orca whirlpool LP (scaffolded, v2-ABI dependent) | [`programs/b402-orca-adapter/`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-orca-adapter) |
-| `b402-jupiter-perps-adapter` | Jupiter Perps async (PRD-14 dependent, deferred) | [`programs/b402-jupiter-perps-adapter/`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-jupiter-perps-adapter) |
+| `b402-pool` | Shielded pool: state, custody, dispatch, adapter CPI | [`programs/b402-pool/`](https://github.com/mmchougule/b402-solana/tree/main/programs/b402-pool) |
+| `b402-verifier-transact` | Groth16 verifier, 18 public inputs, VK baked at build | [`programs/b402-verifier-transact/`](https://github.com/mmchougule/b402-solana/tree/main/programs/b402-verifier-transact) |
+| `b402-verifier-adapt` | Groth16 verifier; 24 public inputs under `phase_9_dual_note` (mainnet today); two entrypoints (`verify`, `verify_with_account_inputs`) | [`programs/b402-verifier-adapt/`](https://github.com/mmchougule/b402-solana/tree/main/programs/b402-verifier-adapt) |
+| `b402-nullifier` | Domain-tagged fork of Light's nullifier program; CPIs Light V2 address tree to land nullifier IDs (double-spend gate) | [`programs/b402-nullifier/`](https://github.com/mmchougule/b402-solana/tree/main/programs/b402-nullifier) |
+| `b402-jupiter-adapter` | Jupiter V6 swap CPI (stateless adapter) | [`programs/b402-jupiter-adapter/`](https://github.com/mmchougule/b402-solana/tree/main/programs/b402-jupiter-adapter) |
+| `b402-kamino-adapter` | Kamino V2 deposit/withdraw via per-user obligation | [`programs/b402-kamino-adapter/`](https://github.com/mmchougule/b402-solana/tree/main/programs/b402-kamino-adapter) |
+| `b402-mock-adapter` | Test-only adapter for delta-invariant tests | [`programs/b402-mock-adapter/`](https://github.com/mmchougule/b402-solana/tree/main/programs/b402-mock-adapter) |
+| `b402-adrena-adapter` | Adrena perps (scaffolded) | [`programs/b402-adrena-adapter/`](https://github.com/mmchougule/b402-solana/tree/main/programs/b402-adrena-adapter) |
+| `b402-orca-adapter` | Orca whirlpool LP (scaffolded) | [`programs/b402-orca-adapter/`](https://github.com/mmchougule/b402-solana/tree/main/programs/b402-orca-adapter) |
+| `b402-jupiter-perps-adapter` | Jupiter Perps async (deferred) | [`programs/b402-jupiter-perps-adapter/`](https://github.com/mmchougule/b402-solana/tree/main/programs/b402-jupiter-perps-adapter) |
+
+The `b402-nullifier` program is part of the trusted set, even though end users never call it directly. It is the only program permitted by the pool's `inline_cpi_nullifier` build to insert into Light Protocol's address tree V2 under the `b"b402/v1/null"` domain tag — see [`programs/b402-nullifier/src/lib.rs:46-53`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-nullifier/src/lib.rs#L46-L53). When built with `--features cpi-only`, top-level dispatch is rejected and the caller's program ID must equal `b402_pool` ([`lib.rs:96-114`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-nullifier/src/lib.rs#L96-L114)).
+
+### Mainnet feature-flag matrix
+
+The on-chain binaries were built with these Cargo features:
+
+| Program | Features compiled in (mainnet, 2026-04-30+) |
+|---|---|
+| `b402-pool` | `prd_35_pending_inputs`, `inline_cpi_nullifier`, `phase_9_dual_note` |
+| `b402-verifier-adapt` | `phase_9_dual_note` (24 public inputs) |
+| `b402-verifier-transact` | none (18 public inputs is fixed) |
+| `b402-nullifier` | `cpi-only` (top-level dispatch rejected; caller must be `b402_pool`) |
+| `b402-kamino-adapter` | `per_user_obligation` |
+
+A pool feature flag toggles a wire shape, an instruction surface, or a CPI shape — they are not free. SDK and pool must be upgraded together. See `programs/b402-pool/src/instructions/unshield.rs:39-41` for the field-gating example.
 
 ### Circuits (`circuits/`)
 
-| Circuit | R1CS | Public inputs | Source |
+| Circuit | R1CS constraints | Public inputs | Source |
 |---|---|---|---|
-| `transact` | 17,259 constraints | 18 | [`circuits/transact.circom`](https://github.com/b402-ai/b402-solana/blob/main/circuits/transact.circom) |
-| `adapt` | 17,582 constraints | 23 | [`circuits/adapt.circom`](https://github.com/b402-ai/b402-solana/blob/main/circuits/adapt.circom) |
-| `adapt_v2` | future-arch (M-in / N-out + content-addressed action hash) | TBD | [`circuits/build/adapt_v2.r1cs.info.txt`](https://github.com/b402-ai/b402-solana/blob/main/circuits/) |
+| `transact` | 17,259 | 18 | [`circuits/transact.circom`](https://github.com/mmchougule/b402-solana/blob/main/circuits/transact.circom) |
+| `adapt` | 17,582 | 23 (Phase 7B) / **24** (Phase 9, mainnet) | [`circuits/adapt.circom`](https://github.com/mmchougule/b402-solana/blob/main/circuits/adapt.circom) |
+| `adapt_v2` | 34,298 | 38 | scaffold for future M-in / N-out |
 
-R1CS counts come from `circuits/build/<name>.r1cs.info.txt` — the
-snarkjs-generated info file. Update on every recompile.
-
-Sub-circuits in `circuits/lib/`: `commitment`, `nullifier`,
-`spending_pub`, `merkle_verify`, `range_check`. Composed by both the
-`transact` and `adapt` top-level circuits.
+Counts read from `circuits/build/<name>.r1cs.info.txt`. Sub-circuits in `circuits/lib/`: `commitment`, `nullifier`, `spending_pub`, `merkle_verify`, `range_check`. Both top-level circuits compose them.
 
 ### Packages (`packages/`)
 
 | Package | Surface |
 |---|---|
-| `@b402ai/solana` (`packages/sdk`) | Wallet, actions, scanner, merkle, note encryption |
+| `@b402ai/solana` (`packages/sdk`) | Wallet, actions, scanner, merkle, note encryption, pending-inputs/inline-CPI mode |
 | `@b402ai/solana-prover` (`packages/prover`) | TransactProver, AdaptProver — snarkjs WASM wrappers |
 | `@b402ai/solana-relayer` (`packages/relayer`) | Fastify HTTP relayer, optional Jito bundling |
 | `@b402ai/solana-shared` (`packages/shared`) | Constants, codecs, domain tags |
 | `b402-crypto` (`packages/crypto`) | Rust Fr / Poseidon / Merkle reference (parity-tested ↔ TS) |
 
-### Examples (`examples/`)
+## Pool instruction surface
 
-| Example | What it proves |
-|---|---|
-| `e2e.ts` | Shield → unshield with real Groth16 |
-| `swap-e2e.ts` | Shield → adapt (mock) → unshield with real Groth16 |
-| `swap-e2e-jupiter.ts` | Shield → real Jupiter V6 swap → unshield (mainnet-fork) |
-| `kamino-fork-deposit.ts` | Direct Kamino deposit on mainnet-fork (probe) |
-| `kamino-adapter-fork-deposit.ts` | Shielded Kamino deposit via adapter on mainnet-fork |
-| `scanner-e2e.ts` | Alice → Bob → Charlie via viewing-tag auto-discovery |
-
-## Instruction taxonomy
-
-The pool program exposes these instructions (full spec in
-[Pool Program](/protocol/pool-program)):
+Source of truth: [`programs/b402-pool/src/lib.rs:31-159`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/lib.rs#L31-L159).
 
 ```
-init_pool                 admin, one-time
-add_token_config          admin, whitelist mint
+init_pool                 admin, one-time; takes treasury_pubkey
+add_token_config          admin, whitelist mint, set max_tvl
+set_max_tvl               admin, per-mint cap update
 shield                    user, deposit
-transact                  user, internal transfer
-unshield                  user, withdraw to clear
-adapt_execute             user, composable DeFi
-register_adapter          admin
-disable_adapter           admin (single-sig kill switch)
-enable_adapter            admin (multisig)
-pause / unpause           admin
-queue_upgrade             admin (72h timelock)
-activate_upgrade          admin (post-timelock)
-revoke_upgrade_authority  admin (irreversible after 12mo)
-rotate_admin              admin
+transact                  user, internal transfer (no public movement)
+unshield                  user, withdraw to clear ATA
+adapt_execute             user, composable execution (Phase 7B inline-CPI path)
+adapt_execute_v2          user, PRD-35 pending-inputs path (feature-gated)
+commit_inputs             user, tx-1 of PRD-35 two-tx flow
+gc_pending_inputs         admin, refund rent on stale PendingInputs PDA
+register_adapter          admin, append-only adapter allowlist
+set_verifier              admin, repoint verifier_transact / verifier_adapt / verifier_disclose
+pause / unpause           admin, gate shields / transacts / adapts (NEVER unshield)
+check_adapter_delta_mock  test-only, gated behind `test-mock` Cargo feature
 ```
+
+There is no `disable_adapter`, `enable_adapter`, `queue_upgrade`, `revoke_upgrade_authority`, or `rotate_admin` instruction. Admin is a single key (`PoolConfig.admin_multisig`); multi-signer enforcement is not implemented.
 
 ## State (PDAs)
 
-All PDAs use `b"b402/v1"` as a version prefix in seeds. Layout from
-[`PRD-03 §3.3`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-03-program-spec.md):
+All PDAs use `b"b402/v1"` as a version prefix in seeds. Layout from [`programs/b402-pool/src/state.rs`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/state.rs):
 
 | PDA | Seeds | Purpose |
 |---|---|---|
 | `PoolConfig` | `[b"b402/v1", b"config"]` | Admin pubkey, pause flags, pinned verifier program IDs |
-| `TokenConfig` | `[b"b402/v1", b"token", mint]` | Per-token: decimals, vault pubkey, enabled |
+| `TokenConfig` | `[b"b402/v1", b"token", mint]` | Per-token: decimals, vault pubkey, enabled, `max_tvl` |
 | `Vault` (token account) | `[b"b402/v1", b"vault", mint]` | Pool's custody of `mint` |
-| `TreeState` | `[b"b402/v1", b"tree"]` | 128-root ring, frontier, leaf count, zero cache |
-| `NullifierShard` | `[b"b402/v1", b"null", prefix_le_2B]` | Nullifier set, sharded by 16-bit prefix |
-| `AdapterRegistry` | `[b"b402/v1", b"adapters"]` | Registered adapter program IDs + allowed instructions |
-| `TreasuryConfig` | `[b"b402/v1", b"treasury"]` | Reserved for future fee policy (currently unused) |
+| `TreeState` | `[b"b402/v1", b"tree"]` | 128-root ring, frontier (depth 26), leaf count, zero cache (zero-copy) |
+| `AdapterRegistry` | `[b"b402/v1", b"adapters"]` | Registered adapter program IDs + allowed instruction discriminators |
+| `TreasuryConfig` | `[b"b402/v1", b"treasury"]` | `treasury_pubkey` for `gc_pending_inputs` rent refunds |
+| `PendingInputs` | `[b"b402/v1", b"pending-inputs", spending_pub_le]` | PRD-35 per-user public-input staging (777 B at Phase 9) |
 
-`NullifierShard` is created lazily on first nullifier landing in shard.
-Up to 65,536 shards in saturation; ~10 KB each, ~64 KB at expected
-load.
+`TreeState` is fixed-size (`#[account(zero_copy)]`); see [`state.rs:53-78`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/state.rs#L53-L78). The 128-root ring (`ROOT_HISTORY_SIZE`) is set at [`constants.rs:22`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/constants.rs#L22). The on-chain `NullifierShard` type still exists in source ([`state.rs:109-140`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/state.rs#L109-L140)) but is not written by the mainnet build — nullifiers land in Light V2 via the `b402-nullifier` CPI. See [Nullifier Set & Merkle Tree](/protocol/nullifier-tree).
 
-## Cross-program invocation graph
-
-For a typical `adapt_execute` call:
+## Cross-program invocation graph (`adapt_execute`, mainnet build)
 
 ```
-relayer keypair signs the tx
+relayer signs the tx
    │
    ▼
-b402_pool::adapt_execute
-   ├─ CPI → b402_verifier_adapt::verify (~180k CU)
-   ├─ CPI → spl-token::transfer  (in_vault → adapter_in_ta, pool PDA signs)
+b402_pool::adapt_execute (or adapt_execute_v2)
+   ├─ [PRD-35] read public inputs from pending_inputs PDA, byte-equality check
+   ├─ CPI → b402_verifier_adapt::verify_with_account_inputs (Phase 9 VK, 24 pis)
+   ├─ For each non-dummy input nullifier:
+   │     CPI → b402_nullifier::create_nullifier
+   │            └─ CPI → light_system_program (insert into Light V2 address tree)
+   ├─ CPI → spl-token::transfer (in_vault → adapter_in_ta, pool PDA signs)
+   │       (skipped under Path A when adapter is stateful AND in_mint is a synthetic voucher)
+   ├─ CPI → spl-token::transfer (in_vault → relayer_fee_ta) when fee > 0
+   ├─ snapshot out_vault.amount as `pre`
    ├─ CPI → adapter_program::execute
-   │       ├─ CPI → spl-token::transfer (adapter scratch)
-   │       ├─ CPI → jupiter_v6::route   (adapter PDA signs)
-   │       │       └─ CPI → AMM programs (Whirlpool, SolFi, Raydium, ...)
-   │       └─ CPI → spl-token::transfer (adapter_out_ta → out_vault)
-   ├─ post-CPI: read out_vault.amount
-   ├─ CPI → spl-token::transfer (in_vault → relayer_fee_ta if fee > 0)
-   ├─ tree_append (sol_poseidon × 26 levels)
-   └─ emit AdaptExecuted, CommitmentAppended events
+   │       (action_payload prefixed with viewing_pub_hash for stateful adapters)
+   │       └─ CPI → Jupiter / Kamino / ... → AMM / lending programs
+   ├─ reload out_vault, compute delta = post − pre
+   ├─ if !stateful_voucher_mint: require delta ≥ expected_out_value (I4)
+   ├─ tree_append for each non-dummy commitment_out (sol_poseidon × 26)
+   ├─ [Phase 9] if delta > expected_out_value: append commitment_b for the excess
+   ├─ zero pending_inputs.version (replay protection)
+   └─ emit AdaptExecuted, CommitmentAppended[, ExcessNoteMinted]
 ```
 
-Compute budget: 1.4M CU requested, ~660k actual on the mainnet-fork
-Jupiter case ([README §observed costs](https://github.com/b402-ai/b402-solana/blob/main/README.md)).
+Compute budget: 1.4M CU requested; ~660k actual on the mainnet Jupiter SolFi V2 case. Mainnet swap reference: `5aVtM9Vc3eSgakTwv8vNG2snokQCWZhc8D6vfLTYigJRTkW2eZ8Ymv5gYawD81qCfAyj3KzhvHJqvGA1znpLKUhB`.
 
-## Programs deployed on devnet (2026-04-25)
+## Path: shield → adapt_execute_v2 → unshield
 
 ```
-Pool                  42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y
-Verifier (transact)   Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK
-Verifier (adapt)      3Y2tyhNSaUiW5AcZcmFGRyTMdnroxHxc5GqFQPcMTZae
-Jupiter adapter       3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7
-Mock adapter          89kw33YDcbXfiayVNauz599LaDm51EuU8amWydpjYKgp
-b402 ALT              9FPYufa1KDkrn1VgfjkR7R667hbnTA7CNtmy38QcsuNj
+1. user.shield                  : user → vault (USDC), tree_append commitment_in
+2. user.commit_inputs           : SDK writes 24 × 32 B public inputs to PendingInputs PDA
+3. user.adapt_execute_v2        : verifier reads PDA, CPI nullifier × N, CPI adapter,
+                                  tree_append commitment_out (+ commitment_b if excess)
+4. user.unshield                : nullifier × N, vault → recipient ATA (recipient-owner-bound)
 ```
 
-See [Program IDs](/reference/program-ids) for the full reference.
+The `commit_inputs` and `adapt_execute_v2` pair lifts the v0-tx 1232 B ceiling for per-user adapters by moving ~768 B of public inputs from ix data into account data. See [Pool Program](/protocol/pool-program) for the full validation order.
 
-## SVM-native design choices
+## Address Lookup Table (ALT)
 
-The cryptographic primitives (Groth16-on-BN254, Poseidon, UTXO commitments
-with nullifier-set membership, viewing-key separation) are off-the-shelf
-and well-studied — picked deliberately so the proofs are auditable against
-existing literature, not novel. The runtime design is where Solana
-specifics drive everything:
+Hosted relayer pubkey: `7f6gRiX56dMQGrPERNBKuzFsvagFTM1U4LMAAN9rsiNM`. The hosted relayer ALT pre-loads the static program/PDA accounts shared across every shielded tx (verifier, nullifier, light system program, account-compression authorities, pool PDAs, common token configs and vaults). Per-tx accounts (user ATAs, adapter routing accounts, pending-inputs PDA) ride in the `accountKeys` block and the unique-accounts list.
 
-| Aspect | b402-solana |
-|---|---|
-| Composition primitive | `adapt_execute` instruction → CPI to a per-protocol adapter program |
-| Fee payer | Solana fee-payer keypair (distinct from signers; no account-abstraction layer needed) |
-| Pool state | Multiple PDAs: `TreeState`, sharded `NullifierShard`, one `Vault` per mint |
-| Verifier | One program per circuit, immutable (`upgrade_authority = None`) at deploy |
-| Tree append cost | One Solana instruction; full `adapt_execute` observed at ~660k CU |
-| Tx-size cap | 1,232 B hard cap, ALT-relieved — the whole shielded swap fits in one v0 transaction |
-| Account budget | ~35 accounts per tx without ALT, ~256 with the b402 lookup table |
-
-The runtime difference matters: Solana's read-write set is explicit per
-transaction, so the b402 tree append fits in a single instruction — the
-runtime knows `TreeState` is locked for this tx and serialises appends
-without a changelog. That's why a private swap end-to-end (shield → adapt
-CPI → unshield) lands in a single v0 transaction with one signature.
-
-## What's intentionally stubbed (per README)
-
-From the README's "What's intentionally stubbed":
-
-- **Stealth-address bech32 encoding.** Primitives exist; the
-  `b402sol1q…` encode/decode layer is not written.
-- **Production trusted setup.** Current VK is from a throwaway
-  single-contributor ceremony.
-- **Admin multisig.** v1 uses single-key admin; PRD-03 §9 specifies
-  the full co-signer pattern.
-- **Beyond Jupiter + Kamino-deposit.** Kamino withdraw/borrow/repay,
-  Drift, Adrena, Orca are scoped per
-  [PRD-09 / PRD-10 / PRD-16](https://github.com/b402-ai/b402-solana/tree/main/docs/prds)
-  but not yet shipped.
-
-The relayer service was originally listed as a stub; it has since
-shipped (`@b402ai/solana-relayer`) — see
-[Running a Relayer](/operations/running-a-relayer).
+See [Program IDs](/reference/program-ids) for the full ID reference. Same program IDs are deployed on devnet and mainnet.
 
 ## Continue reading
 
 <CardGroup cols={2}>
-  <Card title="Circuits" icon="circle-nodes" href="/protocol/circuits">
-    Public inputs, constraint counts, in-circuit checks per template.
-  </Card>
   <Card title="Pool Program" icon="cube" href="/protocol/pool-program">
-    Each instruction's accounts, args, and validation steps.
+    Each instruction's accounts, args, validation order, and CU range.
+  </Card>
+  <Card title="Nullifier Set & Merkle Tree" icon="grid" href="/protocol/nullifier-tree">
+    TreeState shape, root ring, and the b402-nullifier / Light V2 path.
   </Card>
 </CardGroup>
