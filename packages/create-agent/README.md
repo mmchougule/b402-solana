@@ -1,6 +1,6 @@
 # @b402ai/create-agent
 
-Scaffold a private-DeFi agent on Solana in one command.
+Scaffold a composable confidential DeFi agent on Solana in one command.
 
 ```bash
 npx @b402ai/create-agent my-agent

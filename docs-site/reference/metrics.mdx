@@ -11,19 +11,19 @@ assurance JSON. No estimates.
 
 | Metric | Value | Source |
 |---|---|---|
-| `transact` R1CS constraints | 17,259 | [`circuits/build/transact.r1cs.info.txt`](https://github.com/b402-ai/b402-solana/blob/main/circuits/) |
+| `transact` R1CS constraints | 17,259 | [`circuits/build/transact.r1cs.info.txt`](https://github.com/mmchougule/b402-solana/blob/main/circuits/) |
 | `transact` public inputs | 18 | same |
 | `transact` private inputs | 129 | same |
 | `transact` wires | 17,328 | same |
-| `adapt` R1CS constraints (v1, shipped) | 17,582 | [`circuits/build/adapt.r1cs.info.txt`](https://github.com/b402-ai/b402-solana/blob/main/circuits/) |
-| `adapt` public inputs (v1) | 23 | same |
-| `adapt` private inputs (v1) | 128 | same |
-| `adapt_v2` R1CS constraints (compiled, not deployed) | 34,298 | [`circuits/build/adapt_v2.r1cs.info.txt`](https://github.com/b402-ai/b402-solana/blob/main/circuits/) |
+| `adapt` R1CS constraints (Phase 9 shipped) | 17,582 | [`circuits/build/adapt.r1cs.info.txt`](https://github.com/mmchougule/b402-solana/blob/main/circuits/build/adapt.r1cs.info.txt) — **may show stale wire counts** until recompiled |
+| `adapt` public inputs (Phase 9 on-chain VK) | **24** | [`programs/b402-verifier-adapt/src/vk.rs`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-verifier-adapt/src/vk.rs) `nr_pubinputs` |
+| `adapt` private inputs | 128 | circuit compile / same ceremony outputs |
+| `adapt_v2` R1CS constraints (compiled, not deployed) | 34,298 | [`circuits/build/adapt_v2.r1cs.info.txt`](https://github.com/mmchougule/b402-solana/blob/main/circuits/) |
 | `adapt_v2` public inputs | 38 | same |
 | `adapt_v2` private inputs | 258 | same |
 | Curve | BN254 (a.k.a. bn-128, alt_bn128) | snarkjs info file |
-| Hash | Poseidon `x^5` S-box, `iden3/circomlib v2.4.0` parameter set | [PRD-02 §1](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-02-crypto-spec.md) |
-| Merkle depth | 26 | [PRD-02 §5](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-02-crypto-spec.md) |
+| Hash | Poseidon `x^5` S-box, `iden3/circomlib v2.4.0` parameter set | [PRD-02 §1](https://github.com/mmchougule/b402-solana/blob/main/docs/prds/PRD-02-crypto-spec.md) |
+| Merkle depth | 26 | [PRD-02 §5](https://github.com/mmchougule/b402-solana/blob/main/docs/prds/PRD-02-crypto-spec.md) |
 | Merkle capacity | 2²⁶ ≈ 67M leaves | derived from depth |
 
 ## Compiled program sizes (BPF, devnet build 2026-04-26)
@@ -69,9 +69,9 @@ total — well inside the budget.
 | Adapt swap (mock adapter, real Groth16) | 1,214 | 18 |
 | Adapt swap (Jupiter v6 SolFi V2, mainnet-fork) | 1,231 | 1 |
 
-Source: [README.md](https://github.com/b402-ai/b402-solana/blob/main/README.md)
+Source: [README.md](https://github.com/mmchougule/b402-solana/blob/main/README.md)
 "observed costs" table; backed by the live devnet sigs in
-[Program IDs → Live txs](/reference/program-ids#live-txs-proof-of-life).
+[Program IDs → Proof-of-life](/reference/program-ids#proof-of-life-mainnet).
 
 ## Mainnet protocols verified end-to-end against real bytecode
 
@@ -81,8 +81,8 @@ AMM bytecode.
 
 | Protocol | Op | Driver script | Status |
 |---|---|---|---|
-| Jupiter v6 (aggregator) | swap (0.1 wSOL → USDC via SolFi V2) | [`examples/swap-e2e-jupiter.ts`](https://github.com/b402-ai/b402-solana/blob/main/examples/swap-e2e-jupiter.ts) | GREEN |
-| Kamino Lend (`KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD`) | deposit USDC | [`examples/kamino-adapter-fork-deposit.ts`](https://github.com/b402-ai/b402-solana/blob/main/examples/kamino-adapter-fork-deposit.ts) | GREEN (alice -1 USDC, obligation +3344 B) |
+| Jupiter v6 (aggregator) | swap (0.1 wSOL → USDC via SolFi V2) | [`examples/swap-e2e-jupiter.ts`](https://github.com/mmchougule/b402-solana/blob/main/examples/swap-e2e-jupiter.ts) | GREEN |
+| Kamino Lend (`KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD`) | deposit USDC | [`examples/kamino-adapter-fork-deposit.ts`](https://github.com/mmchougule/b402-solana/blob/main/examples/kamino-adapter-fork-deposit.ts) | GREEN (alice -1 USDC, obligation +3344 B) |
 
 ## Cloned mainnet account types in tests
 
@@ -148,7 +148,7 @@ IDL.
 ## Negative-test coverage (verifier crate)
 
 Cited from
-[`programs/b402-verifier-adapt/tests/verify.rs`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-verifier-adapt/tests)
+[`programs/b402-verifier-adapt/tests/verify.rs`](https://github.com/mmchougule/b402-solana/tree/main/programs/b402-verifier-adapt/tests)
 and
 [`b402-solana-assurance/artifacts/fuzz-summary.json`](https://github.com/b402-ai/b402-solana-assurance/blob/main/artifacts/fuzz-summary.json):
 
@@ -174,13 +174,13 @@ and
 
 | Metric | Count | Source |
 |---|---|---|
-| Numbered PRDs (PRD-01 through PRD-23, plus PRD-01-A amendment) | 24 documents | [`docs/prds/`](https://github.com/b402-ai/b402-solana/tree/main/docs/prds) |
+| Numbered PRDs (PRD-01 through PRD-23, plus PRD-01-A amendment) | 24 documents | [`docs/prds/`](https://github.com/mmchougule/b402-solana/tree/main/docs/prds) |
 | Assurance PRDs (A01 through A06) | 6 documents | [`b402-solana-assurance/prds/`](https://github.com/b402-ai/b402-solana-assurance/tree/main/prds) |
 | Total PRD documents | 30 | combined |
 
 Unusual depth-of-spec for a Solana project at this stage. Each
 non-trivial decision is justified inline in a PRD; see
-[`docs/prds/README.md`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/README.md)
+[`docs/prds/README.md`](https://github.com/mmchougule/b402-solana/blob/main/docs/prds/README.md)
 for the sequenced-gating chain.
 
 ## `// TODO(verify):` markers

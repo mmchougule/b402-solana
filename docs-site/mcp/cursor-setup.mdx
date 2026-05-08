@@ -1,0 +1,124 @@
+---
+title: Cursor Setup
+description: "Install @b402ai/solana-mcp into Cursor."
+---
+
+## Auto-install
+
+```bash
+npx -y @b402ai/solana-mcp --install
+```
+
+The installer detects Cursor via `~/.cursor/mcp.json` and writes an
+`b402-solana` entry into the file's `mcpServers` object. Idempotent;
+pass `--force` to overwrite a different existing entry.
+
+To install only into Cursor (skip Claude Code / Claude Desktop):
+
+```bash
+npx -y @b402ai/solana-mcp --install --only Cursor
+```
+
+Source: [`packages/mcp-server/src/install.ts`](https://github.com/mmchougule/b402-solana/blob/main/packages/mcp-server/src/install.ts).
+
+## Manual install
+
+Edit `~/.cursor/mcp.json` and add:
+
+```json
+{
+  "mcpServers": {
+    "b402-solana": {
+      "command": "npx",
+      "args": ["-y", "@b402ai/solana-mcp@latest"]
+    }
+  }
+}
+```
+
+If `~/.cursor/mcp.json` doesn't exist yet, create it with that
+content. Cursor must be installed for the file to be auto-detected
+by the installer (the installer skips runtimes whose config doesn't
+exist).
+
+To pin overrides into the entry (e.g. a private RPC):
+
+```json
+{
+  "mcpServers": {
+    "b402-solana": {
+      "command": "npx",
+      "args": ["-y", "@b402ai/solana-mcp@latest"],
+      "env": {
+        "B402_RPC_URL": "https://mainnet.helius-rpc.com/?api-key=YOUR_KEY",
+        "B402_CLUSTER": "mainnet"
+      }
+    }
+  }
+}
+```
+
+## Restart
+
+Cursor reads `~/.cursor/mcp.json` on startup. After install:
+
+1. Quit Cursor (Cmd-Q on macOS — closing the window is not enough).
+2. Relaunch Cursor.
+3. Open Cursor Settings → Features → MCP. The `b402-solana` server
+   should appear with a green "running" indicator.
+
+Verify with a tool call in agent chat:
+
+> What's my private balance?
+
+Cursor calls `status` and returns the response.
+
+## Common gotchas
+
+### Server not appearing in Settings → MCP
+
+Cursor caches the config at startup. If you edited the file while
+Cursor was running, fully quit and relaunch — closing the window is
+not sufficient on macOS.
+
+### Keypair path
+
+Same as Claude Code: the server reads `~/.config/solana/id.json` by
+default. Either run `solana-keygen new` once or pass
+`B402_KEYPAIR_PATH` in the `env` block.
+
+### Cursor running on a different shell PATH
+
+If `npx` isn't on Cursor's `PATH` (e.g. nvm-managed Node not exported
+to GUI apps on macOS), the server fails to start with `command not
+found`. Fix by absolute-pathing the command:
+
+```json
+{
+  "mcpServers": {
+    "b402-solana": {
+      "command": "/Users/you/.nvm/versions/node/v20.18.0/bin/npx",
+      "args": ["-y", "@b402ai/solana-mcp@latest"]
+    }
+  }
+}
+```
+
+Find your `npx` with `which npx` in a terminal.
+
+### RPC throttling
+
+Default RPC throttles ~40 RPS per IP. Cursor agents that loop tools
+will hit limits faster than interactive use. Pin `B402_RPC_URL` to a
+private endpoint in the `env` block.
+
+## Continue reading
+
+<CardGroup cols={2}>
+  <Card title="Tool reference" icon="wrench" href="/mcp/tools">
+    All 11 tools, inputs, outputs.
+  </Card>
+  <Card title="Prompt patterns" icon="comments" href="/mcp/prompt-patterns">
+    Copy-pasteable agent prompts.
+  </Card>
+</CardGroup>

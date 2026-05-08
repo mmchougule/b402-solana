@@ -31,7 +31,7 @@ pseudorandomness given uniform `random`). Without `random`, an observer who
 knows `(tokenMint, value, spendingPub)` cannot recompute the commitment;
 without `spendingPub`, they cannot identify the recipient.
 
-See [`packages/sdk/src/poseidon.ts`](https://github.com/b402-ai/b402-solana/blob/main/packages/sdk/src/poseidon.ts)
+See [`packages/sdk/src/poseidon.ts`](https://github.com/mmchougule/b402-solana/blob/main/packages/sdk/src/poseidon.ts)
 for the canonical TypeScript implementation and `packages/crypto/src/`
 for the Rust parity reference.
 
@@ -108,7 +108,7 @@ decryption work. See [Scanner](/sdk/scanner) for the algorithm.
 ## The merkle tree
 
 Single global tree per pool. Parameters from
-[`docs/prds/PRD-02-crypto-spec.md`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-02-crypto-spec.md):
+[`docs/prds/PRD-02-crypto-spec.md`](https://github.com/mmchougule/b402-solana/blob/main/docs/prds/PRD-02-crypto-spec.md):
 
 - **Arity 2**, depth **26**, capacity **2^26 ≈ 67M leaves**.
 - **Hash:** `parent = Poseidon_3("b402/v1/mk-node", left, right)`.
@@ -169,7 +169,7 @@ different first inputs.
 
 Tags are ASCII strings interpreted as Fr (UTF-8 bytes as a
 big-endian integer; always well under `p` because tags are ≤ 31
-bytes). Defined once in [`PRD-02 §1.2`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-02-crypto-spec.md#12-domain-tags):
+bytes). Defined once in [`PRD-02 §1.2`](https://github.com/mmchougule/b402-solana/blob/main/docs/prds/PRD-02-crypto-spec.md#12-domain-tags):
 
 | Tag | Use |
 |---|---|

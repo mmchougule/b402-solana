@@ -1,138 +1,190 @@
 ---
 title: Scanner
-description: "Auto-discover incoming shielded notes via viewing-tag pre-filter and ECDH decrypt."
+description: "Discover incoming shielded notes via watchIncoming, the Scanner primitive, and B402Indexer."
 ---
 
-`Scanner` is the SDK's note-discovery primitive. It subscribes to
-pool log events, runs a viewing-tag Poseidon pre-filter on each one,
-and ECDH-decrypts the matches with the user's X25519 viewing key. The
-result: when Alice privately sends Bob a note, Bob's wallet
-auto-discovers it without any out-of-band coordination.
+The recommended consumer surface for "watch for new private
+deposits" is `b402.watchIncoming`. It's a cursor-based poll over the
+in-memory `NoteStore` that the SDK keeps populated automatically via
+log subscription + decryption. The lower-level `Scanner` class and
+`B402Indexer` client are exported for advanced flows
+(custom indexers, cross-device recovery, multi-process apps).
 
-This is the recipient-side of privacy; without it, b402 is one-way.
+## `b402.watchIncoming` — the agent loop
 
-## API
+```ts
+import { B402Solana } from '@b402ai/solana';
+import { Keypair } from '@solana/web3.js';
 
-```typescript
-import { Scanner, NoteStore } from '@b402ai/solana';
+const b402 = new B402Solana({ cluster: 'mainnet', rpcUrl, keypair });
+await b402.ready();
 
-const noteStore = new NoteStore();
+let cursor: string | undefined;
+while (running) {
+  const r = await b402.watchIncoming({ cursor });
+  cursor = r.cursor;
+  for (const d of r.incoming) {
+    console.log('new deposit:', d.id, d.mint, d.amount);
+  }
+  await new Promise((res) => setTimeout(res, 2_000));
+}
+```
+
+Signature
+([`b402.ts:2068-2093`](https://github.com/mmchougule/b402-solana/blob/main/packages/sdk/src/b402.ts)):
+
+```ts
+b402.watchIncoming(opts?: {
+  cursor?: string;
+  mint?: PublicKey;
+  refresh?: boolean;
+}): Promise<{
+  incoming: Array<{
+    id: string;        // 16-hex stable note id
+    mint: string;      // base58 if known, otherwise `unknown:<12hex>`
+    amount: string;    // bigint as decimal string
+    receivedAt: number; // unix ms
+  }>;
+  cursor: string;       // opaque base64url, pass back on next call
+}>;
+```
+
+The cursor is opaque (base64url-encoded JSON over a leaf-index
+versioned envelope — see `encodeCursor` /  `decodeCursor` at
+[`b402.ts:2192-2208`](https://github.com/mmchougule/b402-solana/blob/main/packages/sdk/src/b402.ts)).
+Treat it as a string; do not parse it.
+
+`refresh: true` triggers an explicit chain backfill before computing
+`incoming`. Use it once at startup if the local store may be stale
+(fresh machine, multi-process). Steady-state polling does not need
+it because the SDK holds a live log subscription.
+
+## `Scanner` — the lower-level primitive
+
+`Scanner` is the long-running subscription that keeps the in-memory
+tree and `NoteStore` populated. `B402Solana.ready()` constructs one
+internally; you only construct it yourself in advanced setups
+(custom NoteStore, custom merkle tree, off-process scanning).
+
+`ScannerOptions`
+([`notes/scanner.ts:71-78`](https://github.com/mmchougule/b402-solana/blob/main/packages/sdk/src/notes/scanner.ts)):
+
+```ts
+interface ScannerOptions {
+  connection: Connection;
+  poolProgramId: PublicKey;
+  wallet: Wallet;          // from buildWallet(seed)
+  noteStore: NoteStore;
+  tree: ClientMerkleTree;
+}
+```
+
+```ts
+import {
+  Scanner,
+  NoteStore,
+  ClientMerkleTree,
+  buildWallet,
+  buildZeroCache,
+} from '@b402ai/solana';
+
+const wallet = await buildWallet(seed);
+const tree = new ClientMerkleTree(buildZeroCache());
+const noteStore = new NoteStore({ connection, poolProgramId, wallet });
+await noteStore.start();
 
 const scanner = new Scanner({
-  connection,                  // web3.js Connection
-  pool,                        // pool program ID
-  wallet,                      // local wallet from buildWallet
-  noteStore,                   // where discovered notes get pushed
-  startSlot: 'recent',         // or a specific slot
-  // optional: callback on each discovered note
-  onNote: (note, meta) => {
-    console.log('discovered:', meta.leafIndex, note.value);
-  },
+  connection,
+  poolProgramId,
+  wallet,
+  noteStore,
+  tree,
 });
 
 await scanner.start();
-// scanner runs until you call:
+// ... later
 await scanner.stop();
 ```
 
-## How it works
+For each `Program data: <base64>` log line emitted by the pool, the
+scanner:
 
-For each new `CommitmentAppended` event from pool logs:
+1. Decodes the `CommitmentAppended` event (211-byte payload —
+   leaf index, commitment, ciphertext, ephemeral pub, viewing tag,
+   tree root, slot).
+2. Appends the new commitment to the local `ClientMerkleTree` so
+   merkle paths stay derivable.
+3. Hands the encrypted-note bundle to `noteStore.ingestCommitment`,
+   which runs the viewing-tag pre-filter and only attempts the full
+   ChaCha20-Poly1305 decrypt on a tag match.
 
-1. **Compute candidate `sharedSecret = X25519(viewingPriv, ephemeralPub)`.**
-   `ephemeralPub` is published as part of the event.
-2. **Compute candidate `viewingTag = Poseidon_2("b402/v1/viewtag",
-   sharedSecret_as_field)[0..2]`** — a 16-bit tag.
-3. **Compare to `viewing_tag` on the event.** Mismatch → skip
-   (`~99.998%` of cases). 16-bit collision probability is `1/65,536`.
-4. **On match: derive `encryptKey = HKDF-SHA256(sharedSecret, salt="b402-note-enc-v1")`.**
-5. **Attempt ChaCha20-Poly1305 decrypt** with AAD `"b402-note-v1"`.
-   If AEAD tag invalid → skip (false-positive from the tag pre-filter).
-6. **Decode `Note { value, random, tokenMint, version }`.**
-7. **Verify `commitment = Poseidon_5("b402/v1/commit", tokenMint, value,
-   random, spendingPub)`** matches the event's commitment.
-8. **Verify `spendingPub` corresponds to the local wallet's spending
-   key.** This is the final check that the note is *ours* — without
-   this, an attacker who happened to collide on the viewing tag could
-   inject decoy data.
-9. **Push to `NoteStore`.**
+The viewing-tag is a 2-byte Poseidon hash of the ECDH shared secret.
+On a tag miss, the scanner skips the decrypt entirely; on a tag hit
+the decrypt either succeeds (note is ours) or fails the AEAD tag
+(false positive — discarded).
 
-Step 3 (the viewing-tag pre-filter) is what keeps the scanner cheap.
-Without it, the scanner would do a full ChaCha20 decrypt on every
-event in the pool, which doesn't scale. The 16-bit tag cuts work by
-~65k×.
+Source:
+[`packages/sdk/src/notes/scanner.ts`](https://github.com/mmchougule/b402-solana/blob/main/packages/sdk/src/notes/scanner.ts),
+[`packages/sdk/src/note-encryption.ts`](https://github.com/mmchougule/b402-solana/blob/main/packages/sdk/src/note-encryption.ts).
 
-## Performance
+## `B402Indexer` — cross-device recovery
 
-From [`reports/benchmark-summary.md`](https://github.com/b402-ai/b402-solana-assurance/blob/main/reports/benchmark-summary.md):
+The hosted indexer mirrors the on-chain pool state (commitments,
+tree roots, nullifier set) so a wallet on a fresh device can recover
+its notes without replaying every block. The client is at
+[`packages/sdk/src/indexer.ts`](https://github.com/mmchougule/b402-solana/blob/main/packages/sdk/src/indexer.ts).
 
-```
-Note scan / decrypt avg ms:  3.09
-```
+```ts
+import { B402Indexer } from '@b402ai/solana';
+import { Connection, PublicKey } from '@solana/web3.js';
 
-Per event, including the Poseidon viewing-tag computation. At pool
-events arrive at maximum Solana block rate (~400ms/block, multiple
-events per block), the scanner stays comfortably ahead.
+const indexer = new B402Indexer({
+  url: 'https://b402-solana-indexer-api-62092339396.us-central1.run.app',
+  connection,
+  poolProgramId,
+});
 
-## Source
-
-- [`packages/sdk/src/notes/scanner.ts`](https://github.com/b402-ai/b402-solana/tree/main/packages/sdk/src/notes/scanner.ts)
-- [`packages/sdk/src/note-encryption.ts`](https://github.com/b402-ai/b402-solana/blob/main/packages/sdk/src/note-encryption.ts)
-- Helpers: `parseProgramDataLog`, `expectedCommitmentForOwner`
-
-## Verified flow
-
-[`examples/scanner-e2e.ts`](https://github.com/b402-ai/b402-solana/blob/main/examples/scanner-e2e.ts)
-runs three independent keypairs:
-
-```
-Alice            → shields 100 USDC
-Alice            → privately sends 50 USDC to Bob (transact ix)
-Bob's Scanner    → subscribes to pool logs, runs viewing-tag filter,
-                   ECDH-decrypts the match, pushes the new note to NoteStore
-Bob              → unshields the new 50 USDC note to Charlie's ATA
+const state = await indexer.state();        // leaf count, current root, freshness
+const proof = await indexer.proof(42n);     // Merkle inclusion proof for leaf 42
+const spent = await indexer.spent(nullHex); // double-spend pre-check
 ```
 
-All without Bob ever talking to Alice off-chain. Run with:
-
-```bash
-./ops/local-validator.sh --reset       # terminal 1
-cd examples && pnpm scanner-e2e        # terminal 2
-```
-
-## Limitations
-
-The scanner is **stateless across restarts** by default. `NoteStore` is
-in-memory; consumers persist as appropriate. A long-running agent
-that restarts mid-day will need to:
-
-1. Persist `NoteStore` state across restarts (IndexedDB / SQLite /
-   filesystem).
-2. Replay events from the last-seen slot, not from chain genesis.
-3. De-dupe — `noteStore.add` is idempotent on `(commitment,
-   leafIndex)`.
-
-Persistence is an explicit non-goal of the SDK package; consumers
-build it once for their app and reuse.
-
-## Foreign-viewer rejection
-
-The scanner's correctness check (step 8) is empirically verified in
-the assurance suite:
+Endpoints (PRD-31 §4.3,
+[`indexer.ts:17-22`](https://github.com/mmchougule/b402-solana/blob/main/packages/sdk/src/indexer.ts)):
 
 ```
-Note-store ingest accepted:           true
-Note-store foreign viewer rejected:   true
-Note-store expected nullifier matches: true
+GET /v1/proof?leafIndex=N
+GET /v1/spent?nullifier=hex
+GET /v1/state
+GET /v1/commitments?since=N    (paginated)
 ```
 
-From [`reports/invariant-summary.md`](https://github.com/b402-ai/b402-solana-assurance/blob/main/reports/invariant-summary.md).
-A note encrypted to Wallet A's viewing key will not pass scanner
-validation when run under Wallet B's viewing key, even if the tag
-collides. The malformed note rejection rate is:
+**Trust model.** The indexer is a convenience oracle, not a trust
+root. The SDK verifies every indexer-claimed root against the
+on-chain `TreeState` before using its proofs, so a tampered indexer
+can DoS but cannot forge a spend
+([`indexer.ts:1-22`](https://github.com/mmchougule/b402-solana/blob/main/packages/sdk/src/indexer.ts)).
+A `B402Solana` instance with a configured `indexerUrl` falls back to
+`proveMostRecentLeaf` (rightmost-only) automatically on indexer
+outage.
 
-```
-Note-store malformed rejects:         32 / 32  (PRD-A04 fuzz)
-```
+## Persistence
 
-From [`reports/fuzz-summary.md`](https://github.com/b402-ai/b402-solana-assurance/blob/main/reports/fuzz-summary.md).
+`NoteStore` mirrors to disk by default at
+`~/.b402ai/notes/<cluster>/<viewingPubHex>.json` so the cursor and
+known notes survive process restart
+([`b402.ts:447-459`](https://github.com/mmchougule/b402-solana/blob/main/packages/sdk/src/b402.ts)).
+Plaintext on disk; threat model matches the keypair file the wallet
+was derived from. Pass `notesPersistDir: ''` to the `B402Solana`
+constructor to disable.
+
+## Continue reading
+
+<CardGroup cols={2}>
+  <Card title="Shield / Unshield" icon="vault" href="/sdk/shield-unshield">
+    Move tokens in and out of the shielded pool.
+  </Card>
+  <Card title="Private actions" icon="code" href="/sdk/private-actions">
+    Swap, lend, redeem — what the scanner shows up after.
+  </Card>
+</CardGroup>

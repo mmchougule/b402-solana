@@ -1,6 +1,6 @@
 ---
 title: Kamino Adapter
-description: "Private lend / withdraw / borrow / repay on Kamino Lend, with the v0.1 single-obligation caveat documented honestly."
+description: "Private lend / withdraw / borrow / repay on Kamino Lend via per-user obligation + CPI-only adapter."
 ---
 
 `b402-kamino-adapter` integrates Kamino Lend for private deposit,
@@ -11,8 +11,8 @@ important architectural decision in this adapter.
 
 Devnet ID: `2enwFgcGKJDqruHpCtvmhtxe3DYcV3k72VTvoGcdt2rX`.
 
-Source: [`programs/b402-kamino-adapter/src/lib.rs`](https://github.com/b402-ai/b402-solana/blob/main/programs/b402-kamino-adapter/src/lib.rs).
-Spec: [`PRD-09`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-09-kamino-adapter.md).
+Source: [`programs/b402-kamino-adapter/src/lib.rs`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-kamino-adapter/src/lib.rs).
+Spec: [`PRD-09`](https://github.com/mmchougule/b402-solana/blob/main/docs/prds/PRD-09-kamino-adapter.md).
 
 ## Status
 
@@ -24,9 +24,9 @@ Spec: [`PRD-09`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-
 | `Repay` | Coded with v1 `repay_obligation_liquidity`; mainnet-fork pending |
 
 10 Kamino instruction discriminators are constant-defined in
-[`programs/b402-kamino-adapter/src/lib.rs`](https://github.com/b402-ai/b402-solana/blob/main/programs/b402-kamino-adapter/src/lib.rs)
+[`programs/b402-kamino-adapter/src/lib.rs`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-kamino-adapter/src/lib.rs)
 and matched against the GREEN run from
-[`examples/kamino-adapter-fork-deposit.ts`](https://github.com/b402-ai/b402-solana/blob/main/examples/kamino-adapter-fork-deposit.ts)
+[`examples/kamino-adapter-fork-deposit.ts`](https://github.com/mmchougule/b402-solana/blob/main/examples/kamino-adapter-fork-deposit.ts)
 (klend-sdk@7.3.22).
 
 ## Action variants
@@ -68,75 +68,37 @@ accounts don't yet exist:
 These rent-fund the corresponding accounts; the relayer pays SOL and is
 recovered via the in-kind fee.
 
-## v0.1: the single-obligation caveat
+## Mainnet obligation model (today)
 
-<Warning>
-  **In the current implementation, all b402 shielded users share one
-  Kamino obligation.** L2 unlinkability among Kamino users does not hold
-  in v0.1. See [Privacy Model — Layer 2](/concepts/privacy-model#l2-action-action-cross-action-linkability)
-  for the full caveat.
-</Warning>
+The Kamino adapter on mainnet is built with **`per_user_obligation` +
+`cpi-only`** (see
+[`README.md`](https://github.com/mmchougule/b402-solana/blob/main/README.md)
+finalized-slot lines and
+[`PRD-33`](https://github.com/mmchougule/b402-solana/blob/main/docs/prds/PRD-33-per-user-adapter-state.md)).
+Each trader's Kamino `UserMetadata` and `Obligation` accounts are tied to
+`owner_pda` derived from `viewing_pub_hash` — there is no longer a single
+shared obligation for all b402 users.
 
-From [`programs/b402-kamino-adapter/src/lib.rs:23-46`](https://github.com/b402-ai/b402-solana/blob/main/programs/b402-kamino-adapter/src/lib.rs):
+The **`cpi-only`** gate (outer instruction must be the pool program)
+pairs with that model: `viewing_pub_hash` appears in public inputs, so
+direct `execute` calls from arbitrary programs would otherwise be unsafe.
+See [Privacy model](/concepts/privacy-model) §4 and the adapter source at
+[`lib.rs:353-371`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-kamino-adapter/src/lib.rs).
 
-> For the v0.1 test-gate landing we ship (2). The Deposit / Withdraw /
-> Borrow / Repay handlers all use `adapter_authority` as the Kamino
-> obligation owner.
+### Residual linkability
 
-What this means for an observer:
+Two Kamino actions by the **same** shielded user share the same
+`viewing_pub_hash`, so an observer can correlate them as one pseudonym
+inside Kamino. That is **not** wallet-level linkage — see
+[What's NOT hidden](/concepts/privacy-model#whats-not-hidden).
 
-- Every b402-Kamino state change writes to a single obligation PDA.
-- The observer cannot link a specific b402-Kamino action to a wallet
-  pubkey (L1 still holds).
-- The observer **can** group every b402-Kamino action as "from the same
-  obligation" — collapsing L2 unlinkability.
+### Cargo note
 
-For a deposit-only flow where the user immediately receives a shielded
-cToken note and never interacts with their position again, this is
-fine. For active use (deposit + borrow + repeated repay/withdraw),
-this leaks usage patterns by aggregate.
-
-### Why v0.1 ships this way
-
-The per-user obligation design (PRD-09 §7.2 Option B) requires:
-
-- A circuit constraint that binds `viewing_pub_hash` to the obligation
-  PDA address, exposed as 2 new public inputs (`obligation_pubkey_lo`,
-  `obligation_pubkey_hi`).
-- A re-run of the trusted-setup ceremony for the new circuit shape.
-- Lazy `init_obligation` per (user, market) pair, costing ~0.005 SOL
-  rent each.
-- New `derive_owner_pda(viewing_pub_hash)` and
-  `derive_obligation_pda(...)` helpers (already exist in the source
-  code, **gated `#[allow(dead_code)]`** at line 833).
-
-These pieces are scaffolded but not connected. PRD-09's authors chose
-to ship v0.1 with shared obligation to validate the rest of the wiring
-end-to-end against real Kamino mainnet bytecode, then sequence the
-per-user upgrade alongside the v2 ABI work (PRD-13 shadow PDAs makes
-this generic).
-
-### v0.2 plan
-
-Per PRD-09 §7.2 and PRD-13:
-
-```
-shadow_pda = PDA([
-  b"b402-shadow",
-  KAMINO_ADAPTER_PROGRAM_ID,
-  b"kamino:obligation:v1",
-  viewing_key_commitment,
-])
-```
-
-Where `viewing_key_commitment` is the Poseidon hash of the user's
-viewing pubkey, which is **already** part of every shielded note's
-schema (it's the encryption target). Using it as a PDA seed adds zero
-new privacy leak — the viewing key was always public — but cleanly
-partitions each user's Kamino position.
-
-This is the canonical "per-user PDA pattern" PRD-13 generalizes for all
-adapters with per-user state (Drift, Marginfi, Adrena positions, etc.).
+In [`programs/b402-kamino-adapter/Cargo.toml`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-kamino-adapter/Cargo.toml),
+`per_user_obligation` defaults **off** so fork tests can toggle behavior.
+Production mainnet builds pass **`--features per_user_obligation,cpi-only`**
+explicitly (same idea as the pool and verifier crates — defaults are not
+deploy truth).
 
 ## Account layout (deposit case)
 
@@ -184,7 +146,7 @@ obligation gains collateral; b402 user receives a shielded kUSDC note.
 
 ## Liquidation handling
 
-Per [`PRD-09 §8`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-09-kamino-adapter.md#8-liquidation-handling),
+Per [`PRD-09 §8`](https://github.com/mmchougule/b402-solana/blob/main/docs/prds/PRD-09-kamino-adapter.md#8-liquidation-handling),
 v1 ships **Option L1: Accept liquidation; document the failure mode.**
 
 If a user's borrow position falls below the liquidation threshold,
@@ -204,7 +166,7 @@ L3) are deferred to future PRDs.
 
 <CardGroup cols={2}>
   <Card title="Privacy Model" icon="user-secret" href="/concepts/privacy-model">
-    The L2 caveat in detail.
+    Obligation isolation + residual pseudonym linkability.
   </Card>
   <Card title="Adapter overview" icon="plug" href="/adapters/overview">
     The general ABI all adapters implement.

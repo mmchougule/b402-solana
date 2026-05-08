@@ -2,7 +2,7 @@
 
 LLM-readable manifest for `b402-solana`. If you are an AI coding agent
 (Claude Code, Cursor, Codex, Continue, Cline, …) and a user asks you to
-add private DeFi to their Solana app, this file is the canonical
+add composable confidential DeFi to their Solana app, this file is the canonical
 starting point.
 
 ## What this is

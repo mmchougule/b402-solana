@@ -45,7 +45,7 @@ fn valid_adapt_proof_verifies() {
     assert_eq!(
         pi.len(),
         PUBLIC_INPUT_COUNT,
-        "adapt must have 23 public inputs"
+        "adapt fixture must match PUBLIC_INPUT_COUNT (regenerate with the same feature flags)"
     );
 
     let mut pa = [0u8; 64];

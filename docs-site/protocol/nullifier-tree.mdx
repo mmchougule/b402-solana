@@ -1,57 +1,51 @@
 ---
 title: Nullifier Set & Merkle Tree
-description: "Sharded nullifier storage and the incremental Poseidon merkle tree."
+description: "Pool merkle tree, the in-source sharded nullifier type, and the b402-nullifier / Light V2 production path."
 ---
 
-Two of the largest pieces of pool state. Both are designed for Solana's
-account model: the merkle tree fits in a single fixed-size PDA, and the
-nullifier set is sharded across up to 65,536 PDAs.
+The pool exposes two large pieces of state: an **incremental Poseidon merkle tree** for commitments, and a **double-spend gate** for nullifiers. The merkle tree is a single zero-copy PDA. The nullifier path has two surfaces — the original sharded set defined in the pool source, and the Light Protocol V2 IMT that the mainnet build actually writes through. Both are documented below.
 
 ## The merkle tree
 
 ### Parameters
 
-From [`PRD-02 §5`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-02-crypto-spec.md#5-merkle-tree)
-and the pool's `TreeState` PDA:
+From [`programs/b402-pool/src/constants.rs`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/constants.rs) and `init_pool`:
 
 - **Arity 2** (binary).
-- **Depth 26.** Capacity = 2²⁶ ≈ 67M leaves.
+- **Depth 26** (`TREE_DEPTH = 26`, [`constants.rs:13`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/constants.rs#L13)). Capacity = 2²⁶ ≈ 67M leaves.
 - **Hash:** `parent = Poseidon_3("b402/v1/mk-node", left, right)`.
 - **Leaf:** the 32-byte commitment, no extra hash.
-- **Domain tag** for zero subtree: `"b402/v1/mk-zero"`.
+- **Domain tag** for the zero subtree: `"b402/v1/mk-zero"`.
 
-Why depth 26: at 100k shields/day, the tree fills in ~1,800 years.
-Going deeper adds ~240 R1CS constraints per merkle path level; going
-shallower would force a tree-rotation flow, which is a massive
-operational complexity.
+Depth 26 fills in ~1,800 years at 100k shields/day. Going deeper adds ~240 R1CS per merkle path level; going shallower would force a tree-rotation flow.
 
 ### `TreeState` PDA layout
 
-From `programs/b402-pool/src/state.rs`:
+From [`programs/b402-pool/src/state.rs:53-78`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/state.rs#L53-L78):
 
 ```rust
 #[account(zero_copy)]
+#[repr(C)]
 pub struct TreeState {
     pub version: u16,
+    pub _pad0: [u8; 6],                  // align to 8
     pub leaf_count: u64,
-    pub ring_head: u8,                 // 0..127
-    pub root_ring: [[u8; 32]; 128],    // recent merkle roots
-    pub frontier: [[u8; 32]; 26],      // right-most path hashes
-    pub zero_cache: [[u8; 32]; 26],    // precomputed zero[0..26]
+    pub ring_head: u8,
+    pub _pad1: [u8; 7],
+    pub root_ring: [[u8; 32]; ROOT_HISTORY_SIZE],  // 128 × 32 = 4,096 B
+    pub frontier:  [[u8; 32]; TREE_DEPTH],         //  26 × 32 =   832 B
+    pub zero_cache: [[u8; 32]; TREE_DEPTH],        //  26 × 32 =   832 B
     pub _reserved: [u8; 64],
 }
 ```
 
-Total size ~5,000 B. **Fixed**, never grows. The leaves themselves are
-not stored on chain — clients reconstruct them from
-`CommitmentAppended` event log replay.
+`#[account(zero_copy)]` is required: without it the Anchor-generated dispatcher would copy this account onto the BPF stack on every `transact` / `unshield` and blow the 4 KiB frame limit. `AccountLoader` reads fields directly from account data.
 
-The PRD-02 spec used a 64-root ring; the current implementation uses
-**128 roots**. This is the source of truth; the PRD is older.
+`ROOT_HISTORY_SIZE = 128` ([`constants.rs:22`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/constants.rs#L22)) — **not** 64. The earlier PRD-02 spec called for 64; the deployed implementation is 128. At 10 shields/sec, 128 roots gives a proof ~13 s of head-room before the on-chain root rotates out and the verifier rejects with `InvalidMerkleRoot`.
+
+Total `TreeState` size is fixed at ~5,840 B (8 disc + 24 header + 4,096 + 832 + 832 + 64) — never grows. Leaves themselves are not stored on chain; clients reconstruct from `CommitmentAppended` event log replay.
 
 ### Append algorithm
-
-From [`PRD-02 §5.4`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-02-crypto-spec.md#54-append-algorithm-concurrent-safe):
 
 ```
 idx  = leaf_count
@@ -60,134 +54,161 @@ for level l in 0..26:
     if bit l of idx is 0:
         write hash to frontier[l]
         hash = Poseidon_3(mkNodeTag, hash, zero[l])
-        break (higher levels unchanged for this leaf's path)
+        break
     else:
         hash = Poseidon_3(mkNodeTag, frontier[l], hash)
 
 new_root = hash
-root_ring[(ring_head + 1) % 128] = new_root
 ring_head = (ring_head + 1) % 128
+root_ring[ring_head] = new_root
 leaf_count += 1
 ```
 
-26 `sol_poseidon` calls per worst-case append, ~100k CU each × 1-13
-levels actually computed = bounded amortized cost.
-
-Concurrency: Solana's single-writer-per-account rule serializes
-appends; the runtime acquires a write lock on `TreeState` for any
-shield/transact/unshield/adapt instruction. No CMT changelog needed.
+Up to 26 `sol_poseidon` calls per worst-case append. Solana's single-writer-per-account rule serializes appends; the runtime acquires a write lock on `TreeState` for any `shield`/`transact`/`unshield`/`adapt_execute*`. No concurrent merkle tree changelog needed.
 
 ### Root validity for proofs
 
-A proof references a `merkleRoot`. On-chain verification requires that
-root to appear in `root_ring[]`. Stale roots (older than 128 appends)
-are rejected with `InvalidMerkleRoot`; the user regenerates against a
-recent root.
-
-128 was chosen empirically: enough headroom that proof generation +
-network round-trip + relayer queueing rarely cause stale-root races,
-and small enough to keep `TreeState` under the account size limit.
+A proof references a `merkleRoot`. On-chain verification calls `util::tree_has_recent_root`, which scans `tree.root_ring[]` for membership ([`shield.rs:153-159`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/instructions/shield.rs#L153-L159), [`unshield.rs:136-142`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/instructions/unshield.rs#L136-L142), [`adapt_execute.rs:444-450`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/instructions/adapt_execute.rs#L444-L450)). Roots older than 128 appends are rejected.
 
 ### Client merkle tree
 
-`packages/sdk/src/merkle.ts` exports `ClientMerkleTree`, the off-chain
-mirror. Clients:
+`packages/sdk/src/merkle.ts` exports `ClientMerkleTree`, the off-chain mirror. Clients subscribe to `CommitmentAppended` events, append leaves locally in `leaf_index` order, and maintain the frontier + leaf set sufficient to compute any merkle path.
 
-1. Subscribe to `CommitmentAppended` events.
-2. Append leaves locally in order (they include `leaf_index`, so
-   out-of-order arrivals are handled).
-3. Maintain a `frontier` and full leaf set sufficient to compute any
-   merkle path for proof generation.
+## The nullifier surface
 
-The `proveMostRecentLeaf` helper builds a path against the most recent
-root. For older leaves, the client uses its own local tree.
+There are two nullifier paths in the codebase. The mainnet build uses the second one exclusively.
 
-## The nullifier set
+### Surface 1: `NullifierShard` (in source, not used by the mainnet build)
 
-### Why sharded
-
-Solana accounts are capped at 10 MB. Nullifier count grows linearly
-with spend volume; at 67M max commitments, total nullifiers (typically
-2× max commitments — each user typically ends up with half the notes
-they created and the other half spent) approach 130M. A single
-unsharded nullifier account would saturate quickly.
-
-### Shard scheme
-
-```
-prefix = nullifier[30..32] interpreted as u16 (high 16 bits, big-endian)
-shard PDA seeds = [b"b402/v1", b"null", prefix.to_le_bytes()]
-```
-
-65,536 possible shards, created lazily on first nullifier landing in
-that prefix. At saturation (~130M nullifiers), each shard holds ~2,000
-entries → ~64 KB per account, well under the 10 MB limit.
-
-### `NullifierShard` PDA layout
+The original design was a sharded set inside the pool program — [`programs/b402-pool/src/state.rs:80-140`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/state.rs#L80-L140):
 
 ```rust
+pub const MAX_NULLIFIERS_PER_SHARD: usize = 300;
+pub const NULLIFIER_BYTES_PER_SHARD: usize = MAX_NULLIFIERS_PER_SHARD * 32;
+
+#[derive(Copy, Clone)]
+#[repr(C)]
+pub struct NullifierBuf(pub [u8; NULLIFIER_BYTES_PER_SHARD]);
+unsafe impl bytemuck::Zeroable for NullifierBuf {}
+unsafe impl bytemuck::Pod for NullifierBuf {}
+
 #[account(zero_copy)]
+#[repr(C)]
 pub struct NullifierShard {
     pub prefix: u16,
+    pub _pad0: [u8; 2],
     pub count: u32,
-    pub nullifiers: [[u8; 32]; MAX_PER_SHARD],
+    pub nullifiers_bytes: NullifierBuf,
 }
 ```
 
-`MAX_PER_SHARD` is sized to keep total account ≤ 10 KB at the current
-deployment (per `programs/b402-pool/src/state.rs`); the spec allows
-~2,045 entries with realloc.
+Three points worth pinning:
 
-Internal representation: **sorted `Vec<[u8; 32]>`**, binary-searched on
-lookup. Insertion is O(n) per shard but `n` stays small (~2k at
-saturation). Trade-off picked for code-review simplicity over a
-hashmap-style probe.
+1. **`MAX_NULLIFIERS_PER_SHARD = 300`** ([`state.rs:94`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/state.rs#L94)) — **not ~2,045**. The bound is set by Solana's `MAX_PERMITTED_DATA_INCREASE = 10,240` (the cap on account data size that can be created from a CPI such as `init_if_needed`), **not** the 10 MB account-size limit. `8 (disc) + 2 (prefix) + 2 (pad) + 4 (count) + 300·32 = 9,616 B` — fits under 10,240.
+2. **The buffer is `NullifierBuf([u8; 9,600])`**, not `[[u8; 32]; 300]`. bytemuck's derive macros only auto-implement `Pod`/`Zeroable` for a fixed set of array sizes; the newtype wrapper plus manual unsafe impls is the correct pattern at this size.
+3. **Lookup is binary search over a sorted `[u8; 32]` slice**, viewed via `bytemuck::cast_slice` ([`state.rs:123-127`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/state.rs#L123-L127)). Insertion shifts and incurs O(n) per shard; n stays ≤ 300.
 
-### Insertion algorithm
+The pool's mainnet build does not write to these PDAs. The struct is kept in source for a possible fallback path and for static-analysis tools that load the program IDL.
 
-From `programs/b402-pool/src/util.rs::nullifier_insert`:
+### Surface 2: `b402-nullifier` → Light V2 IMT (production path)
 
-1. Binary search the sorted list.
-2. If found: return `NullifierAlreadySpent` error → tx reverts.
-3. Else: shift entries, insert in sorted position, increment `count`.
+Under the `inline_cpi_nullifier` feature (mainnet) — [`unshield.rs:245-300`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/instructions/unshield.rs#L245-L300), [`transact.rs`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/instructions/transact.rs), [`adapt_execute.rs:609-661`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/instructions/adapt_execute.rs#L609-L661) — the pool CPIs `b402_nullifier::create_nullifier` for every non-dummy input nullifier. That program then CPIs the Light Protocol V2 system program, which inserts a leaf in Light's address tree V2. If the address already exists, Light's verifier rejects the insert and the outer tx aborts. That is the double-spend check.
 
-### Why high-bits prefix
+The b402-nullifier program is its own deployed program: ID `2AnRZwWu6CTurZs1yQpqrcJWo4yRYL1xpeV78b2siweq` ([`programs/b402-nullifier/src/lib.rs:46`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-nullifier/src/lib.rs#L46)). Built with `--features cpi-only` for mainnet.
 
-The high 16 bits of a nullifier hash distribute uniformly (Poseidon is
-a cryptographic hash over `Fr`). Empirically — from the assurance
-report:
+### CPI shape (pool → b402-nullifier)
+
+From [`programs/b402-pool/src/instructions/nullifier_cpi.rs`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/instructions/nullifier_cpi.rs). Inner ix data:
 
 ```
-Nullifier shard samples:        4,096
-Unique prefixes observed:       3,529
-Max bucket size:                4
+data:
+  [0..8)     = sha256("global:create_nullifier")[..8]   (DISCRIMINATOR)
+  [8..137)   = ValidityProof Borsh                      (1 + 32 + 64 + 32)
+  [137..141) = PackedAddressTreeInfo Borsh              (4 bytes)
+  [141..142) = output_state_tree_index                  (1 byte)
+  [142..174) = id (the nullifier value)                 (32 bytes)
 ```
 
-Cited from
-[`reports/invariant-summary.md`](https://github.com/b402-ai/b402-solana-assurance/blob/main/reports/invariant-summary.md).
-That's well-balanced for a 4096-sample run. Concentration attacks via
-preimage manipulation aren't possible because the user has no control
-over their nullifier — it's `Poseidon_3(nullTag, spendingPriv,
-leafIndex)`.
+Accounts (10 per real input nullifier, positional, [`nullifier_cpi.rs:18-30`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/instructions/nullifier_cpi.rs#L18-L30)):
 
-### Rent
+```
+[0]   payer/signer (writable)
+[1]   instructions sysvar
+[2]   light_system_program
+[3]   cpi_authority (b402_nullifier PDA)
+[4]   registered_program_pda
+[5]   account_compression_authority
+[6]   account_compression_program
+[7]   system_program
+[8]   address_tree (writable)
+[9]   output_queue (writable)
+```
 
-Each shard's first creation costs ~0.07 SOL in rent. The relayer pays
-this and recovers it via the in-kind relayer fee. From the README:
+The 134-byte caller payload `args.nullifier_cpi_payloads[i]` is the `[8..142)` slice; the pool itself appends the 32-byte `nullifier_id`, so the value the proof committed to cannot be tampered with by the SDK.
 
-> Funded CLI wallet pays rent for fresh nullifier shards (~0.07 SOL each).
+### What `b402-nullifier` does
 
-For a v0 deployment this is high; for a saturated mainnet this is a
-one-time 65,536 × 0.07 = ~4,500 SOL spread across the protocol's
-lifetime, recovered amortized by relayer fees.
+From [`programs/b402-nullifier/src/lib.rs:81-152`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-nullifier/src/lib.rs#L81-L152):
+
+```rust
+let address_tree_pubkey = address_tree_info
+    .get_tree_pubkey(&light_cpi_accounts)
+    .map_err(|_| ErrorCode::AccountNotEnoughKeys)?;
+
+if address_tree_pubkey.to_bytes() != ADDRESS_TREE_V2 {
+    return Err(B402NullifierError::WrongAddressTree.into());
+}
+
+let (address, address_seed) =
+    derive_address(&[SEED_NULL, &id], &address_tree_pubkey, &crate::ID);
+
+let nullifier_account = LightAccount::<NullifierAccount>::new_init(
+    &crate::ID,
+    Some(address),
+    output_state_tree_index,
+);
+
+LightSystemProgramCpi::new_cpi(LIGHT_CPI_SIGNER, proof)
+    .with_light_account(nullifier_account)?
+    .with_new_addresses(&[address_tree_info
+        .into_new_address_params_assigned_packed(address_seed, Some(0))])
+    .invoke(light_cpi_accounts)?;
+```
+
+The address derivation is `(SEED_NULL = b"b402/v1/null", id, address_tree_pubkey, this_program_id)`. Because `this_program_id` is mixed in, no other program — even one targeting the same Light V2 address tree — can collide with our address space.
+
+### Security gates on `b402-nullifier`
+
+Two gates ship under `--features cpi-only` ([`programs/b402-nullifier/src/lib.rs:96-114`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-nullifier/src/lib.rs#L96-L114)):
+
+1. **No top-level dispatch.** `solana_program::instruction::get_stack_height() > 1` is required — top-level invocations are rejected with `DirectCallRejected`.
+2. **Caller program must be `b402_pool`.** The instructions sysvar is consulted to load the outer ix, and `outer_ix.program_id == B402_POOL_PROGRAM_ID` is asserted (`CallerNotB402Pool` otherwise).
+
+The `ix_sysvar` account is feature-gated into the `CreateNullifier` Accounts struct ([`lib.rs:167-169`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-nullifier/src/lib.rs#L167-L169)) — non-`cpi-only` builds do not have this slot, so the deployed program ABI under `cpi-only` is incompatible with builds that lack the feature, and the SDK gates the same way.
+
+### Pool-side validation around the CPI
+
+For each non-dummy input nullifier, the pool ([`unshield.rs:245-300`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/instructions/unshield.rs#L245-L300)):
+
+1. Walks `remaining_accounts[1..]` in 10-account chunks.
+2. Calls `invoke_create_nullifier(nullifier_program, &remaining[start..start+10], payload, &pi.nullifier[i])`.
+3. Emits `NullifierSpent { nullifier, shard: 0, slot }`. The `shard` field is legacy — kept at 0 in the V2 path.
+
+`remaining_accounts[0]` MUST equal `B402_NULLIFIER_PROGRAM_ID` ([`unshield.rs:259-263`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/instructions/unshield.rs#L259-L263)). The pool refuses to dispatch to anything else.
+
+## Sibling-ix fallback (legacy, non-mainnet)
+
+When the pool is built **without** `inline_cpi_nullifier`, it falls back to scanning the instructions sysvar and asserting that a matching `b402_nullifier::create_nullifier` ix is present in the same atomic tx, one per non-dummy nullifier ([`unshield.rs:220-244`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/instructions/unshield.rs#L220-L244)). Same trust root as the inline path — the cryptographic isolation comes from Light's address derivation, not from how the pool found the call.
+
+This mode is not what mainnet runs; it is documented for completeness and for the v2.1 wire shape that does not carry `nullifier_cpi_payloads`.
 
 ## Continue reading
 
 <CardGroup cols={2}>
   <Card title="Pool Program" icon="cube" href="/protocol/pool-program">
-    Where these structures get written.
+    Where the merkle and nullifier paths get exercised.
   </Card>
-  <Card title="Property Invariants" icon="vial" href="/assurance/property-invariants">
-    Stress tests against the nullifier-shard distribution.
+  <Card title="Verifier" icon="check" href="/protocol/verifier">
+    The two adapt entrypoints and the PRD-35 account-inputs path.
   </Card>
 </CardGroup>

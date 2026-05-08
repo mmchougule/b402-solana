@@ -2,7 +2,7 @@
   "name": "b402-solana",
   "private": true,
   "version": "0.0.0",
-  "description": "Private DeFi on Solana — shielded pool + composable execution. Counterpart to the b402 Railgun fork on EVM.",
+  "description": "Composable Confidential DeFi on Solana — shielded pool + per-protocol adapters.",
   "packageManager": "pnpm@9.0.0",
   "engines": {
     "node": ">=20"

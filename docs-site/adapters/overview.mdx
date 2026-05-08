@@ -8,9 +8,10 @@ An **adapter** is a separate Anchor program that the pool CPIs into via
 keeping them isolated from the pool bounds the blast radius of any
 adapter bug.
 
-This page covers the v1 ABI shipped today. The v2 extensions
-(vector token bindings PRD-11, content-addressed action hash PRD-12,
-shadow PDAs PRD-13, two-phase claim notes PRD-14) are linked at the end.
+This page covers the shipped ABI. Vector token bindings, content-
+addressed action hashing, and two-phase claim notes for async
+adapters are designed in PRDs but not yet in code; they're linked at
+the end for protocols that need them.
 
 ## The ABI contract
 
@@ -112,73 +113,97 @@ pub struct AdapterInfo {
 }
 ```
 
-The schema is being extended in v2 to add `allows_delta_zero` and
-`circuit_binding_flags` per instruction (per
-[`PRD-04 §7`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-04-composability.md#7-adapter-registry-semantics)
-amendment). Today, only `discriminator` and `enabled` are enforced; the
-extra fields exist in the source schema and are zero-valued.
+Today only `discriminator` and `enabled` are enforced; future ABI
+revisions may add per-instruction `allows_delta_zero` and
+`circuit_binding_flags` fields, currently zero-valued.
 
 Lifecycle:
 
-- `register_adapter(info)` — admin multisig.
-- `disable_adapter(id)` — single signer. Emergency kill switch.
-- `enable_adapter(id)` — multisig.
-- Removing an adapter: not currently supported (registry append-only).
-  Disable suffices.
+- `register_adapter(info)` — admin signer; append-only.
+- Removing or disabling an adapter is **not** an on-chain instruction
+  in the shipped program. The registry is strictly append-only. An
+  adapter compromise is mitigated by `pause(adapt)` on the pool, which
+  halts all adapter dispatch.
 
-## Adapters shipped (v1, devnet)
+### Source-level allowlists
 
-| Adapter | Devnet ID | Status |
+Two pieces of the contract are not in the registry but in pool source.
+Adding an adapter that needs either is a pool source diff + program
+upgrade, not a `register_adapter` call:
+
+- **`is_stateful_adapter`**
+  ([`adapt_execute.rs:1035-1040`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/instructions/adapt_execute.rs#L1035-L1040))
+  — adapters on this list opt out of the post-CPI mint-out delta check
+  because their "output" is per-user state mutation rather than a
+  fungible token transfer. Kamino is on the list today; percolator
+  ships on devnet pending mainnet market deploy.
+- **`is_synthetic_voucher_mint`**
+  ([`adapt_execute.rs:1057-1063`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/instructions/adapt_execute.rs#L1057-L1063))
+  — mints on this list represent positions (kUSDC for Kamino lend);
+  the pool skips the input-vault transfer for them.
+
+Both are deliberate: the lists are small (one entry today),
+auditable inline, and pinned to specific program IDs at upgrade time
+rather than at runtime.
+
+## Adapters shipped
+
+| Adapter | Program ID | Status |
 |---|---|---|
-| `b402_jupiter_adapter` | `3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7` | Live; verified vs. real Jupiter V6 on mainnet-fork |
-| `b402_kamino_adapter` | `2enwFgcGKJDqruHpCtvmhtxe3DYcV3k72VTvoGcdt2rX` | Deposit verified mainnet-fork; Withdraw/Borrow/Repay coded but mainnet-fork verification pending |
-| `b402_mock_adapter` | `89kw33YDcbXfiayVNauz599LaDm51EuU8amWydpjYKgp` | Test-only |
+| `b402_jupiter_adapter` | `3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7` | Live on mainnet (private swap via Jupiter V6) |
+| `b402_kamino_adapter` | `2enwFgcGKJDqruHpCtvmhtxe3DYcV3k72VTvoGcdt2rX` | Live on mainnet (private lend / redeem via Kamino V2; per-user Obligation) |
+| `b402_percolator_adapter` | `65NRt6GpeakqXhqvKcN3knohzKEZT37arUyQi3SZwfxv` | Live on devnet (private perp open / close via percolator-prog); mainnet pending an upstream market deploy |
+| `b402_mock_adapter` | `89kw33YDcbXfiayVNauz599LaDm51EuU8amWydpjYKgp` | Test-only (delta-invariant tests) |
 
-## Adapters scaffolded (programs exist; impl pending)
+## Coming next
 
-| Adapter | Status | Source |
-|---|---|---|
-| `b402_adrena_adapter` | Scaffold per [`PRD-16`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-16-adrena-adapter.md). 8 instruction discriminators verified against `AdrenaFoundation/adrena-abi` master IDL. `execute()` returns `NotYetImplemented`. Generated program ID `9aUp3UKHk4JuHsLJm33Why7RhuW6CQCyQh6UEJeynKKZ`. | [`programs/b402-adrena-adapter/`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-adrena-adapter) |
-| `b402_orca_adapter` | Scaffold. Multi-output (`DecreaseLiquidity` and `CollectFees` each emit 2 mints) requires PRD-04 dual-delta amendment + PRD-11 vector bindings. **v2 ABI dependent.** | [`programs/b402-orca-adapter/`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-orca-adapter) |
-| `b402_jupiter_perps_adapter` | Scaffold. **Deferred** — Jupiter Perps uses an async request-queue model that doesn't fit the v1 synchronous adapter ABI. PRD-14 (two-phase claim notes) is the path forward; PRD-14 itself is deferred until the first async adapter actually lands. | [`programs/b402-jupiter-perps-adapter/`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-jupiter-perps-adapter) |
-| `b402_drift_adapter` | Spec only ([PRD-10](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-10-drift-adapter.md)). **Deferred** pending Drift's reboot post-$285M April 1 2026 incident. | n/a |
+These protocol shapes need the next ABI revision. Open an issue on
+GitHub if your protocol fits one of these and you want it
+prioritized:
 
-## v2 extensions (designed, not shipped)
+- **Multi-output AMMs** (Orca whirlpool, two-asset LP unwind) — needs
+  vector token binding in the adapt circuit.
+- **Async / oracle-pending settlement** (Jupiter Perps' request queue,
+  any system that settles in a later block) — needs two-phase claim
+  notes.
+- **NFT-position protocols** (any system where the user's identity in
+  the protocol is itself an NFT mint) — needs design work; not in
+  any current PRD.
 
-These are the live PRDs that define the next ABI revision. They are
-**not in code yet**; the v1 ABI as documented above is what shipped.
+## Next-revision design (in PRDs, not code)
 
-- [PRD-11: Vector Token Bindings (M-in / N-out)](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-11-vector-bindings.md)
+Live PRDs covering the next ABI revision:
+
+- [Vector token bindings](https://github.com/mmchougule/b402-solana/blob/main/docs/prds/PRD-11-vector-bindings.md)
   — generalize scalar mint binding to up to 4 inputs × 4 outputs.
-- [PRD-12: Content-Addressed `action_hash`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-12-action-hash.md)
-  — extend the binding to include canonicalized accounts and per-adapter
-  scope tag. The "Open/Closed Principle made cryptographically
-  enforceable" — once shipped, any future adapter is a pure CPI wrapper.
-- [PRD-13: Shadow PDAs](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-13-shadow-pda.md)
-  — generic per-user protocol-state PDA pattern, replaces single-shared
-  obligation in Kamino and shared-account in Drift.
-- [PRD-14: Two-Phase Claim Notes](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-14-two-phase-claim.md)
-  — for any adapter that doesn't settle synchronously (Jupiter Perps,
-  post-reboot Drift, Phoenix limit orders).
-- [PRD-15: Delta-Zero + Deadline](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-15-delta-zero-deadline.md)
-  — for state-only ops (`cancel_order`, `claim_rewards` with zero
-  accrual). Implementation note: registry already has the
-  `allows_delta_zero` field (per PRD-04 §7 amendment).
+- [Content-addressed `action_hash`](https://github.com/mmchougule/b402-solana/blob/main/docs/prds/PRD-12-action-hash.md)
+  — bind canonicalized accounts and an adapter scope tag into the
+  proof, simplifying adapter-side validation.
+- [Shadow PDAs](https://github.com/mmchougule/b402-solana/blob/main/docs/prds/PRD-13-shadow-pda.md)
+  — formalize the per-user-PDA convention (used today by Kamino and
+  percolator) as a circuit-bound primitive.
+- [Two-phase claim notes](https://github.com/mmchougule/b402-solana/blob/main/docs/prds/PRD-14-two-phase-claim.md)
+  — for adapters that don't settle synchronously.
+- [Delta-zero + deadline](https://github.com/mmchougule/b402-solana/blob/main/docs/prds/PRD-15-delta-zero-deadline.md)
+  — for state-only ops (`cancel_order`, claim flows).
 
-The `circuits/build/adapt_v2.r1cs.info.txt` shows the v2 circuit has
-been compiled and benchmarked but is not connected to a deployed
+The next-revision circuit (`circuits/build/adapt_v2.r1cs.info.txt`)
+has been compiled and benchmarked but is not connected to a deployed
 verifier program.
 
 ## Continue reading
 
-<CardGroup cols={3}>
+<CardGroup cols={2}>
   <Card title="Jupiter" icon="arrow-right-arrow-left" href="/adapters/jupiter">
-    Private swap on real Jupiter V6.
+    Private swap on Jupiter V6 (mainnet).
   </Card>
   <Card title="Kamino" icon="building-columns" href="/adapters/kamino">
-    Private lend / withdraw / borrow / repay.
+    Private lend / redeem via Kamino V2 (mainnet).
+  </Card>
+  <Card title="Percolator" icon="chart-line" href="/adapters/percolator">
+    Private perp open / close on percolator (devnet).
   </Card>
   <Card title="Build an adapter" icon="hammer" href="/adapters/building-an-adapter">
-    Step-by-step.
+    Step-by-step for a new protocol.
   </Card>
 </CardGroup>

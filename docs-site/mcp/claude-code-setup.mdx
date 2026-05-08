@@ -1,0 +1,131 @@
+---
+title: Claude Code Setup
+description: "Install @b402ai/solana-mcp into Claude Code."
+---
+
+## Auto-install
+
+```bash
+npx -y @b402ai/solana-mcp --install
+```
+
+The installer detects Claude Code via `~/.claude.json` and writes an
+`b402-solana` entry into the file's `mcpServers` object. Idempotent:
+re-running is a no-op if the entry already matches; pass `--force` to
+overwrite a different existing entry.
+
+To install only into Claude Code (skip Cursor / Claude Desktop):
+
+```bash
+npx -y @b402ai/solana-mcp --install --only "Claude Code"
+```
+
+Source: [`packages/mcp-server/src/install.ts`](https://github.com/mmchougule/b402-solana/blob/main/packages/mcp-server/src/install.ts).
+
+## Manual install
+
+Equivalent to the auto-installer:
+
+```bash
+claude mcp add b402-solana \
+  --command npx \
+  --args "-y @b402ai/solana-mcp@latest"
+```
+
+Or edit `~/.claude.json` directly and add:
+
+```json
+{
+  "mcpServers": {
+    "b402-solana": {
+      "command": "npx",
+      "args": ["-y", "@b402ai/solana-mcp@latest"]
+    }
+  }
+}
+```
+
+To pin overrides into the entry (e.g. a private RPC):
+
+```json
+{
+  "mcpServers": {
+    "b402-solana": {
+      "command": "npx",
+      "args": ["-y", "@b402ai/solana-mcp@latest"],
+      "env": {
+        "B402_RPC_URL": "https://mainnet.helius-rpc.com/?api-key=YOUR_KEY",
+        "B402_KEYPAIR_PATH": "/Users/you/.config/solana/id.json"
+      }
+    }
+  }
+}
+```
+
+The auto-installer pre-populates the `env` block by passing through
+any `B402_*` env vars set in your current shell — so a one-time
+`export B402_RPC_URL=...; npx -y @b402ai/solana-mcp --install`
+captures the override.
+
+## Restart
+
+Claude Code reads `~/.claude.json` at startup. After `--install`,
+quit and relaunch Claude Code. The `b402-solana` server should
+appear under `/mcp` (slash-command list).
+
+Verify with a no-op tool call from Claude:
+
+> What's my private balance?
+
+Claude calls `status` and returns `{ pubkey, balances: [...] }`.
+
+## Common gotchas
+
+### Keypair not found
+
+```
+keypair not found at /Users/you/.config/solana/id.json
+  → run 'solana-keygen new' or set B402_KEYPAIR_PATH
+```
+
+The MCP server reads the Solana CLI keypair on first tool call.
+Either generate one with `solana-keygen new` or point at an existing
+one via `B402_KEYPAIR_PATH`.
+
+### Public RPC throttling
+
+Default `B402_RPC_URL` is `https://api.mainnet-beta.solana.com`,
+which throttles ~40 RPS per IP. The MCP server prints to stderr at
+boot when running on the public RPC:
+
+```
+[b402-solana] using public mainnet RPC (api.mainnet-beta.solana.com).
+For production agents set B402_RPC_URL to your Helius/Triton/QuickNode endpoint.
+```
+
+For agents in tight loops, set `B402_RPC_URL` to a private endpoint.
+
+### Wrong cluster
+
+Default cluster is `mainnet`. For risk-free testing, set
+`B402_CLUSTER=devnet` in the entry's `env` block. Don't mix devnet
+keys / notes with mainnet — note storage is per-cluster
+(`~/.config/b402-solana/notes/<cluster>/`), but the same keypair
+file is shared.
+
+### Restart required after install
+
+Auto-install writes the file but does not signal Claude Code to
+reload. Quit and relaunch Claude Code; the new server appears under
+`/mcp`.
+
+## Continue reading
+
+<CardGroup cols={2}>
+  <Card title="Tool reference" icon="wrench" href="/mcp/tools">
+    All 11 tools, inputs, outputs.
+  </Card>
+  <Card title="Prompt patterns" icon="comments" href="/mcp/prompt-patterns">
+    Copy-pasteable Claude Code prompts that map to tool calls.
+  </Card>
+</CardGroup>

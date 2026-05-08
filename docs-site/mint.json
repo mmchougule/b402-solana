@@ -2,21 +2,14 @@
   "$schema": "https://mintlify.com/schema.json",
   "name": "b402-solana",
   "logo": {
-    "light": "/logo.svg",
-    "dark": "/logo.svg"
+    "light": "/logo/b402-full-logo.png",
+    "dark": "/logo/b402-full-logo.png"
   },
-  "favicon": "/favicon.svg",
+  "favicon": "/fav-icon.png",
   "colors": {
-    "primary": "#a78bfa",
-    "light": "#c4b5fd",
-    "dark": "#7c3aed",
-    "background": {
-      "dark": "#0a0a0f"
-    },
-    "anchors": {
-      "from": "#a78bfa",
-      "to": "#7c3aed"
-    }
+    "primary": "#F4B526",
+    "light": "#F4B526",
+    "dark": "#F4B526"
   },
   "theme": "venus",
   "modeToggle": {
@@ -26,11 +19,15 @@
   "topbarLinks": [
     {
       "name": "GitHub",
-      "url": "https://github.com/b402-ai/b402-solana"
+      "url": "https://github.com/mmchougule/b402-solana"
+    },
+    {
+      "name": "b402.ai",
+      "url": "https://b402.ai"
     }
   ],
   "topbarCtaButton": {
-    "name": "Run e2e",
+    "name": "Get started",
     "url": "/quickstart"
   },
   "navigation": [
@@ -42,23 +39,22 @@
       ]
     },
     {
-      "group": "Concepts",
+      "group": "Use it from an agent",
       "pages": [
-        "concepts/shielded-pool",
-        "concepts/composability",
-        "concepts/privacy-model",
-        "concepts/trust-assumptions",
-        "concepts/threat-model"
+        "mcp/overview",
+        "mcp/tools",
+        "mcp/claude-code-setup",
+        "mcp/cursor-setup",
+        "mcp/prompt-patterns"
       ]
     },
     {
-      "group": "Protocol",
+      "group": "Use it from your code",
       "pages": [
-        "protocol/architecture",
-        "protocol/circuits",
-        "protocol/pool-program",
-        "protocol/verifier",
-        "protocol/nullifier-tree"
+        "sdk/installation",
+        "sdk/shield-unshield",
+        "sdk/private-actions",
+        "sdk/scanner"
       ]
     },
     {
@@ -67,37 +63,23 @@
         "adapters/overview",
         "adapters/jupiter",
         "adapters/kamino",
-        "adapters/adrena",
-        "adapters/orca",
+        "adapters/percolator",
         "adapters/building-an-adapter"
       ]
     },
     {
-      "group": "SDK",
+      "group": "How it works",
       "pages": [
-        "sdk/installation",
-        "sdk/shield-unshield",
-        "sdk/private-actions",
-        "sdk/scanner",
-        "sdk/relayer"
-      ]
-    },
-    {
-      "group": "Operations",
-      "pages": [
-        "operations/running-a-relayer",
-        "operations/fork-testing",
-        "operations/monitoring"
-      ]
-    },
-    {
-      "group": "Assurance",
-      "pages": [
-        "assurance/methodology",
-        "assurance/parity-vectors",
-        "assurance/property-invariants",
-        "assurance/fuzzing",
-        "assurance/benchmarks"
+        "concepts/composability",
+        "concepts/privacy-model",
+        "concepts/shielded-pool",
+        "concepts/trust-assumptions",
+        "protocol/architecture",
+        "protocol/pool-program",
+        "protocol/circuits",
+        "protocol/verifier",
+        "protocol/nullifier-tree",
+        "protocol/nullifier-program"
       ]
     },
     {
@@ -112,6 +94,6 @@
     }
   ],
   "footerSocials": {
-    "github": "https://github.com/b402-ai/b402-solana"
+    "github": "https://github.com/mmchougule/b402-solana"
   }
 }

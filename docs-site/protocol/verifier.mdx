@@ -1,86 +1,113 @@
 ---
 title: Verifier
-description: "Groth16 verifier programs, VK derivation, on-chain CPI shape."
+description: "Groth16 verifier programs, VK derivation, on-chain CPI shapes."
 ---
 
-The verifier programs wrap [`Lightprotocol/groth16-solana`](https://github.com/Lightprotocol/groth16-solana)
-to verify Groth16 proofs over BN254 using Solana's `alt_bn128_*`
-syscalls. There is one verifier program per circuit because each
-hardcodes the circuit-specific verification key.
+The verifier programs wrap [`Lightprotocol/groth16-solana`](https://github.com/Lightprotocol/groth16-solana) to verify Groth16 proofs over BN254 using Solana's `alt_bn128_*` syscalls. There is one verifier program per circuit because each hardcodes the circuit-specific verification key.
 
 ## Two verifier programs
 
-| Program | Circuit | Public inputs | Devnet ID |
+| Program | Circuit | Public inputs (mainnet) | Program ID (devnet + mainnet) |
 |---|---|---|---|
-| `b402_verifier_transact` | `transact.circom` | 18 | `Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK` |
-| `b402_verifier_adapt` | `adapt.circom` | 23 | `3Y2tyhNSaUiW5AcZcmFGRyTMdnroxHxc5GqFQPcMTZae` |
+| `b402_verifier_transact` | `transact.circom` | **18** (fixed) | `Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6ZrK` |
+| `b402_verifier_adapt` | `adapt.circom` | **24** (Phase 9: 23 base + `outSpendingPubA`) | `3Y2tyhNSaUiW5AcZcmFGRyTMdnroxHxc5GqFQPcMTZae` |
 
-Why separate: changing one circuit's VK does not require touching the
-other. Each program is independently auditable, independently
-deployable, and **immutable** at deploy (`upgrade_authority = None`).
+Same program IDs on devnet and mainnet. Splitting the verifiers per circuit means changing one VK does not require touching the other; each program is independently auditable and independently swappable via the pool's `set_verifier(kind, new_program_id)` admin instruction. Verifier programs are not deployed with `upgrade_authority = None` today — they are upgrade-able under the standard Solana BPF authority. Authority revocation is on the hardening roadmap.
 
-## VK derivation
+## Public-input count matrix
 
-Per circuit, the build pipeline:
+| Cargo feature on `b402-verifier-adapt` | `PUBLIC_INPUT_COUNT` | When |
+|---|---|---|
+| (none) — Phase 7B | 23 | pre-2026-04-30 mainnet builds |
+| `phase_9_dual_note` | **24** | mainnet today, all builds since 2026-04-30 |
 
-1. Compile the circuit: `circom NAME.circom -r NAME.r1cs --O1`.
-2. Phase 2 ceremony: `snarkjs zkey new` + contributions + `snarkjs zkey
-   verify`.
-3. Export VK: `snarkjs zkey export verificationkey NAME.zkey
-   NAME_verification_key.json`.
-4. Convert to Rust constants: `scripts/vk-to-rust.mjs NAME_verification_key.json
-   > programs/b402-verifier-NAME/src/vk.rs`.
-5. The verifier crate imports `vk.rs` as a `const VK: ...` and the
-   compiled `.so` bakes it.
-
-VK files are committed under
-[`circuits/build/ceremony/`](https://github.com/b402-ai/b402-solana/tree/main/circuits/build):
-
-- `transact_verification_key.json`
-- `adapt_verification_key.json`
-
-**Both are throwaway-devnet-only** — single-contributor ceremony. Mainnet
-re-runs the ceremony per [`PRD-08`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-08-audit-launch.md).
-
-## CPI shape
-
-The pool calls the verifier with:
+From [`programs/b402-verifier-adapt/src/lib.rs:27-30`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-verifier-adapt/src/lib.rs#L27-L30):
 
 ```rust
-pub struct VerifyArgs {
-    pub proof: [u8; 256],            // Groth16 proof bytes
-    pub public_inputs: Vec<[u8; 32]>, // N inputs as 32B Fr (LE in our convention)
-}
+#[cfg(not(feature = "phase_9_dual_note"))]
+pub const PUBLIC_INPUT_COUNT: usize = 23;
+#[cfg(feature = "phase_9_dual_note")]
+pub const PUBLIC_INPUT_COUNT: usize = 24;
 ```
 
-Wire format of the 256-byte `proof`:
+The two shapes are not backward-compatible — a Phase-9 VK rejects Phase-7B proofs and vice versa. The pool and the SDK must build with matching feature flags or every verify fails.
+
+`b402_verifier_transact` is fixed at 18 inputs ([`programs/b402-verifier-transact/src/lib.rs:15`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-verifier-transact/src/lib.rs#L15)) — the transact circuit has not changed shape since v1.
+
+## Two entrypoints on `b402_verifier_adapt`
+
+Both ship in the mainnet binary ([`programs/b402-verifier-adapt/src/lib.rs:54-146`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-verifier-adapt/src/lib.rs#L54-L146)).
+
+### `verify(ix_data: Vec<u8>)` — inline-inputs path
+
+Used by `adapt_execute` (the Phase 7B path). Wire layout of the inner ix_data ([`programs/b402-pool/src/instructions/verifier_cpi.rs:135-166`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/instructions/verifier_cpi.rs#L135-L166)):
 
 ```
-[0..64]    proof_A   (G1 point, 64 bytes, y-negated for ark_bn254)
-[64..192]  proof_B   (G2 point, 128 bytes)
-[192..256] proof_C   (G1 point, 64 bytes)
+data[0]      = 0x01                    (discriminator)
+data[1..257] = proof bytes             (256 = A64 || B128 || C64)
+data[257..]  = N × 32 B public inputs  (LE Fr)
 ```
 
-The verifier program internally:
+Outer Anchor wire: `discriminator(8) || u32 LE length || inner`. Inner length at Phase 9: `1 + 256 + 32·24 = 1,025 B`.
 
-1. Endianness convert LE → BE for `ark_bn254`.
-2. Construct `Groth16Verifier::new(proof, publics, &VK)`.
-3. Run **3 pairings + IC multi-scalar-mul** via `sol_alt_bn128_*` syscalls.
-4. Return `Ok(())` if proof verifies, else error.
+### `verify_with_account_inputs(proof: [u8; 256])` — PRD-35 path
 
-Compute cost: ~178k CU on a transact verify. The pool reserves 1.4M CU
-for the whole instruction to leave headroom for the rest of its work.
+Used by `adapt_execute_v2` (and by `adapt_execute` in mainnet builds with `prd_35_pending_inputs`). The verifier reads the public-input vector directly from the `pending_inputs` PDA passed in the account list ([`programs/b402-verifier-adapt/src/lib.rs:116-145`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-verifier-adapt/src/lib.rs#L116-L145)):
 
-## Public input encoding
+```
+account[0]       = pending_inputs (UncheckedAccount, read-only)
+data[0..8]       = sha256("global:verify_with_account_inputs")[..8]
+data[8..264]     = proof: [u8; 256]   (fixed array, no length prefix)
+```
 
-The pool packs public inputs in a specific order before CPI. From
-[`programs/b402-pool/src/instructions/adapt_execute.rs:531`](https://github.com/b402-ai/b402-solana/blob/main/programs/b402-pool/src/instructions/adapt_execute.rs)
-(adapt's case, 23 inputs):
+Account-data layout the verifier expects ([`lib.rs:106-110`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-verifier-adapt/src/lib.rs#L106-L110)):
+
+```
+bytes[0..8]              = Anchor account discriminator
+bytes[8]                 = version (1 = committed; 0 = consumed)
+bytes[9..9 + 32·N]       = N public inputs, 32 B LE each
+```
+
+The verifier rejects with `PendingInputsNotCommitted` if `version != 1` ([`lib.rs:126`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-verifier-adapt/src/lib.rs#L126)). The pool zeroes the version byte after a successful verify — replay protection.
+
+Wire-size win: ~768 B saved per call vs the inline-inputs path. That is what lifts the v0-tx 1232 B ceiling for per-user adapters.
+
+## CPI helpers (pool-side)
+
+From [`programs/b402-pool/src/instructions/verifier_cpi.rs`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/instructions/verifier_cpi.rs):
+
+| Helper | Target ix | Used by |
+|---|---|---|
+| `invoke_verify_transact` | `b402_verifier_transact::verify` | `shield`, `transact`, `unshield` |
+| `invoke_verify_adapt` | `b402_verifier_adapt::verify` | Phase 7B `adapt_execute` (no `prd_35_pending_inputs`) |
+| `invoke_verify_adapt_with_account_inputs` | `b402_verifier_adapt::verify_with_account_inputs` | mainnet `adapt_execute` and `adapt_execute_v2` |
+
+Verify discriminator constants are pinned at [`verifier_cpi.rs:30`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/instructions/verifier_cpi.rs#L30) and [`verifier_cpi.rs:91-92`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/instructions/verifier_cpi.rs#L91-L92) — pre-computed `sha256("global:verify")[..8]` and `sha256("global:verify_with_account_inputs")[..8]`.
+
+## Wire format of the proof
+
+```
+proof[0..64]    proof_A   (G1 point, 64 bytes; y-negated for ark_bn254)
+proof[64..192]  proof_B   (G2 point, 128 bytes)
+proof[192..256] proof_C   (G1 point, 64 bytes)
+```
+
+The verifier reverses each public input from LE to BE before calling `Groth16Verifier::new` ([`verifier-adapt/src/lib.rs:32-38, 86-91`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-verifier-adapt/src/lib.rs#L32-L38)) — the `groth16-solana` crate expects BE field elements, while the rest of the b402 stack (TS SDK, pool public-input encoder) is LE.
+
+## Public-input encoding (adapt, Phase 9 mainnet build)
+
+From `build_public_inputs_for_adapt` at [`adapt_execute.rs:1115-1163`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/instructions/adapt_execute.rs#L1115-L1163):
 
 ```rust
-fn build_public_inputs_for_adapt(pi: &AdaptPublicInputs) -> Vec<[u8; 32]> {
-    let mut v: Vec<[u8; 32]> = Vec::with_capacity(23);
-    // First 18 — identical to transact for prover code reuse.
+fn build_public_inputs_for_adapt(
+    pi: &AdaptPublicInputs,
+    in_mint: &Pubkey,
+    out_mint: &Pubkey,
+    adapter_program: &Pubkey,
+    action_hash: &[u8; 32],
+) -> Vec<[u8; 32]> {
+    let mut v = Vec::with_capacity(PUBLIC_INPUT_COUNT_ADAPT);
+    // First 18 — identical to transact.
     v.push(pi.merkle_root);
     v.push(pi.nullifier[0]);
     v.push(pi.nullifier[1]);
@@ -88,7 +115,7 @@ fn build_public_inputs_for_adapt(pi: &AdaptPublicInputs) -> Vec<[u8; 32]> {
     v.push(pi.commitment_out[1]);
     v.push(u64_to_fr_le(pi.public_amount_in));
     v.push(u64_to_fr_le(pi.public_amount_out));
-    v.push(util::reduce_le_mod_p(&pi.public_token_mint.to_bytes()));
+    v.push(util::reduce_le_mod_p(&in_mint.to_bytes()));      // reconstructed
     v.push(u64_to_fr_le(pi.relayer_fee));
     v.push(pi.relayer_fee_bind);
     v.push(pi.root_bind);
@@ -99,87 +126,51 @@ fn build_public_inputs_for_adapt(pi: &AdaptPublicInputs) -> Vec<[u8; 32]> {
     v.push(TAG_SPEND_KEY_PUB);
     v.push(TAG_FEE_BIND);
     v.push(TAG_RECIPIENT_BIND);
-    // Adapt-specific — 5 more.
-    v.push(pi.adapter_id);
-    v.push(pi.action_hash);
+    // Adapt-specific — 5 entries.
+    let adapter_id_digest = keccak::hash(adapter_program.as_ref()).0;
+    v.push(util::reduce_le_mod_p(&adapter_id_digest));        // reconstructed
+    v.push(*action_hash);                                     // reconstructed
     v.push(u64_to_fr_le(pi.expected_out_value));
-    v.push(util::reduce_le_mod_p(&pi.expected_out_mint.to_bytes()));
+    v.push(util::reduce_le_mod_p(&out_mint.to_bytes()));      // reconstructed
     v.push(TAG_ADAPT_BIND);
+    // Phase 9 — index 23.
+    #[cfg(feature = "phase_9_dual_note")]
+    v.push(pi.out_spending_pub);
     v
 }
 ```
 
-Two encoding helpers:
+Pool injects `in_mint`, `out_mint`, `adapter_id`, `action_hash` from on-chain state — not from the wire — so a relayer cannot tamper with them between proof generation and submission.
 
-- `u64_to_fr_le(v)` — places `v.to_le_bytes()` in the low 8 bytes of a
-  zero-padded 32-byte buffer. `Fr` representation in our pipeline is
-  little-endian.
-- `reduce_le_mod_p(bytes32)` — interprets the input as a little-endian
-  256-bit integer, reduces mod the BN254 scalar field prime. Used for
-  Solana mints (which can have top bits set).
+Encoding helpers:
 
-Domain tags `TAG_COMMIT`, `TAG_NULLIFIER`, etc. are
-[`solana::poseidon::Endianness::LittleEndian`](https://docs.rs/anchor-lang/) field elements
-defined in `programs/b402-pool/src/constants.rs`. They match the strings
-in [`PRD-02 §1.2`](https://github.com/b402-ai/b402-solana/blob/main/docs/prds/PRD-02-crypto-spec.md#12-domain-tags)
-exactly.
+- `u64_to_fr_le(v)` — `v.to_le_bytes()` in the low 8 bytes of a zero-padded 32-byte buffer ([`adapt_execute.rs:995-999`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/instructions/adapt_execute.rs#L995-L999)).
+- `reduce_le_mod_p(bytes32)` — interpret as LE 256-bit integer, reduce mod the BN254 scalar field prime. Used for Solana mints (which can have top bits set).
+- Domain tags `TAG_COMMIT`, `TAG_NULLIFIER`, … are LE Fr encodings of the UTF-8 strings, defined in [`programs/b402-pool/src/constants.rs:34-47`](https://github.com/mmchougule/b402-solana/blob/main/programs/b402-pool/src/constants.rs#L34-L47).
 
-## Verifier-side parity testing
+## VK derivation
 
-The assurance repo runs the same proof bytes through:
+Per circuit:
 
-1. snarkjs `verify` (JS, off-chain).
-2. The Rust verifier CLI (`programs/b402-verifier-transact` / `-adapt`
-   compiled as a binary).
-3. A synthetic on-chain test via litesvm.
+1. `circom NAME.circom -r NAME.r1cs --O1`.
+2. Phase 2 ceremony: `snarkjs zkey new` + contributions + `snarkjs zkey verify`.
+3. `snarkjs zkey export verificationkey NAME.zkey NAME_verification_key.json`.
+4. `circuits/scripts/vk-to-rust.mjs NAME_verification_key.json > programs/b402-verifier-NAME/src/vk.rs`.
+5. Verifier crate imports `vk.rs` as a `const VK: Groth16Verifyingkey<...>`; the `.so` bakes it.
 
-If any of the three disagree, parity is broken. From
-[`reports/parity-summary.md`](https://github.com/b402-ai/b402-solana-assurance/blob/main/reports/parity-summary.md):
+VK files committed under `circuits/build/ceremony/`. Source: `transact_verification_key.json` and `adapt_verification_key.json`.
 
-```
-End-to-end proof:    256 bytes, SHA-256 156646b0...
-snarkjs verify:      true
-Rust verifier CLI:   OK
+## Trusted-setup status
 
-Adapt proof:         256 bytes, SHA-256 142c6007...
-Public inputs:       23
-Rust verifier-adapt tests passed: 6 / 6
-```
-
-The 6 verifier-adapt tests cover (from
-[`programs/b402-verifier-adapt/tests/verify.rs`](https://github.com/b402-ai/b402-solana/tree/main/programs/b402-verifier-adapt/tests)):
-
-- `tampered_adapter_id_rejected`
-- `tampered_action_hash_rejected`
-- `tampered_expected_out_mint_rejected`
-- `tampered_proof_rejected`
-- Public-input count = 23 fixture check
-- Throwaway-ceremony flag — VK must not be misclassified as production
-
-## Immutability
-
-Both verifier programs deploy with `upgrade_authority = None`. The pool's
-`PoolConfig` pins both verifier program IDs at `init_pool`; the pool
-admin can only point at *different* verifier programs via the same
-upgrade flow that touches the pool itself, which is timelocked.
-
-A discovered bug in a verifier program can therefore not be patched in
-place. The remediation flow is "deploy a new verifier + new pool, run
-migration unshield" — same as a circuit change. This is on purpose: it
-removes "compromise admin → compromise verifier → drain pool" as an
-attack path.
+Both VKs are from a single-contributor Phase-2 ceremony run by the b402 team. The same VKs are baked into devnet and mainnet verifier deploys today. Multi-party Phase-2 with ≥3 contributors is the planned hardening path; once run, the new verifier programs get deployed and the pool rotates to them via `set_verifier`. See [Trust Assumptions](/concepts/trust-assumptions).
 
 ## What the verifier does NOT enforce
 
-The verifier only checks that the supplied proof is valid against the
-supplied public inputs and the baked VK. It does NOT enforce:
+The verifier checks that the supplied proof is valid against the supplied public inputs and the baked VK. It does NOT enforce:
 
-- That the public inputs are *the right* public inputs for this Solana
-  instruction. That binding is the pool's job (e.g., recomputing
-  `recipient_bind` against the actual recipient ATA owner).
-- Anti-replay. Nullifier set membership is the pool's job.
-- Root freshness. Root-ring membership is the pool's job.
+- **That the public inputs are *the right* public inputs** for the Solana instruction. The pool reconstructs `recipient_bind`, `adapter_id`, `action_hash`, `in_mint`, `out_mint` from on-chain state and asserts byte-equality before (or during) the verifier CPI.
+- **Anti-replay.** Nullifier set membership is the pool's job (via the `b402-nullifier` CPI to Light V2).
+- **Root freshness.** Root-ring membership is the pool's job.
+- **PDA ownership for `verify_with_account_inputs`.** The verifier reads bytes from the supplied `pending_inputs` account; the pool validates the PDA derivation from `pi.out_spending_pub` and the byte-equality of the inputs.
 
-Keeping the verifier minimal makes its audit surface tiny — essentially
-"does `groth16-solana` work as advertised against this VK." That's what
-makes the immutability acceptable.
+Keeping the verifier minimal makes its audit surface tiny — essentially "does `groth16-solana` work as advertised against this VK." That's what makes the planned authority revocation acceptable.

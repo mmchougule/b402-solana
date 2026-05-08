@@ -1,0 +1,240 @@
+---
+title: Percolator Adapter
+description: "Confidential perp open / close out of shielded USDC against percolator-prog."
+---
+
+`b402-percolator-adapter` integrates [percolator-prog](https://github.com/aeyakovenko/percolator-prog),
+a permissionless perp engine on Solana. Positions land on percolator's
+slab account but are **owned by a PDA derived from the user's private
+spending key, not their wallet** — so an observer reading the slab
+cannot map slots back to wallets without the spending keys.
+
+Source: [`programs/b402-percolator-adapter/`](https://github.com/mmchougule/b402-solana-ex/tree/main/programs/b402-percolator-adapter).
+End-to-end writeup: [`docs/findings/percolator-e2e.md`](https://github.com/mmchougule/b402-solana-ex/blob/main/docs/findings/percolator-e2e.md).
+Spec: PRD-36 (Option B — shielded user / private positions).
+
+## Status
+
+| Surface | Status |
+|---|---|
+| Devnet end-to-end | **GREEN.** Single tx, real Phase-9 Groth16 verify, real Light V2 nullifier insert, real percolator `InitUser`+`DepositCollateral`+`TradeCpi`. Position lands at `slab.accounts[1].owner == owner_pda(spendingPub)`. |
+| Mainnet | **Adapter ready, market pending.** Same code path; what's missing is a percolator market deployed on mainnet to call into. |
+| SDK methods (`privatePerpOpen` / `privatePerpClose`) | Forward-looking — not in `@b402ai/solana@0.0.24`. Listed in the parent repo `CLAUDE.md` under "Solana-native additions next". |
+
+## Program IDs
+
+| Program | Address |
+|---|---|
+| `b402-percolator-adapter` | [`65NRt6GpeakqXhqvKcN3knohzKEZT37arUyQi3SZwfxv`](https://explorer.solana.com/address/65NRt6GpeakqXhqvKcN3knohzKEZT37arUyQi3SZwfxv?cluster=devnet) |
+| `percolator-prog` (devnet) | [`4PTXCZ4vLSK6aiUd3fx2dVVYSRNFnMSM4ijhDWkuFi2s`](https://explorer.solana.com/address/4PTXCZ4vLSK6aiUd3fx2dVVYSRNFnMSM4ijhDWkuFi2s?cluster=devnet) |
+| `percolator-match` (devnet) | [`5ogNxr4uFXZXoeJ4cP89kKZkx1FkbaD2FBQr91KoYZep`](https://explorer.solana.com/address/5ogNxr4uFXZXoeJ4cP89kKZkx1FkbaD2FBQr91KoYZep?cluster=devnet) |
+
+The on-chain `percolator-prog` SHA-256 is
+`6e2bb5aee602aed1de0b2d80f72f97b6b115e0f536438f76d31e0de06d5b7002`,
+matching the upstream-published binary build provenance in
+[`percolator-cli/README.md`](https://github.com/aeyakovenko/percolator-cli/blob/master/README.md)
+(`04b854e + engine 5059332f8a`). Upgrade authority is the upstream
+deployer — confirms the program is unmodified.
+
+## Action variants
+
+```rust
+pub enum PercolatorAction {
+    OpenPosition {
+        lp_idx: u16,
+        size_e6: i128,
+        limit_price_e6: u64,
+        fee_payment_if_init: u64,
+    },
+    ClosePosition {
+        lp_idx: u16,
+        limit_price_e6: u64,
+    },
+}
+```
+
+From [`programs/b402-percolator-adapter/src/payload.rs:19`](https://github.com/mmchougule/b402-solana-ex/blob/main/programs/b402-percolator-adapter/src/payload.rs#L19).
+Both decompose into a percolator `TradeCpi` underneath; `OpenPosition`
+prepends `InitUser` + `DepositCollateral` on first touch for a given
+viewing key, `ClosePosition` appends `WithdrawCollateral` after
+flattening.
+
+## The owner_pda story
+
+`slab.accounts[user_idx].owner` is a PDA derived from the user's
+private spending key, not their wallet:
+
+```
+owner = PDA(["b402/v1", "perp-owner", LE32(spendingPub)], adapter_program_id)
+```
+
+From [`programs/b402-percolator-adapter/src/pda.rs:43-51`](https://github.com/mmchougule/b402-solana-ex/blob/main/programs/b402-percolator-adapter/src/pda.rs#L43-L51).
+For the devnet keystone tx (alice signing `77zbXcUG…`):
+`slab.accounts[1].owner == 4K8dopXjhc8qtBTQEEYAbneaZWJMhKqCg3HQAinwK4Pv`.
+Different spending keys → different PDAs → different slab slots, by
+construction.
+
+Cross-adapter scoping holds by construction: the same viewing key,
+used against `b402-kamino-adapter` vs `b402-percolator-adapter`,
+yields different `owner_pda`s because the program ID is part of the
+PDA seeds. b402's adapters cannot collide identities across
+protocols.
+
+## Per-slab `perp_mapping` bootstrap
+
+The adapter holds a per-slab account (`perp_mapping`) that maps
+`viewing_pub_hash → user_idx`. The mapping table is sized at
+**`PERP_MAPPING_ACCOUNT_LEN = 81,968 B`** to hold the full per-slab
+user table (well above Solana's 10,240 B per-instruction realloc cap).
+
+Bootstrap is split into two ixs:
+
+| Ix | Effect |
+|---|---|
+| `init_mapping` | Allocates the PDA at `MAX_PERMITTED_DATA_INCREASE = 10,240 B` and funds it with rent for the FULL target. |
+| `grow_mapping` × 8 | Reallocates +10,240 B per ix until the account reaches `81,968 B`. Idempotent — no-op once at full size. |
+
+All 9 ixs ride in a single transaction via the SDK helper. The cap is
+[`MAX_PERMITTED_DATA_INCREASE`](https://github.com/mmchougule/b402-solana-ex/blob/main/programs/b402-percolator-adapter/src/lib.rs#L142),
+not an arbitrary number — it's the max account-data growth the Solana
+runtime allows in a single ix.
+
+## The cpi-only security gate
+
+Without the gate, an attacker could call `execute(ClosePosition)`
+directly with another user's `viewing_pub_hash` (which is public in
+the prior open's action_payload) and the adapter would happily sign
+percolator's `WithdrawCollateral` as that user's `owner_pda`. With
+`out_vault` having no owner constraint in the `Execute<'info>`
+struct, the attacker passes their own USDC ATA and walks off with
+the user's collateral.
+
+The `cpi-only` Cargo feature enforces two checks at the top of
+`execute`:
+
+```rust
+require!(get_stack_height() > 1, PercolatorAdapterError::DirectCallRejected);
+let outer_ix = load_instruction_at_checked(current_idx, ix_sysvar)?;
+require!(
+    outer_ix.program_id == B402_POOL_PROGRAM_ID,
+    PercolatorAdapterError::CallerNotB402Pool
+);
+```
+
+From [`programs/b402-percolator-adapter/src/lib.rs:89-106`](https://github.com/mmchougule/b402-solana-ex/blob/main/programs/b402-percolator-adapter/src/lib.rs#L89-L106).
+Mirrors the kamino-adapter cpi-only check (same threat model — pool
+must be the only legal caller).
+
+## Devnet keystone transaction
+
+```
+tx:         2NwVGzPufiL7W4gneKgSjJNh9fKMnqwKYoL4heNawdWFHmdme6HjhCFzqdYf7i4NUmpCf6v3gUxBsHb4x6Wnb6ZR
+explorer:   https://explorer.solana.com/tx/2NwVGzPufiL7W4gneKgSjJNh9fKMnqwKYoL4heNawdWFHmdme6HjhCFzqdYf7i4NUmpCf6v3gUxBsHb4x6Wnb6ZR?cluster=devnet
+signer:     77zbXcUG72nYuMdsZ9LZgQZZUNVyUTfYZJQpunGky3sx (alice — self-submit, no devnet relayer)
+slab:       8Va4vKQk3r1ygrAjoJWHw2usREhwTAAq73jxsWKgjfso
+user_idx:   1
+owner_pda:  4K8dopXjhc8qtBTQEEYAbneaZWJMhKqCg3HQAinwK4Pv
+position:   1000  (size_e6, long)
+total CU:   700,865
+```
+
+15 inner CPIs at depths 1-4 in a single signed transaction:
+
+```
+Program 42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y     invoke [1]    ← b402 pool
+  AdaptExecuteV2
+  Program 3Y2tyhNSaUiW5AcZcmFGRyTMdnroxHxc5GqFQPcMTZae   invoke [2]    ← b402 verifier-adapt
+    VerifyWithAccountInputs                              consumed: 213,320 CU
+  Program 2AnRZwWu6CTurZs1yQpqrcJWo4yRYL1xpeV78b2siweq   invoke [2]    ← b402 nullifier
+    CreateNullifier
+    Program SySTEM1eSU2p4BGQfQpimFEWWSC1XDFeun3Nqzz3rT7  invoke [3]    ← Light Protocol system program
+      Program 11111111111111111111111111111111           invoke [4]    ← System Program
+      Program compr6CUsB5m2jS4Y3831ztGSTnDpnKJTKS95d64XVq invoke [4]   ← Light account compression
+        InsertIntoQueues                                              (writes nullifier into address tree)
+  Program TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA    invoke [2]   ← SPL token transfer (vault → adapter)
+  Program 65NRt6GpeakqXhqvKcN3knohzKEZT37arUyQi3SZwfxv   invoke [2]   ← b402 percolator adapter
+    Execute
+    Program 4PTXCZ4vLSK6aiUd3fx2dVVYSRNFnMSM4ijhDWkuFi2s invoke [3]   ← percolator-prog (InitUser)
+    Program 4PTXCZ4vLSK6aiUd3fx2dVVYSRNFnMSM4ijhDWkuFi2s invoke [3]   ← percolator-prog (DepositCollateral)
+    Program 4PTXCZ4vLSK6aiUd3fx2dVVYSRNFnMSM4ijhDWkuFi2s invoke [3]   ← percolator-prog (TradeCpi)
+      Program 5ogNxr4uFXZXoeJ4cP89kKZkx1FkbaD2FBQr91KoYZep invoke [4] ← passive matcher
+```
+
+## Wire issues caught against percolator-prog
+
+Six layout / wire issues surfaced during integration, all fixed against
+percolator-prog `origin/main` (commit `04b854e`, engine pin
+`5059332f8a`). All six are integration-side, not bugs in percolator's
+logic:
+
+1. **Slab `MAGIC` byte-order** — percolator stores `0x504552434f4c4154`
+   in native LE; bytes-on-disk read `"TALOCREP"` (BE form of `"PERCOLAT"`).
+2. **`Account` struct layout** — Solana BPF target is 8-byte i128
+   alignment vs 16-byte host. On-chain `Account` is 416 B with
+   `owner` at +184, `position_basis_q` at +64, `capital` at +0.
+3. **Mapping PDA > 10,240 B** — the `init_mapping` + `grow_mapping × 8`
+   split (above).
+4. **SPL transfer ordering** — `InitUser` charges `fee_payment_if_init`
+   from the user's slab ATA *before* the rest of the open path runs;
+   the adapter must transfer adapter_in_ta → user ATA first, then
+   InitUser, then DepositCollateral with the post-fee remainder.
+5. **Engine `f6b13f57` pin** — `Account` struct grew +64 B and
+   `MarketConfig` grew +56 B between `a946e550` and `f6b13f57`.
+6. **Hyperp `MAX_ACCRUAL_DT_SLOTS = 10`** — Hyperp markets need a
+   fresh `KeeperCrank` within ~10 slots of every trade or the engine
+   returns `CatchupRequired`. Mainnet has keeper bots; devnet test
+   harness pushes a fresh mark + crank before each open.
+
+Full notes: [`docs/findings/percolator-e2e.md#bugs-found-integrating-against-percolator-prog`](https://github.com/mmchougule/b402-solana-ex/blob/main/docs/findings/percolator-e2e.md#bugs-found-integrating-against-percolator-prog).
+
+## Reproduction
+
+### Local mainnet-fork (open + close round trip)
+
+```bash
+tests/v2/scripts/start-percolator-fork.sh
+pnpm exec vitest run tests/v2/e2e/v2_fork_percolator.test.ts
+```
+
+Expected ladder:
+
+```
+T1 — pool initialized + percolator adapter registered + token_config added
+T2 — percolator market bootstrapped (slab + LP + matcher)
+T3 — perp_mapping PDA at full PERP_MAPPING_ACCOUNT_LEN (=81968 B)
+T4 — user b402 wallet shielded a 5 USDC (test mint) note via pool.shield
+T5 — privatePerpOpen lands position on slab; owner = owner_pda(spendingPub)
+```
+
+### Public devnet
+
+```bash
+RPC=https://devnet.helius-rpc.com/?api-key=YOUR_KEY \
+  PHOTON_RPC=$RPC \
+  pnpm exec vitest run tests/v2/e2e/v2_fork_percolator.test.ts
+```
+
+The 6 b402 programs are live on devnet at the IDs above;
+percolator-prog at `4PTXCZ4vLSK6aiUd3fx2dVVYSRNFnMSM4ijhDWkuFi2s`
+matches the upstream-published binary.
+
+### Verify the keystone tx
+
+```bash
+solana confirm 2NwVGzPufiL7W4gneKgSjJNh9fKMnqwKYoL4heNawdWFHmdme6HjhCFzqdYf7i4NUmpCf6v3gUxBsHb4x6Wnb6ZR \
+  --url devnet -v
+
+# slab still has alice's position at idx 1; owner = owner_pda
+solana account 8Va4vKQk3r1ygrAjoJWHw2usREhwTAAq73jxsWKgjfso --url devnet
+```
+
+## Continue reading
+
+<CardGroup cols={2}>
+  <Card title="Adapter overview" icon="plug" href="/adapters/overview">
+    The general v1 ABI all adapters implement.
+  </Card>
+  <Card title="Privacy Model" icon="user-secret" href="/concepts/privacy-model">
+    What slab-state unlinkability does and doesn't give you.
+  </Card>
+</CardGroup>
