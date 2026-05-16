@@ -6,9 +6,15 @@ use crate::constants::{SEED_CONFIG, SEED_TOKEN, SEED_VAULT, VERSION_PREFIX};
 use crate::events::TokenWhitelisted;
 use crate::state::{PoolConfig, TokenConfig};
 
-// Token-2022 program ID — used to detect Token-2022 mints at registration so
-// we know when to walk the extension allowlist.
-const TOKEN_2022_PROGRAM_ID: Pubkey = anchor_spl::token_2022::ID;
+// Token-2022 program ID (`TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb`).
+// Used to detect Token-2022 mints at registration so we know when to walk
+// the extension allowlist. Hardcoded as a `const` because
+// `anchor_spl::token_2022::ID` is a `static`, which would require `let`
+// inside the handler — we want a free-standing constant.
+const TOKEN_2022_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
+    0x06, 0xdd, 0xf6, 0xe1, 0xee, 0x75, 0x8f, 0xde, 0x18, 0x42, 0x5d, 0xbc, 0xe4, 0x6c, 0xcd, 0xda,
+    0xb6, 0x1a, 0xfc, 0x4d, 0x83, 0xb9, 0x0d, 0x27, 0xfe, 0xbd, 0xf9, 0x28, 0xd8, 0xa1, 0x8b, 0xfc,
+]);
 
 #[derive(Accounts)]
 pub struct AddTokenConfig<'info> {
