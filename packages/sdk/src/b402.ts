@@ -1275,29 +1275,13 @@ export class B402Solana {
       [new TextEncoder().encode('b402/v1'), new TextEncoder().encode('adapter')],
       adapterProgramId,
     )[0];
-    // Detect the IN-mint's token program. The pool's `Interface<TokenInterface>`
-    // requires the program account passed at the token_program slot to match
-    // the program that actually owns the in_vault. Also drives the
-    // feeAtaSentinel ATA derivation (Token-2022 ATAs use different seeds).
+    // Detect IN and OUT mint token programs independently. Pool's
+    // AdaptExecute now carries both `token_program` (IN-side) and
+    // `token_program_out` (OUT-side), so cross-program swaps work end-to-end
+    // (pump.fun Token-2022 ↔ classic SPL wSOL, USDC, etc.). For same-program
+    // swaps, both slots resolve to the same program — no behavioral change.
     const inMintTokenProgram = await tokenProgramOf(this.connection, req.inMint);
     const outMintTokenProgram = await tokenProgramOf(this.connection, req.outMint);
-    if (!inMintTokenProgram.equals(outMintTokenProgram)) {
-      // KNOWN LIMITATION: the pool's `adapt_execute` passes ONE token_program
-      // slot through to the adapter, which in turn uses it for the OUT
-      // transfer (adapter_out_ta → out_vault). When in/out mints sit on
-      // different token programs the OUT side rejects the transfer (account
-      // owner mismatch). Lifting this requires a `token_program_out` slot in
-      // both the pool's AdaptExecute and the adapter's Execute<'info>, which
-      // is a bigger wire-format change deferred to the follow-up PR.
-      // Shield + unshield of either program work today; cross-program swap
-      // does NOT.
-      throw new B402Error(
-        B402ErrorCode.InvalidConfig,
-        `privateSwap: cross-token-program swap not supported yet — ` +
-          `in=${inMintTokenProgram.toBase58()} out=${outMintTokenProgram.toBase58()}. ` +
-          `Workaround: unshield to a public ATA, swap on Jupiter directly, then shield the proceeds.`,
-      );
-    }
     const feeAtaSentinel = await getAssociatedTokenAddress(
       req.inMint,
       relayerPubkey,
@@ -1421,6 +1405,11 @@ export class B402Solana {
       // and in_vault → relayer_fee_ta transfers. Slot order matches pool's
       // `AdaptExecute<'info>` after `out_vault`, before `tree_state`.
       { pubkey: req.inMint, isSigner: false, isWritable: false },
+      // `mint_out` slot — pool forwards this to the adapter so the OUT-side
+      // transfer (adapter_out_ta → out_vault) can use `transfer_checked`
+      // with the correct decimals. Slot order matches pool's
+      // `AdaptExecute<'info>` immediately after `mint_in`.
+      { pubkey: req.outMint, isSigner: false, isWritable: false },
       { pubkey: treeStatePda(poolProgramId), isSigner: false, isWritable: true },
       { pubkey: new PublicKey(this.programIds.b402VerifierAdapt), isSigner: false, isWritable: false },
       { pubkey: adapterProgramId, isSigner: false, isWritable: false },
@@ -1452,9 +1441,15 @@ export class B402Solana {
         : []),
       // Pool's `token_program` slot is `Interface<TokenInterface>` —
       // must reflect the program that owns `in_vault` (i.e. the IN mint's
-      // owner program). Out mint can be a different program; the OUT
-      // transfer happens in the adapter, not pool.
+      // owner program). Pool uses it for the in_vault → adapter_in_ta
+      // transfer_checked CPI.
       { pubkey: inMintTokenProgram, isSigner: false, isWritable: false },
+      // `token_program_out` slot — addresses the OUT vault's owning program.
+      // Pool forwards this to the adapter so adapter_out_ta → out_vault uses
+      // the correct token program when IN and OUT live on different programs
+      // (Token-2022 pump.fun mint → classic SPL wSOL, or vice versa). For
+      // same-program swaps this equals `inMintTokenProgram`.
+      { pubkey: outMintTokenProgram, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       // remaining_accounts: inline nullifier block (Phase 7 only) then
       // adapter-specific entries. Pool's adapt_execute handler forwards
