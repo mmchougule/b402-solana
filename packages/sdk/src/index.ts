@@ -118,6 +118,10 @@ export {
   poolConfigPda, treeStatePda, tokenConfigPda, vaultPda,
   adapterRegistryPda, treasuryPda, nullifierShardPda, shardPrefix,
 } from './programs/pda.js';
+export {
+  tokenProgramOf,
+  tokenProgramOfOwner,
+} from './programs/token-program.js';
 export { fetchTreeState, decodeTreeState, type TreeStateView } from './programs/tree-state.js';
 export {
   instructionDiscriminator, eventDiscriminator,

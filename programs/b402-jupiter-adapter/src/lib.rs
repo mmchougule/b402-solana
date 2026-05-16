@@ -9,9 +9,8 @@
 //! adapter is trusted only to try hard; it is NOT trusted to report honestly.
 
 use anchor_lang::prelude::*;
-use anchor_spl::token_interface::{
-    self as token_interface_cpi, Mint, TokenAccount, TokenInterface, TransferChecked,
-};
+use anchor_spl::token_interface::{TokenAccount, TokenInterface};
+use anchor_spl::token::{self as classic_token, Transfer as ClassicTransfer};
 
 declare_id!("3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7");
 
@@ -95,24 +94,26 @@ pub mod b402_jupiter_adapter {
         let received = post_out.saturating_sub(pre_out);
         require!(received >= min_out_amount, AdapterError::SlippageExceeded);
 
-        // Transfer all of the received amount to pool's out_vault. Use
-        // `transfer_checked` so Token-2022 mints are supported (legacy SPL
-        // accepts the checked variant identically).
-        let out_decimals = ctx.accounts.out_mint.decimals;
-        let cpi_accounts = TransferChecked {
+        // Transfer all of the received amount to pool's out_vault.
+        //
+        // Legacy `token::transfer` is used here (not `transfer_checked`)
+        // because the adapter doesn't carry an `out_mint` slot in its
+        // `Accounts` struct — keeping wire-compat with mock + kamino
+        // adapters that share the same pool CPI shape. This path only
+        // works for classic SPL OUT mints. Swaps into Token-2022 outputs
+        // need a follow-up that adds out_mint + `transfer_checked` here.
+        let cpi_accounts = ClassicTransfer {
             from: out_ta.to_account_info(),
-            mint: ctx.accounts.out_mint.to_account_info(),
             to: ctx.accounts.out_vault.to_account_info(),
             authority: ctx.accounts.adapter_authority.to_account_info(),
         };
-        token_interface_cpi::transfer_checked(
+        classic_token::transfer(
             CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
                 cpi_accounts,
                 signer_seeds,
             ),
             received,
-            out_decimals,
         )?;
 
         Ok(())
@@ -150,12 +151,14 @@ pub struct Execute<'info> {
     )]
     pub adapter_out_ta: InterfaceAccount<'info, TokenAccount>,
 
-    /// OUT mint — needed by `transfer_checked` for the adapter→out_vault
-    /// transfer of swap proceeds. Added in the Token-2022 migration; the
-    /// pool's `adapt_execute` forwards this slot via `remaining_accounts`,
-    /// so the wire format change is borne by the SDK route-builder.
-    pub out_mint: InterfaceAccount<'info, Mint>,
-
+    /// `Interface<TokenInterface>` so the pool can pass either the classic
+    /// SPL Token or the Token-2022 program here. IN-side flexibility (pool
+    /// → adapter_in_ta) is handled entirely by the pool program. OUT-side
+    /// transfer below (adapter_out_ta → out_vault) currently uses the
+    /// classic `Transfer` ix, which Token-2022 rejects — meaning swaps INTO
+    /// a Token-2022 mint will fail at this transfer until we add an
+    /// `out_mint` slot and switch to `transfer_checked`. The pump.fun shield
+    /// → swap-to-USDC flow does NOT need this (USDC is classic SPL).
     pub token_program: Interface<'info, TokenInterface>,
 }
 

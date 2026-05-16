@@ -22,8 +22,9 @@ import {
   Transaction, TransactionInstruction,
   TransactionMessage, VersionedTransaction,
 } from '@solana/web3.js';
-import { TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import { randomBytes } from '@noble/hashes/utils';
+
+import { tokenProgramOf } from '../programs/token-program.js';
 
 import {
   FR_MODULUS, frToLe, leToFrReduced, u64ToFrLe,
@@ -231,6 +232,13 @@ export async function shield(params: ShieldParams): Promise<ShieldResult> {
     new Uint8Array([0b10]),
   );
 
+  // Detect the mint's owning token program (classic SPL vs Token-2022).
+  // The pool's `Interface<TokenInterface>` slot accepts either, but the
+  // account passed in the meta MUST be the program that owns `mint` —
+  // anchor's interface accounts pin token_program to the account's actual
+  // owner.
+  const tokenProgramId = await tokenProgramOf(connection, mint);
+
   const shieldIx = new TransactionInstruction({
     programId: poolProgramId,
     keys: [
@@ -239,10 +247,14 @@ export async function shield(params: ShieldParams): Promise<ShieldResult> {
       { pubkey: depositorAta,            isSigner: false, isWritable: true  },
       { pubkey: tokenConfigPda(poolProgramId, mint), isSigner: false, isWritable: false },
       { pubkey: vaultPda(poolProgramId, mint),       isSigner: false, isWritable: true  },
+      // `mint` slot added with the Token-2022 migration — required by the
+      // pool's new `transfer_checked` CPI. Slot order: after `vault`,
+      // before `tree_state`. Wire-breaking: SDK >= 0.0.28 ↔ pool >= 2026-05.
+      { pubkey: mint,                                isSigner: false, isWritable: false },
       { pubkey: treeStatePda(poolProgramId),         isSigner: false, isWritable: true  },
       { pubkey: poolConfigPda(poolProgramId),        isSigner: false, isWritable: false },
       { pubkey: verifierProgramId,                   isSigner: false, isWritable: false },
-      { pubkey: TOKEN_PROGRAM_ID,                    isSigner: false, isWritable: false },
+      { pubkey: tokenProgramId,                      isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId,             isSigner: false, isWritable: false },
     ],
     data: Buffer.from(ixData),

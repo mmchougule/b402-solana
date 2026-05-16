@@ -35,6 +35,7 @@ import {
   getAssociatedTokenAddress,
   createAssociatedTokenAccountInstruction,
 } from '@solana/spl-token';
+import { tokenProgramOf } from './programs/token-program.js';
 import { keccak_256 } from '@noble/hashes/sha3';
 // Browser-safe randomBytes. crypto.getRandomValues is in WebCrypto (browser
 // AND Node 18+ via globalThis.crypto), so we don't need node:crypto here.
@@ -102,13 +103,14 @@ import { commitmentHash, feeBindHash, nullifierHash, poseidonTagged } from './po
 import { computeExcessCommitment, deriveExcessRandom } from './excess.js';
 import { encryptNote } from './note-encryption.js';
 import { B402Error, B402ErrorCode } from './errors.js';
-import * as nodeOs from 'node:os';
-import * as nodePath from 'node:path';
+import * as nodeOs from 'os';
+import * as nodePath from 'path';
 import {
   B402_NULLIFIER_PROGRAM_ID,
   buildCreateNullifierIx,
   buildNullifierCpiAccounts,
   buildNullifierCpiPayload,
+  deriveNullifierAddress,
   getValidityProofForNullifier,
 } from './light-nullifier.js';
 
@@ -143,6 +145,16 @@ export interface B402SolanaConfig {
    *  so multiple wallets coexist). Plaintext on disk — same threat model
    *  as the Solana keypair file the wallet was derived from. */
   notesPersistDir?: string;
+  /** Pluggable note persistence for consumers that don't want filesystem
+   *  (bots → Postgres, browsers → IndexedDB, etc.). Mutually exclusive
+   *  with `notesPersistDir`; if both are set, this wins. The SDK
+   *  round-trips one opaque JSON string per viewing-pub; storage is
+   *  fully under your control. Async save errors are caught + logged,
+   *  in-memory state is never rolled back. */
+  notesPersistence?: {
+    load: () => Promise<string | null>;
+    save: (data: string) => Promise<void>;
+  };
   /** HTTP relayer URL. When set, unshield + privateSwap (and other ops with
    *  no required user signature) route through it — the on-chain fee payer
    *  becomes the relayer's wallet, not the user's. shield still signs locally
@@ -381,6 +393,7 @@ export class B402Solana {
    *  this with a clear error. */
   readonly relayer: Keypair | null;
   readonly notesPersistDir: string | undefined;
+  readonly notesPersistence: B402SolanaConfig['notesPersistence'] | undefined;
   readonly relayerHttpUrl: string | undefined;
   readonly relayerApiKey: string | undefined;
   readonly inlineCpiNullifier: boolean;
@@ -402,6 +415,16 @@ export class B402Solana {
    *  reverse-resolves Fr from prior interactions; falls back to opaque
    *  `unknown:<12hex>` label for never-seen mints. */
   private _mintRegistry: Map<string, PublicKey> = new Map();
+
+  /** Per-leafIndex cache of spent-check results. Short TTL so rapid
+   *  re-renders (Wallet → Buy picker → Sell picker within seconds) don't
+   *  hammer Photon, while still catching spends that happen between
+   *  views. Keyed by leafIndex decimal string (leafIndex is bigint). */
+  private _spentCache: Map<string, { spent: boolean; at: number }> = new Map();
+  /** Lazily-created Photon (stateless.js) RPC client used by
+   *  `_filterUnspent`. Reuses `this.connection.rpcEndpoint` — Helius and
+   *  other Photon-compat providers co-locate the indexer on the same URL. */
+  private _photonRpc: unknown | null = null;
 
   constructor(config: B402SolanaConfig) {
     this.cluster = config.cluster;
@@ -448,7 +471,12 @@ export class B402Solana {
     // call from O(30 RPC calls) into O(1). Pass `notesPersistDir: ''` to
     // disable (e.g. ephemeral CI). Skipped in non-Node envs where `os` is
     // unavailable.
-    if (config.notesPersistDir !== undefined) {
+    // Pluggable persistence wins over filesystem if both are set — bots
+    // that wire Postgres don't want a stray ~/.b402ai/notes file mirror.
+    this.notesPersistence = config.notesPersistence;
+    if (config.notesPersistence) {
+      this.notesPersistDir = undefined;
+    } else if (config.notesPersistDir !== undefined) {
       this.notesPersistDir = config.notesPersistDir || undefined;
     } else {
       try {
@@ -549,7 +577,12 @@ export class B402Solana {
         connection: this.connection,
         poolProgramId: new PublicKey(this.programIds.b402Pool),
         wallet: this._wallet,
-        ...(this.notesPersistDir ? { persist: { dir: this.notesPersistDir } } : {}),
+        ...(this.indexer ? { indexer: this.indexer } : {}),
+        ...(this.notesPersistence
+          ? { persist: { load: this.notesPersistence.load, save: this.notesPersistence.save } }
+          : this.notesPersistDir
+            ? { persist: { dir: this.notesPersistDir } }
+            : {}),
       });
       await this._notes.start();
     }
@@ -604,11 +637,16 @@ export class B402Solana {
   }> {
     await this.ready();
     const owner = this.signer.publicKey;
-    const [lamports, tokenAccounts] = await Promise.all([
+    // Enumerate ATAs across BOTH classic SPL and Token-2022. Without the
+    // Token-2022 query, pump.fun token balances stay invisible to the
+    // walletBalance() caller.
+    const { TOKEN_2022_PROGRAM_ID } = await import('@solana/spl-token');
+    const [lamports, classicTokens, tk2022Tokens] = await Promise.all([
       this.connection.getBalance(owner, 'confirmed'),
       this.connection.getParsedTokenAccountsByOwner(owner, { programId: TOKEN_PROGRAM_ID }, 'confirmed'),
+      this.connection.getParsedTokenAccountsByOwner(owner, { programId: TOKEN_2022_PROGRAM_ID }, 'confirmed'),
     ]);
-    const tokens = tokenAccounts.value.map(({ pubkey, account }) => {
+    const flatten = (rs: typeof classicTokens) => rs.value.map(({ pubkey, account }) => {
       const info = (account.data as { parsed?: { info?: { mint?: string; tokenAmount?: { amount?: string; decimals?: number } } } }).parsed?.info ?? {};
       return {
         mint: info.mint ?? '',
@@ -616,7 +654,9 @@ export class B402Solana {
         decimals: info.tokenAmount?.decimals ?? 0,
         tokenAccount: pubkey.toBase58(),
       };
-    }).filter((t) => t.mint && t.amount !== '0');
+    });
+    const tokens = [...flatten(classicTokens), ...flatten(tk2022Tokens)]
+      .filter((t) => t.mint && t.amount !== '0');
     return {
       walletPubkey: owner.toBase58(),
       cluster: this.cluster,
@@ -647,12 +687,21 @@ export class B402Solana {
       try { this.learnMint(new PublicKey(m)); } catch {}
     }
     // 2. User's own token accounts — anyone they hold a balance of.
+    //    Query BOTH classic SPL and Token-2022 ATAs so pump.fun / Token-2022
+    //    mints land in the registry the same way classic mints do.
     try {
-      const r = await this.connection.getTokenAccountsByOwner(
-        this.signer.publicKey,
-        { programId: TOKEN_PROGRAM_ID },
-      );
-      for (const acc of r.value) {
+      const { TOKEN_2022_PROGRAM_ID } = await import('@solana/spl-token');
+      const [classic, tk2022] = await Promise.all([
+        this.connection.getTokenAccountsByOwner(
+          this.signer.publicKey,
+          { programId: TOKEN_PROGRAM_ID },
+        ),
+        this.connection.getTokenAccountsByOwner(
+          this.signer.publicKey,
+          { programId: TOKEN_2022_PROGRAM_ID },
+        ),
+      ]);
+      for (const acc of [...classic.value, ...tk2022.value]) {
         // SPL Token account layout: mint at offset 0, 32 bytes.
         const mint = new PublicKey(acc.account.data.slice(0, 32));
         this.learnMint(mint);
@@ -673,9 +722,15 @@ export class B402Solana {
       );
     }
 
+    // Detect Token-2022 vs classic SPL once; ATAs differ between the two
+    // (different program seeds), so passing the wrong token program ID here
+    // hands back a non-existent address.
+    const mintTokenProgram = await tokenProgramOf(this.connection, req.mint);
     const depositorAta = await getAssociatedTokenAddress(
       req.mint,
       this.signer.publicKey,
+      false,
+      mintTokenProgram,
     );
 
     // Resolve cluster-default ALT for shield. Required when publishing
@@ -791,8 +846,17 @@ export class B402Solana {
       );
     }
 
+    // Token-2022 ATAs are derived using the Token-2022 program in the
+    // PDA seeds — passing TOKEN_PROGRAM_ID for a Token-2022 mint hands back
+    // a non-existent address.
+    const mintTokenProgram = await tokenProgramOf(this.connection, mint);
     const recipientAta =
-      req.recipientAta ?? (await getAssociatedTokenAddress(mint, req.to));
+      req.recipientAta ?? (await getAssociatedTokenAddress(
+        mint,
+        req.to,
+        false,
+        mintTokenProgram,
+      ));
 
     // Ensure the recipient ATA exists — pool's unshield enforces it must be
     // initialized before the transfer. Idempotent: skips if already there.
@@ -804,6 +868,7 @@ export class B402Solana {
         recipientAta,
         req.to,
         mint,
+        mintTokenProgram,
       );
       await sendAndConfirmTransaction(
         this.connection,
@@ -1210,7 +1275,35 @@ export class B402Solana {
       [new TextEncoder().encode('b402/v1'), new TextEncoder().encode('adapter')],
       adapterProgramId,
     )[0];
-    const feeAtaSentinel = await getAssociatedTokenAddress(req.inMint, relayerPubkey);
+    // Detect the IN-mint's token program. The pool's `Interface<TokenInterface>`
+    // requires the program account passed at the token_program slot to match
+    // the program that actually owns the in_vault. Also drives the
+    // feeAtaSentinel ATA derivation (Token-2022 ATAs use different seeds).
+    const inMintTokenProgram = await tokenProgramOf(this.connection, req.inMint);
+    const outMintTokenProgram = await tokenProgramOf(this.connection, req.outMint);
+    if (!inMintTokenProgram.equals(outMintTokenProgram)) {
+      // KNOWN LIMITATION: the pool's `adapt_execute` passes ONE token_program
+      // slot through to the adapter, which in turn uses it for the OUT
+      // transfer (adapter_out_ta → out_vault). When in/out mints sit on
+      // different token programs the OUT side rejects the transfer (account
+      // owner mismatch). Lifting this requires a `token_program_out` slot in
+      // both the pool's AdaptExecute and the adapter's Execute<'info>, which
+      // is a bigger wire-format change deferred to the follow-up PR.
+      // Shield + unshield of either program work today; cross-program swap
+      // does NOT.
+      throw new B402Error(
+        B402ErrorCode.InvalidConfig,
+        `privateSwap: cross-token-program swap not supported yet — ` +
+          `in=${inMintTokenProgram.toBase58()} out=${outMintTokenProgram.toBase58()}. ` +
+          `Workaround: unshield to a public ATA, swap on Jupiter directly, then shield the proceeds.`,
+      );
+    }
+    const feeAtaSentinel = await getAssociatedTokenAddress(
+      req.inMint,
+      relayerPubkey,
+      false,
+      inMintTokenProgram,
+    );
 
     // Resolve effective inline-CPI mode (per-call > class > default false).
     const inlineNullifierCpi = req.inlineCpiNullifier ?? this.inlineCpiNullifier;
@@ -1323,6 +1416,11 @@ export class B402Solana {
       { pubkey: tokenConfigPda(poolProgramId, req.outMint), isSigner: false, isWritable: false },
       { pubkey: vaultPda(poolProgramId, req.inMint), isSigner: false, isWritable: true },
       { pubkey: vaultPda(poolProgramId, req.outMint), isSigner: false, isWritable: true },
+      // `mint_in` slot added in the Token-2022 migration — required by the
+      // pool's new `transfer_checked` CPI on the in_vault → adapter_in_ta
+      // and in_vault → relayer_fee_ta transfers. Slot order matches pool's
+      // `AdaptExecute<'info>` after `out_vault`, before `tree_state`.
+      { pubkey: req.inMint, isSigner: false, isWritable: false },
       { pubkey: treeStatePda(poolProgramId), isSigner: false, isWritable: true },
       { pubkey: new PublicKey(this.programIds.b402VerifierAdapt), isSigner: false, isWritable: false },
       { pubkey: adapterProgramId, isSigner: false, isWritable: false },
@@ -1352,7 +1450,11 @@ export class B402Solana {
             isWritable: true,
           }]
         : []),
-      { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+      // Pool's `token_program` slot is `Interface<TokenInterface>` —
+      // must reflect the program that owns `in_vault` (i.e. the IN mint's
+      // owner program). Out mint can be a different program; the OUT
+      // transfer happens in the adapter, not pool.
+      { pubkey: inMintTokenProgram, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
       // remaining_accounts: inline nullifier block (Phase 7 only) then
       // adapter-specific entries. Pool's adapt_execute handler forwards
@@ -1588,8 +1690,17 @@ export class B402Solana {
       [new TextEncoder().encode('b402/v1'), new TextEncoder().encode('adapter')],
       adapterProgramId,
     )[0];
-    const adapterInTa = await getAssociatedTokenAddress(req.inMint, adapterAuthority, true);
-    const adapterOutTa = await getAssociatedTokenAddress(req.outMint, adapterAuthority, true);
+    // ATA seeds differ between classic SPL Token and Token-2022. Pass the
+    // owning program for each mint so adapter scratch ATAs resolve to the
+    // address the adapter program will create / re-use.
+    const inMintTokenProgram = await tokenProgramOf(this.connection, req.inMint);
+    const outMintTokenProgram = await tokenProgramOf(this.connection, req.outMint);
+    const adapterInTa = await getAssociatedTokenAddress(
+      req.inMint, adapterAuthority, true, inMintTokenProgram,
+    );
+    const adapterOutTa = await getAssociatedTokenAddress(
+      req.outMint, adapterAuthority, true, outMintTokenProgram,
+    );
 
     const altStr =
       this.cluster === 'mainnet' ? B402_ALT_MAINNET :
@@ -1941,15 +2052,86 @@ export class B402Solana {
    * stale (multi-process, fresh-machine) since shield/unshield already
    * update state locally on every call.
    */
+  /**
+   * Cross-check `notes` against the on-chain nullifier set and drop any
+   * that are already spent. Local `markSpent` only fires when the SDK
+   * itself orchestrated the spend — notes spent in a prior process, by a
+   * different SDK instance with the same viewing key, or by the relayer
+   * outside this client all look spendable locally. Without this probe,
+   * those notes leak into pickers and the swap then fails with
+   * `Address ... already exists` from Photon at proof-fetch time.
+   *
+   * **Probe path: Light Protocol's batch address tree, via Photon's
+   * `getMultipleNewAddressProofs`.** This is the same tree
+   * `getValidityProofForNullifier` reads at swap time — `getCompressedAccount`
+   * would NOT work here because nullifier insertions live in the address
+   * tree (uniqueness index), not the state tree (account data store). For
+   * each note we derive the nullifier compressed-account address with the
+   * same helper the swap path uses, then ask Photon for a non-inclusion
+   * proof. Proof returned ⇒ address absent ⇒ note unspent. Throws with
+   * `already exists` ⇒ address present ⇒ note spent.
+   *
+   * Probes in parallel with a 30s per-leaf cache so back-to-back picker
+   * renders don't refan the same queries. Photon transient failures are
+   * non-fatal: we fall back to keeping the note (the swap-time probe
+   * still catches it) rather than blocking the UI on an outage.
+   */
+  private async _filterUnspent(notes: SpendableNote[]): Promise<SpendableNote[]> {
+    if (notes.length === 0) return notes;
+    if (!this._wallet) return notes;
+    const now = Date.now();
+    const TTL_MS = 30_000;
+    // Lazy-create the Photon RPC from the same endpoint the swap path uses.
+    if (!this._photonRpc) {
+      try {
+        const { createRpc } = await import('@lightprotocol/stateless.js');
+        this._photonRpc = createRpc(this.connection.rpcEndpoint, this.connection.rpcEndpoint);
+      } catch {
+        return notes;
+      }
+    }
+    const rpc: any = this._photonRpc;
+    const { bn } = await import('@lightprotocol/stateless.js');
+    const checks = await Promise.all(
+      notes.map(async (n) => {
+        const key = n.leafIndex.toString();
+        const cached = this._spentCache.get(key);
+        if (cached && now - cached.at < TTL_MS) return { n, spent: cached.spent };
+        try {
+          const nh = await nullifierHash(this._wallet!.spendingPriv, n.leafIndex);
+          const nhLe = bigintToLe32(nh);
+          const address = deriveNullifierAddress(nhLe);
+          // getMultipleNewAddressProofs returns non-inclusion proofs from
+          // the batch address tree. Success ⇒ address absent ⇒ unspent.
+          // Throws with "already exists" ⇒ address present ⇒ spent.
+          await rpc.getMultipleNewAddressProofs([bn(address.toBytes())]);
+          this._spentCache.set(key, { spent: false, at: now });
+          return { n, spent: false };
+        } catch (e: any) {
+          const msg = String(e?.message ?? e);
+          if (/already exists/i.test(msg)) {
+            this._spentCache.set(key, { spent: true, at: now });
+            this._notes!.markSpent(n.commitment);
+            return { n, spent: true };
+          }
+          // Transient Photon error — keep the note; swap-time probe catches.
+          return { n, spent: false };
+        }
+      }),
+    );
+    return checks.filter((c) => !c.spent).map((c) => c.n);
+  }
+
   async holdings(opts: { mint?: PublicKey; refresh?: boolean } = {}): Promise<{
     holdings: Array<{ id: string; mint: string; amount: string }>;
   }> {
     await this.ready();
     if (opts.refresh === true) await this._notes!.backfill({ limit: 30 });
     const filterFr = opts.mint ? leToFrReduced(opts.mint.toBytes()) : null;
-    const notes = filterFr != null
+    const local = filterFr != null
       ? this._notes!.getSpendable(filterFr)
       : this._notes!.getAllSpendable();
+    const notes = await this._filterUnspent(local);
     return {
       holdings: notes.map((n) => ({
         id: noteId(n.commitment),
@@ -1980,9 +2162,11 @@ export class B402Solana {
     if (opts.refresh === true) await this._notes!.backfill({ limit: 30 });
     const [publicSide, privateSide] = await Promise.all([
       this.walletBalance(),
-      Promise.resolve().then(() => {
+      (async () => {
+        const local = this._notes!.getAllSpendable();
+        const notes = await this._filterUnspent(local);
         const agg = new Map<bigint, { amount: bigint; count: number }>();
-        for (const n of this._notes!.getAllSpendable()) {
+        for (const n of notes) {
           const cur = agg.get(n.tokenMint) ?? { amount: 0n, count: 0 };
           cur.amount += n.value;
           cur.count += 1;
@@ -1997,7 +2181,7 @@ export class B402Solana {
             depositCount: v.count,
           };
         });
-      }),
+      })(),
     ]);
     const explorer = (kind: 'account', addr: string) =>
       `https://solscan.io/${kind}/${addr}${this.cluster === 'devnet' ? '?cluster=devnet' : ''}`;
@@ -2033,9 +2217,10 @@ export class B402Solana {
     if (opts.refresh === true) await this._notes!.backfill({ limit: 30 });
     const filterFr = opts.mint ? leToFrReduced(opts.mint.toBytes()) : null;
     const agg = new Map<bigint, { amount: bigint; count: number }>();
-    const notes = filterFr != null
+    const local = filterFr != null
       ? this._notes!.getSpendable(filterFr)
       : this._notes!.getAllSpendable();
+    const notes = await this._filterUnspent(local);
     for (const n of notes) {
       const cur = agg.get(n.tokenMint) ?? { amount: 0n, count: 0 };
       cur.amount += n.value;

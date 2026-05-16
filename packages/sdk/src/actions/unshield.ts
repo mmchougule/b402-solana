@@ -19,7 +19,7 @@ import {
   ComputeBudgetProgram, Connection, Keypair, PublicKey, SystemProgram,
   Transaction, TransactionInstruction, TransactionMessage, VersionedTransaction,
 } from '@solana/web3.js';
-import { TOKEN_PROGRAM_ID } from '@solana/spl-token';
+import { tokenProgramOf } from '../programs/token-program.js';
 
 import {
   TRANSACT_PUBLIC_INPUT_COUNT, domainTag, leToFrReduced,
@@ -263,6 +263,11 @@ export async function unshield(params: UnshieldParams): Promise<UnshieldResult> 
   // constraint stays so legacy clients keep working). To keep the SDK
   // single-pathed for the named accounts, we leave the sysvar there in
   // both modes; the inline-mode handler simply doesn't read it.
+  // Resolve the mint's token program — pool's `Interface<TokenInterface>`
+  // slot now requires the correct program for both classic SPL and
+  // Token-2022 mints. See programs/token-program.ts.
+  const tokenProgramId = await tokenProgramOf(connection, mint);
+
   const baseKeys = [
     { pubkey: relayerPubkey,                    isSigner: true,  isWritable: true  },
     { pubkey: poolConfigPda(poolProgramId),     isSigner: false, isWritable: false },
@@ -270,10 +275,13 @@ export async function unshield(params: UnshieldParams): Promise<UnshieldResult> 
     { pubkey: vaultPda(poolProgramId, mint),    isSigner: false, isWritable: true  },
     { pubkey: recipientTokenAccount,            isSigner: false, isWritable: true  },
     { pubkey: recipientTokenAccount,            isSigner: false, isWritable: true  }, // relayer_fee_token_account; reuse when fee=0
+    // `mint` slot added with the Token-2022 migration. Slot order: after
+    // relayer_fee_token_account, before tree_state.
+    { pubkey: mint,                             isSigner: false, isWritable: false },
     { pubkey: treeStatePda(poolProgramId),      isSigner: false, isWritable: true  },
     { pubkey: verifierProgramId,                isSigner: false, isWritable: false },
     { pubkey: SYSVAR_INSTRUCTIONS,              isSigner: false, isWritable: false },
-    { pubkey: TOKEN_PROGRAM_ID,                 isSigner: false, isWritable: false },
+    { pubkey: tokenProgramId,                   isSigner: false, isWritable: false },
     { pubkey: SystemProgram.programId,          isSigner: false, isWritable: false },
   ];
   // In inline mode, append the b402_nullifier program + its 10 accounts to
