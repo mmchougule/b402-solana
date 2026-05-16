@@ -22,6 +22,10 @@ anchor-lang.workspace = true
 # already migrated to `Interface<TokenInterface>` — the adapter must follow so
 # the CPI ix's token_program slot matches the on-chain vault owner.
 anchor-spl = { workspace = true, features = ["token_2022"] }
+# Need `spl_token_2022::onchain::invoke_transfer_checked` for transferHook-
+# aware OUT transfers (adapter_out_ta → out_vault). Same version pin as the
+# pool crate so all CPI byte shapes match.
+spl-token-2022 = "3.0.5"
 indexmap = { version = "=2.9.0" }
 
 [lints]

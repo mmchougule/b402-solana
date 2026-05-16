@@ -33,8 +33,8 @@ pub mod b402_jupiter_adapter {
     ///   [8..N]      = Jupiter-V6 route instruction data (opaque, forwarded)
     ///
     /// `remaining_accounts` carry all the Jupiter-side accounts the route needs.
-    pub fn execute(
-        ctx: Context<Execute>,
+    pub fn execute<'info>(
+        ctx: Context<'_, '_, '_, 'info, Execute<'info>>,
         in_amount: u64,
         min_out_amount: u64,
         action_payload: Vec<u8>,
@@ -98,29 +98,23 @@ pub mod b402_jupiter_adapter {
 
         // Transfer the received amount back to pool's out_vault.
         //
-        // Cross-program swaps (e.g. Token-2022 pump.fun mint IN, classic SPL
-        // wSOL OUT — or vice versa) need the OUT-side transfer to address its
-        // own token program. The adapter now carries dedicated `out_mint` +
-        // `token_program_out` slots so the OUT CPI can invoke whichever program
-        // owns out_vault, independent of the IN program.
-        //
-        // `transfer_checked` instead of legacy `transfer`: required for
-        // Token-2022 vaults and harmless for classic SPL (it just adds a
-        // decimals assertion).
-        let cpi_accounts = TransferChecked {
-            from: out_ta.to_account_info(),
-            mint: ctx.accounts.out_mint.to_account_info(),
-            to: ctx.accounts.out_vault.to_account_info(),
-            authority: ctx.accounts.adapter_authority.to_account_info(),
-        };
-        token_interface_cpi::transfer_checked(
-            CpiContext::new_with_signer(
-                ctx.accounts.token_program_out.to_account_info(),
-                cpi_accounts,
-                signer_seeds,
-            ),
+        // Uses `spl_token_2022::onchain::invoke_transfer_checked` to handle:
+        //   1. Cross-program swaps (Token-2022 ↔ classic SPL) via the
+        //      separate `token_program_out` slot.
+        //   2. transferHook-bearing mints (e.g. pump.fun's $PUMP) — auto-
+        //      resolves the hook program + extra metas from
+        //      `ctx.remaining_accounts`. SDK populates these accounts.
+        //   3. Plain classic SPL mints — degrades to plain transfer_checked.
+        spl_token_2022::onchain::invoke_transfer_checked(
+            ctx.accounts.token_program_out.key,
+            out_ta.to_account_info(),
+            ctx.accounts.out_mint.to_account_info(),
+            ctx.accounts.out_vault.to_account_info(),
+            ctx.accounts.adapter_authority.to_account_info(),
+            ctx.remaining_accounts,
             received,
             ctx.accounts.out_mint.decimals,
+            signer_seeds,
         )?;
 
         Ok(())

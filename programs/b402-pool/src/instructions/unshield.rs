@@ -348,40 +348,40 @@ pub fn handler<'info>(
 
     let pool_config_info = ctx.accounts.pool_config.to_account_info();
     let decimals = ctx.accounts.mint.decimals;
-    let cpi_accounts = TransferChecked {
-        from: ctx.accounts.vault.to_account_info(),
-        mint: ctx.accounts.mint.to_account_info(),
-        to: ctx.accounts.recipient_token_account.to_account_info(),
-        authority: pool_config_info.clone(),
-    };
     let seeds: &[&[u8]] = &[VERSION_PREFIX, SEED_CONFIG, &[ctx.bumps.pool_config]];
-    let signer = &[seeds];
-    token_interface_cpi::transfer_checked(
-        CpiContext::new_with_signer(
-            ctx.accounts.token_program.to_account_info(),
-            cpi_accounts,
-            signer,
-        ),
+    let signer_seeds: &[&[&[u8]]] = &[seeds];
+
+    // Use spl_token_2022::onchain::invoke_transfer_checked instead of
+    // token_interface_cpi::transfer_checked so transferHook-bearing mints
+    // (e.g. pump.fun's $PUMP) get their hook program + extra metas resolved
+    // and CPI'd. For mints without a hook this degrades to plain
+    // transfer_checked. The hook accounts come from `ctx.remaining_accounts`;
+    // the SDK appends them after derivation from the mint's ExtraAccountMetaList
+    // PDA. See programs/sdk/src/programs/transfer-hook.ts.
+    spl_token_2022::onchain::invoke_transfer_checked(
+        ctx.accounts.token_program.key,
+        ctx.accounts.vault.to_account_info(),
+        ctx.accounts.mint.to_account_info(),
+        ctx.accounts.recipient_token_account.to_account_info(),
+        pool_config_info.clone(),
+        ctx.remaining_accounts,
         net,
         decimals,
+        signer_seeds,
     )?;
 
-    // Relayer fee transfer (if non-zero).
+    // Relayer fee transfer (if non-zero). Same mint, so same hook (if any).
     if pi.relayer_fee > 0 {
-        let cpi_fee = TransferChecked {
-            from: ctx.accounts.vault.to_account_info(),
-            mint: ctx.accounts.mint.to_account_info(),
-            to: ctx.accounts.relayer_fee_token_account.to_account_info(),
-            authority: pool_config_info.clone(),
-        };
-        token_interface_cpi::transfer_checked(
-            CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                cpi_fee,
-                signer,
-            ),
+        spl_token_2022::onchain::invoke_transfer_checked(
+            ctx.accounts.token_program.key,
+            ctx.accounts.vault.to_account_info(),
+            ctx.accounts.mint.to_account_info(),
+            ctx.accounts.relayer_fee_token_account.to_account_info(),
+            pool_config_info.clone(),
+            ctx.remaining_accounts,
             pi.relayer_fee,
             decimals,
+            signer_seeds,
         )?;
     }
 

@@ -49,7 +49,10 @@ pub mod b402_pool {
     // Heavy fields inside ShieldArgs/TransactArgs/UnshieldArgs are `Vec<u8>`
     // (heap-allocated by Borsh) to keep the BPF stack frame below 4 KiB.
     // Handlers assert the expected lengths on entry.
-    pub fn shield(ctx: Context<Shield>, args: ShieldArgs) -> Result<()> {
+    pub fn shield<'info>(
+        ctx: Context<'_, '_, '_, 'info, Shield<'info>>,
+        args: ShieldArgs,
+    ) -> Result<()> {
         instructions::shield::handler(ctx, args)
     }
 

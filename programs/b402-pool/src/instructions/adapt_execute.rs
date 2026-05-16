@@ -746,39 +746,36 @@ pub fn handler<'info>(
         { false }
     };
     let in_decimals = ctx.accounts.mint_in.decimals;
+    // transferHook-aware CPIs (see shield.rs / unshield.rs for the same pattern).
+    // Hook program + ExtraAccountMetaList accounts ride in ctx.remaining_accounts;
+    // the helper picks the ones matching this mint's hook program (if any).
     if !skip_input_transfer {
-        token_interface_cpi::transfer_checked(
-            CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                TransferChecked {
-                    from: ctx.accounts.in_vault.to_account_info(),
-                    mint: ctx.accounts.mint_in.to_account_info(),
-                    to: ctx.accounts.adapter_in_ta.to_account_info(),
-                    authority: pool_config_info.clone(),
-                },
-                signer,
-            ),
+        spl_token_2022::onchain::invoke_transfer_checked(
+            ctx.accounts.token_program.key,
+            ctx.accounts.in_vault.to_account_info(),
+            ctx.accounts.mint_in.to_account_info(),
+            ctx.accounts.adapter_in_ta.to_account_info(),
+            pool_config_info.clone(),
+            ctx.remaining_accounts,
             pi.public_amount_in,
             in_decimals,
+            signer,
         )?;
     }
 
     // Relayer fee transfer (in IN mint, from in_vault). Circuit binding via
     // pi.relayer_fee_bind = Poseidon(TAG_FEE_BIND, fee, recipient).
     if pi.relayer_fee > 0 {
-        token_interface_cpi::transfer_checked(
-            CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
-                TransferChecked {
-                    from: ctx.accounts.in_vault.to_account_info(),
-                    mint: ctx.accounts.mint_in.to_account_info(),
-                    to: ctx.accounts.relayer_fee_ta.to_account_info(),
-                    authority: pool_config_info.clone(),
-                },
-                signer,
-            ),
+        spl_token_2022::onchain::invoke_transfer_checked(
+            ctx.accounts.token_program.key,
+            ctx.accounts.in_vault.to_account_info(),
+            ctx.accounts.mint_in.to_account_info(),
+            ctx.accounts.relayer_fee_ta.to_account_info(),
+            pool_config_info.clone(),
+            ctx.remaining_accounts,
             pi.relayer_fee,
             in_decimals,
+            signer,
         )?;
     }
 

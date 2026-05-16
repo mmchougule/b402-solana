@@ -113,7 +113,10 @@ pub struct Shield<'info> {
 }
 
 #[inline(never)]
-pub fn handler(ctx: Context<Shield>, args: ShieldArgs) -> Result<()> {
+pub fn handler<'info>(
+    ctx: Context<'_, '_, '_, 'info, Shield<'info>>,
+    args: ShieldArgs,
+) -> Result<()> {
     require!(args.proof.len() == 256, PoolError::InvalidInstructionData);
     // Accept 0..=2 encrypted_notes. Missing entries emit zero ciphertext on
     // chain; receiver-discovery for those notes happens via off-chain channel.
@@ -186,23 +189,30 @@ pub fn handler(ctx: Context<Shield>, args: ShieldArgs) -> Result<()> {
 
     // Transfer tokens from depositor to vault.
     //
-    // `transfer_checked` is mandatory for Token-2022 (the legacy `transfer`
-    // ix is deprecated there) and works identically against the classic SPL
-    // Token program — both inspect the `mint` account's decimals to confirm
-    // the caller intended this exact mint, blocking confusion attacks where
-    // a malicious account in the `from`/`to` slot points at a different mint
-    // with the same amount.
+    // `spl_token_2022::onchain::invoke_transfer_checked` handles:
+    //   1. Classic SPL Token mints — equivalent to `transfer_checked`.
+    //   2. Token-2022 mints — same, plus auto-resolves transferHook extension
+    //      by reading the mint's `transfer_hook` extension to find the hook
+    //      program, deriving the `ExtraAccountMetaList` PDA, and pulling the
+    //      hook's required extra accounts from `additional_accounts` (here:
+    //      ctx.remaining_accounts).
+    //   3. `transfer_checked` validates decimals to block mint-confusion attacks.
+    //
+    // For mints with transferHook, the SDK appends the hook program + its
+    // declared extra metas to `remaining_accounts` so this call finds them.
+    // For mints without a hook, remaining_accounts is empty and the helper
+    // degrades to plain transfer_checked.
     let decimals = ctx.accounts.mint.decimals;
-    let cpi_accounts = TransferChecked {
-        from: ctx.accounts.depositor_token_account.to_account_info(),
-        mint: ctx.accounts.mint.to_account_info(),
-        to: ctx.accounts.vault.to_account_info(),
-        authority: ctx.accounts.depositor.to_account_info(),
-    };
-    token_interface_cpi::transfer_checked(
-        CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_accounts),
+    spl_token_2022::onchain::invoke_transfer_checked(
+        ctx.accounts.token_program.key,
+        ctx.accounts.depositor_token_account.to_account_info(),
+        ctx.accounts.mint.to_account_info(),
+        ctx.accounts.vault.to_account_info(),
+        ctx.accounts.depositor.to_account_info(),
+        ctx.remaining_accounts,
         pi.public_amount_in,
         decimals,
+        &[], // depositor signs directly; no PDA seeds needed.
     )?;
 
     // Append non-dummy commitments to the tree and emit events.

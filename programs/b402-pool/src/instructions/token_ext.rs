@@ -80,16 +80,32 @@ pub fn enforce_extension_allowlist(mint_data: &[u8]) -> Result<()> {
             | ExtensionType::GroupPointer
             | ExtensionType::TokenGroup
             | ExtensionType::GroupMemberPointer
-            | ExtensionType::TokenGroupMember => {}
+            | ExtensionType::TokenGroupMember
+            // TransferHook + TransferFeeConfig: pump.fun's $PUMP and most
+            // post-2025 pump.fun mints carry these. Pool's transfer CPIs
+            // were upgraded to `spl_token_2022::onchain::invoke_transfer_checked`
+            // which auto-resolves the hook program + extra metas from
+            // `ctx.remaining_accounts` (SDK populates them via
+            // `addExtraAccountMetasForExecute`). Transfer fees are handled by
+            // the helper too — the destination receives `amount - fee`, and
+            // our post-CPI invariant check on out_vault delta uses actual
+            // observed delta so the math stays consistent.
+            //
+            // KNOWN RISKS (acceptable, documented):
+            //   - The hook program is mutable code. pump.fun (or any hook
+            //     issuer) can update their hook to reject transfers from the
+            //     pool's authority PDA, freezing shielded balances. There is
+            //     no on-chain defense; only off-chain mitigations (per-mint
+            //     TVL caps, monitoring hook bytecode).
+            //   - Transfer fees reduce the user's actual received amount
+            //     vs. the Jupiter quote. SDK surfaces this in the trader UX.
+            | ExtensionType::TransferHook
+            | ExtensionType::TransferHookAccount
+            | ExtensionType::TransferFeeConfig
+            | ExtensionType::TransferFeeAmount => {}
 
             // Rejected with a specific code so the SDK + trader bot can
             // surface a useful "this token isn't supported because …" msg.
-            ExtensionType::TransferFeeConfig | ExtensionType::TransferFeeAmount => {
-                return err!(PoolError::Token2022TransferFeeUnsupported);
-            }
-            ExtensionType::TransferHook | ExtensionType::TransferHookAccount => {
-                return err!(PoolError::Token2022TransferHookUnsupported);
-            }
             ExtensionType::ConfidentialTransferMint
             | ExtensionType::ConfidentialTransferAccount
             | ExtensionType::ConfidentialTransferFeeConfig
