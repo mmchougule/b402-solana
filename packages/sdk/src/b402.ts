@@ -36,6 +36,7 @@ import {
   createAssociatedTokenAccountInstruction,
 } from '@solana/spl-token';
 import { tokenProgramOf } from './programs/token-program.js';
+import { appendTransferHookAccounts } from './programs/transfer-hook.js';
 import { keccak_256 } from '@noble/hashes/sha3';
 // Browser-safe randomBytes. crypto.getRandomValues is in WebCrypto (browser
 // AND Node 18+ via globalThis.crypto), so we don't need node:crypto here.
@@ -1392,7 +1393,11 @@ export class B402Solana {
         ]
       : [];
 
-    const poolIxKeys = [
+    // Base named-account slots — match the order of `AdaptExecute<'info>`
+    // in `programs/b402-pool/src/instructions/adapt_execute.rs`. We build
+    // these without the trailing `remaining_accounts` so we can interleave
+    // Token-2022 transferHook accounts in the right positions.
+    const baseAdaptKeys = [
       { pubkey: relayerPubkey, isSigner: true, isWritable: true },
       { pubkey: poolConfigPda(poolProgramId), isSigner: false, isWritable: false },
       { pubkey: adapterRegistryPda(poolProgramId), isSigner: false, isWritable: false },
@@ -1451,18 +1456,67 @@ export class B402Solana {
       // same-program swaps this equals `inMintTokenProgram`.
       { pubkey: outMintTokenProgram, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-      // remaining_accounts: inline nullifier block (Phase 7 only) then
-      // adapter-specific entries. Pool's adapt_execute handler forwards
-      // the adapter section verbatim to the adapter CPI as
-      // `ctx.remaining_accounts` (see programs/b402-pool/src/instructions/
-      // adapt_execute.rs:421-438).
+    ];
+
+    // remaining_accounts assembly order (consumed by pool's adapt_execute):
+    //   1. inline-nullifier prefix (b402_nullifier program + 10*real_count
+    //      accounts) — pool slices this off before forwarding to adapter.
+    //   2. IN-mint transferHook accounts (program + extras) — pool's
+    //      `invoke_transfer_checked` on the in_vault → adapter_in_ta
+    //      transfer scans these by hook-program-id match. They also get
+    //      forwarded into the adapter's `ctx.remaining_accounts`, which is
+    //      tolerated by hook-aware adapters (Jupiter's adapter forwards all
+    //      of them to Jupiter v6; Jupiter v6 must accept trailing accounts —
+    //      a known constraint coordinated in the parent task).
+    //   3. Adapter-specific remaining accounts (Jupiter route accounts,
+    //      Kamino reserve accounts, etc.).
+    //   4. OUT-mint transferHook accounts (program + extras) — used by the
+    //      adapter's `invoke_transfer_checked` on adapter_out_ta → out_vault.
+    //      Appended AFTER adapter remaining so they don't shift positional
+    //      adapter accounts.
+    const poolIxKeys = [
+      ...baseAdaptKeys,
       ...inlineNullifierPrefix,
-      ...(req.remainingAccounts ?? []),
     ];
     const poolIx = new TransactionInstruction({
       programId: poolProgramId,
       keys: poolIxKeys,
       data: Buffer.from(poolIxData),
+    });
+
+    // Append IN-mint hook accounts BEFORE adapter remaining (so the pool's
+    // in_vault → adapter_in_ta transfer finds them). Owner = pool_config PDA
+    // (pool signs the vault). No-op if `inMint` has no transferHook ext.
+    await appendTransferHookAccounts({
+      connection: this.connection,
+      instruction: poolIx,
+      mint: req.inMint,
+      source: vaultPda(poolProgramId, req.inMint),
+      destination: req.adapterInTa,
+      owner: poolConfigPda(poolProgramId),
+      amount: req.amount,
+      commitment: 'confirmed',
+    });
+
+    // Push adapter-specific remaining accounts (Jupiter route, Kamino, etc.)
+    poolIx.keys.push(...(req.remainingAccounts ?? []));
+
+    // Append OUT-mint hook accounts AFTER adapter remaining (so the adapter's
+    // adapter_out_ta → out_vault transfer finds them at the tail of its
+    // `ctx.remaining_accounts`). Owner = adapter_authority PDA (adapter
+    // signs the scratch ATA). No-op if `outMint` has no transferHook ext.
+    // `expectedOut` is used as the helper's amount input — it only matters
+    // for hooks that resolve seeds against the ix data (rare); the on-chain
+    // helper re-derives the actual transfer amount at CPI time.
+    await appendTransferHookAccounts({
+      connection: this.connection,
+      instruction: poolIx,
+      mint: req.outMint,
+      source: req.adapterOutTa,
+      destination: vaultPda(poolProgramId, req.outMint),
+      owner: adapterAuthority,
+      amount: expectedOut,
+      commitment: 'confirmed',
     });
     const cuIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 });
 

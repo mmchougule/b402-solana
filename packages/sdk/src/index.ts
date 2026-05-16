@@ -122,6 +122,11 @@ export {
   tokenProgramOf,
   tokenProgramOfOwner,
 } from './programs/token-program.js';
+export {
+  appendTransferHookAccounts,
+  mintHasTransferHook,
+  type AppendTransferHookAccountsCtx,
+} from './programs/transfer-hook.js';
 export { fetchTreeState, decodeTreeState, type TreeStateView } from './programs/tree-state.js';
 export {
   instructionDiscriminator, eventDiscriminator,

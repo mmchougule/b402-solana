@@ -20,6 +20,7 @@ import {
   Transaction, TransactionInstruction, TransactionMessage, VersionedTransaction,
 } from '@solana/web3.js';
 import { tokenProgramOf } from '../programs/token-program.js';
+import { appendTransferHookAccounts } from '../programs/transfer-hook.js';
 
 import {
   TRANSACT_PUBLIC_INPUT_COUNT, domainTag, leToFrReduced,
@@ -299,6 +300,30 @@ export async function unshield(params: UnshieldParams): Promise<UnshieldResult> 
     programId: poolProgramId,
     keys: [...baseKeys, ...remainingForInline],
     data: Buffer.from(ixData),
+  });
+
+  // Token-2022 transferHook support: pool transfers vault → recipient_token_account
+  // (and optionally vault → relayer_fee_token_account when fee > 0). For mints
+  // carrying a TransferHook extension, append the hook program + its declared
+  // extra metas so `spl_token_2022::onchain::invoke_transfer_checked` can
+  // resolve them via `ctx.remaining_accounts`. Owner of the transfer is the
+  // pool_config PDA (pool signs).
+  //
+  // SDK today always builds unshield with `relayer_fee = 0` (see ixData
+  // assembly above — `u64Le(0n)` for relayerFee). The fee transfer is dead
+  // code on the wire; we resolve hook metas for the primary recipient
+  // transfer only. If/when a non-zero-fee unshield variant ships, the
+  // second `appendTransferHookAccounts` call against `recipient_token_account`
+  // → relayer_fee_token_account would slot in here, gated on `fee > 0`.
+  await appendTransferHookAccounts({
+    connection,
+    instruction: unshieldIx,
+    mint,
+    source: vaultPda(poolProgramId, mint),
+    destination: recipientTokenAccount,
+    owner: poolConfigPda(poolProgramId),
+    amount: note.value,
+    commitment: 'confirmed',
   });
 
   // 9. Build the sibling create_nullifier ix — only when NOT in inline

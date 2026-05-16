@@ -25,6 +25,7 @@ import {
 import { randomBytes } from '@noble/hashes/utils';
 
 import { tokenProgramOf } from '../programs/token-program.js';
+import { appendTransferHookAccounts } from '../programs/transfer-hook.js';
 
 import {
   FR_MODULUS, frToLe, leToFrReduced, u64ToFrLe,
@@ -258,6 +259,23 @@ export async function shield(params: ShieldParams): Promise<ShieldResult> {
       { pubkey: SystemProgram.programId,             isSigner: false, isWritable: false },
     ],
     data: Buffer.from(ixData),
+  });
+
+  // Token-2022 transferHook support: if `mint` carries the TransferHook
+  // extension, append the hook program + its declared extra metas to the
+  // ix's `keys` as remaining_accounts. The pool's
+  // `spl_token_2022::onchain::invoke_transfer_checked` walks
+  // ctx.remaining_accounts to find them. No-op for classic SPL or hookless
+  // Token-2022 mints.
+  await appendTransferHookAccounts({
+    connection,
+    instruction: shieldIx,
+    mint,
+    source: depositorAta,
+    destination: vaultPda(poolProgramId, mint),
+    owner: depositor.publicKey,
+    amount,
+    commitment: 'confirmed',
   });
 
   const cuIx = ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 });
