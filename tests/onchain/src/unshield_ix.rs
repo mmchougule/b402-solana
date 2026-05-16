@@ -96,6 +96,9 @@ pub fn send_unshield(
             AccountMeta::new(pda_vault(&h.mint), false),
             AccountMeta::new(recipient_ata, false),
             AccountMeta::new(fee_ata, false),
+            // Token-2022 migration: `mint` slot added between
+            // relayer_fee_token_account and tree_state.
+            AccountMeta::new_readonly(h.mint, false),
             AccountMeta::new(pda_tree_state(), false),
             AccountMeta::new_readonly(ids::b402_verifier_transact(), false),
             AccountMeta::new(shard_0, false),

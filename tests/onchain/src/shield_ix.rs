@@ -93,6 +93,11 @@ pub fn send_shield(
             AccountMeta::new(h.depositor_ata(), false),
             AccountMeta::new_readonly(pda_token_config(&h.mint), false),
             AccountMeta::new(pda_vault(&h.mint), false),
+            // Token-2022 migration: the pool's Shield<'info> now has a
+            // `mint` slot between `vault` and `tree_state` so the
+            // `transfer_checked` CPI can verify decimals. Address-checked
+            // against `token_config.mint`.
+            AccountMeta::new_readonly(h.mint, false),
             AccountMeta::new(pda_tree_state(), false),
             AccountMeta::new_readonly(pda_pool_config(), false),
             AccountMeta::new_readonly(ids::b402_verifier_transact(), false),
