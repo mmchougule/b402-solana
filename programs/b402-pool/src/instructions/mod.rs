@@ -27,6 +27,9 @@ pub mod adapt_execute;
 // 1232 B ceiling by moving Groth16 public inputs out of inline ix data.
 pub mod commit_inputs;
 
+// Token-2022 extension allowlist. Inspected at `add_token_config` time.
+pub mod token_ext;
+
 pub use adapt_execute::*;
 pub use commit_inputs::*;
 pub use adapt_mock::*;

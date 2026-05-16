@@ -47,7 +47,14 @@ prd_35_pending_inputs = []
 
 [dependencies]
 anchor-lang = { workspace = true, features = ["init-if-needed"] }
-anchor-spl.workspace = true
+# `token_2022` pulls in the Token-Extensions program interface + `TokenInterface`,
+# `Mint`/`TokenAccount` types in `anchor_spl::token_interface`. The
+# `token_2022_extensions` feature pulls in `spl-token-2022`'s extension types so
+# we can enumerate + reject incompatible extensions at `add_token_config` time.
+anchor-spl = { workspace = true, features = ["token_2022", "token_2022_extensions"] }
+# Re-exported via anchor-spl::token_2022_extensions, but pinned explicitly so
+# the token_ext module's extension-type imports resolve.
+spl-token-2022 = "3.0.5"
 thiserror.workspace = true
 bytemuck.workspace = true
 indexmap = { version = "=2.9.0" }

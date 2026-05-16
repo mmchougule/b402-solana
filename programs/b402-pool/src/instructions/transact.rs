@@ -17,7 +17,7 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::sysvar::instructions::{self};
 #[cfg(not(feature = "inline_cpi_nullifier"))]
 use anchor_lang::solana_program::sysvar::instructions::load_current_index_checked;
-use anchor_spl::token::Token;
+use anchor_spl::token_interface::TokenInterface;
 
 use crate::constants::{
     SEED_CONFIG, SEED_TREE, TAG_COMMIT, TAG_FEE_BIND, TAG_MK_NODE, TAG_NULLIFIER,
@@ -83,7 +83,10 @@ pub struct Transact<'info> {
     #[account(address = instructions::ID)]
     pub instructions_sysvar: AccountInfo<'info>,
 
-    pub token_program: Program<'info, Token>,
+    // `transact` does no public token movement, so the program slot only
+    // serves as a uniform-shape placeholder for the SDK. Tolerate either
+    // SPL Token or Token-2022 here so callers don't have to branch.
+    pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
 }
 

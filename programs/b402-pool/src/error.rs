@@ -89,4 +89,28 @@ pub enum PoolError {
     AccountSizeMismatch = 1901,
     #[msg("rent not covered")]
     RentNotCovered = 1902,
+
+    // -- Token-2022 extension allowlist (PRD: pump.fun + Token-2022 support).
+    //
+    // Mints carrying any of these extensions are rejected at add_token_config
+    // time so a relayer can't be tricked into shielding a token that breaks
+    // the pool's value-conservation invariant (transfer fees, hooks, etc.) or
+    // that lets a third party manipulate user balances (permanent delegate,
+    // pause). Numbers are stable; never renumbered.
+    #[msg("Token-2022 TransferFeeConfig extension is not supported")]
+    Token2022TransferFeeUnsupported = 2000,
+    #[msg("Token-2022 TransferHook extension is not supported")]
+    Token2022TransferHookUnsupported = 2001,
+    #[msg("Token-2022 ConfidentialTransferMint extension is not supported")]
+    Token2022ConfidentialTransferUnsupported = 2002,
+    #[msg("Token-2022 NonTransferable extension is not supported")]
+    Token2022NonTransferableUnsupported = 2003,
+    #[msg("Token-2022 PermanentDelegate extension is not supported")]
+    Token2022PermanentDelegateUnsupported = 2004,
+    #[msg("Token-2022 DefaultAccountState extension is not supported")]
+    Token2022DefaultAccountStateUnsupported = 2005,
+    #[msg("Token-2022 Pausable extension is not supported")]
+    Token2022PausableUnsupported = 2006,
+    #[msg("Token-2022 mint carries an unrecognized extension")]
+    Token2022UnknownExtensionUnsupported = 2007,
 }

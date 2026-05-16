@@ -1,5 +1,7 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Token, TokenAccount, Transfer};
+use anchor_spl::token_interface::{
+    self as token_interface_cpi, Mint, TokenAccount, TokenInterface, TransferChecked,
+};
 
 use crate::constants::{
     SEED_CONFIG, SEED_TOKEN, SEED_TREE, SEED_VAULT, TAG_COMMIT, TAG_FEE_BIND, TAG_MK_NODE,
@@ -61,7 +63,7 @@ pub struct Shield<'info> {
         constraint = depositor_token_account.owner == depositor.key(),
         constraint = depositor_token_account.mint == token_config.mint,
     )]
-    pub depositor_token_account: Account<'info, TokenAccount>,
+    pub depositor_token_account: InterfaceAccount<'info, TokenAccount>,
 
     #[account(
         seeds = [VERSION_PREFIX, SEED_TOKEN, token_config.mint.as_ref()],
@@ -76,7 +78,19 @@ pub struct Shield<'info> {
         bump,
         constraint = vault.key() == token_config.vault @ PoolError::VaultMismatch,
     )]
-    pub vault: Account<'info, TokenAccount>,
+    pub vault: InterfaceAccount<'info, TokenAccount>,
+
+    /// Mint account — required by `transfer_checked`. Constrained to match
+    /// `token_config.mint` so the SDK can't redirect the decimals/mint check
+    /// to a different mint than what the token config says. Token-2022 needs
+    /// this slot because its transfer-checked path validates decimals against
+    /// the on-chain mint header; classic SPL token program ignores it but
+    /// Anchor's `InterfaceAccount<Mint>` deserialization stays uniform across
+    /// both programs.
+    #[account(
+        address = token_config.mint @ PoolError::MintMismatch,
+    )]
+    pub mint: InterfaceAccount<'info, Mint>,
 
     #[account(
         mut,
@@ -94,7 +108,7 @@ pub struct Shield<'info> {
     /// CHECK: validated by address comparison against `pool_config.verifier_transact`.
     pub verifier_program: AccountInfo<'info>,
 
-    pub token_program: Program<'info, Token>,
+    pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
 }
 
@@ -171,14 +185,24 @@ pub fn handler(ctx: Context<Shield>, args: ShieldArgs) -> Result<()> {
     )?;
 
     // Transfer tokens from depositor to vault.
-    let cpi_accounts = Transfer {
+    //
+    // `transfer_checked` is mandatory for Token-2022 (the legacy `transfer`
+    // ix is deprecated there) and works identically against the classic SPL
+    // Token program — both inspect the `mint` account's decimals to confirm
+    // the caller intended this exact mint, blocking confusion attacks where
+    // a malicious account in the `from`/`to` slot points at a different mint
+    // with the same amount.
+    let decimals = ctx.accounts.mint.decimals;
+    let cpi_accounts = TransferChecked {
         from: ctx.accounts.depositor_token_account.to_account_info(),
+        mint: ctx.accounts.mint.to_account_info(),
         to: ctx.accounts.vault.to_account_info(),
         authority: ctx.accounts.depositor.to_account_info(),
     };
-    token::transfer(
+    token_interface_cpi::transfer_checked(
         CpiContext::new(ctx.accounts.token_program.to_account_info(), cpi_accounts),
         pi.public_amount_in,
+        decimals,
     )?;
 
     // Append non-dummy commitments to the tree and emit events.

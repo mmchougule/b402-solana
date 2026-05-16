@@ -17,7 +17,11 @@ default = []
 
 [dependencies]
 anchor-lang.workspace = true
-anchor-spl.workspace = true
+# `token_2022` enables the `token_interface` module so the adapter can accept
+# Token-2022 vaults / ATAs as input mints (pump.fun graduated tokens). The pool
+# already migrated to `Interface<TokenInterface>` — the adapter must follow so
+# the CPI ix's token_program slot matches the on-chain vault owner.
+anchor-spl = { workspace = true, features = ["token_2022"] }
 indexmap = { version = "=2.9.0" }
 
 [lints]

@@ -37,7 +37,10 @@ use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
 use anchor_lang::solana_program::keccak;
 use anchor_lang::solana_program::poseidon::{hashv, Endianness, Parameters};
 use anchor_lang::solana_program::program::invoke;
-use anchor_spl::token::{self, Token, TokenAccount, Transfer};
+use anchor_spl::token_interface::{
+    self as token_interface_cpi, Mint as InterfaceMint, TokenAccount, TokenInterface,
+    TransferChecked,
+};
 
 use crate::constants::{
     SEED_ADAPTERS, SEED_CONFIG, SEED_TOKEN, SEED_TREE, SEED_VAULT, TAG_ADAPT_BIND,
@@ -165,7 +168,7 @@ pub struct AdaptExecute<'info> {
         bump,
         constraint = in_vault.key() == token_config_in.vault @ PoolError::VaultMismatch,
     )]
-    pub in_vault: Box<Account<'info, TokenAccount>>,
+    pub in_vault: Box<InterfaceAccount<'info, TokenAccount>>,
 
     #[account(
         mut,
@@ -173,7 +176,16 @@ pub struct AdaptExecute<'info> {
         bump,
         constraint = out_vault.key() == token_config_out.vault @ PoolError::VaultMismatch,
     )]
-    pub out_vault: Box<Account<'info, TokenAccount>>,
+    pub out_vault: Box<InterfaceAccount<'info, TokenAccount>>,
+
+    /// IN-mint header — required by `transfer_checked` for pool→adapter
+    /// transfers and pool→relayer-fee transfers. Address-checked against the
+    /// in token-config. Added in the Token-2022 migration (PR ref: feat/token-2022);
+    /// SDK + pool MUST be upgraded together.
+    #[account(
+        address = token_config_in.mint @ PoolError::MintMismatch,
+    )]
+    pub mint_in: Box<InterfaceAccount<'info, InterfaceMint>>,
 
     #[account(
         mut,
@@ -196,14 +208,14 @@ pub struct AdaptExecute<'info> {
         constraint = adapter_in_ta.mint == token_config_in.mint @ PoolError::MintMismatch,
         constraint = adapter_in_ta.owner == adapter_authority.key() @ PoolError::VaultMismatch,
     )]
-    pub adapter_in_ta: Box<Account<'info, TokenAccount>>,
+    pub adapter_in_ta: Box<InterfaceAccount<'info, TokenAccount>>,
 
     #[account(
         mut,
         constraint = adapter_out_ta.mint == token_config_out.mint @ PoolError::MintMismatch,
         constraint = adapter_out_ta.owner == adapter_authority.key() @ PoolError::VaultMismatch,
     )]
-    pub adapter_out_ta: Box<Account<'info, TokenAccount>>,
+    pub adapter_out_ta: Box<InterfaceAccount<'info, TokenAccount>>,
 
     /// Relayer fee destination (IN mint). Zero-fee txs may pass any
     /// TokenAccount owned by the relayer as a sentinel; handler enforces
@@ -212,7 +224,7 @@ pub struct AdaptExecute<'info> {
         mut,
         constraint = relayer_fee_ta.mint == token_config_in.mint @ PoolError::MintMismatch,
     )]
-    pub relayer_fee_ta: Box<Account<'info, TokenAccount>>,
+    pub relayer_fee_ta: Box<InterfaceAccount<'info, TokenAccount>>,
 
     /// v2: pool no longer writes nullifier shard PDAs. Instead, it
     /// verifies the same tx contains a `b402_nullifier::create_nullifier`
@@ -234,7 +246,7 @@ pub struct AdaptExecute<'info> {
     #[account(mut)]
     pub pending_inputs: UncheckedAccount<'info>,
 
-    pub token_program: Program<'info, Token>,
+    pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
 }
 
@@ -249,7 +261,9 @@ pub struct AdaptExecute<'info> {
 /// SDK callers under `pendingInputsMode: true` build this shape +
 /// dispatch to the v2 ix discriminator. Pre-PRD-35 callers keep using
 /// the legacy `adapt_execute` ix unchanged.
-#[cfg(feature = "prd_35_pending_inputs")]
+/// Wire shape for `adapt_execute_v2`. Always defined so the `#[program]`
+/// entry point can name the type; the real PRD-35 handler is only active
+/// when `prd_35_pending_inputs` + `phase_9_dual_note` are both enabled.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
 pub struct AdaptExecuteV2Args {
     pub proof: Vec<u8>, // must be 256 bytes
@@ -355,6 +369,23 @@ pub fn handler_v2<'info>(
         nullifier_cpi_payloads: args_v2.nullifier_cpi_payloads,
     });
     handler(ctx, args)
+}
+
+/// `lib.rs` entry point for `adapt_execute_v2`. Keeps Anchor 0.30 `#[program]`
+/// happy while the PRD-35 + Phase-9 stack is opt-in only.
+pub fn adapt_execute_v2_stub<'info>(
+    ctx: Context<'_, '_, '_, 'info, AdaptExecute<'info>>,
+    args: Box<AdaptExecuteV2Args>,
+) -> Result<()> {
+    #[cfg(all(feature = "prd_35_pending_inputs", feature = "phase_9_dual_note"))]
+    {
+        handler_v2(ctx, args)
+    }
+    #[cfg(not(all(feature = "prd_35_pending_inputs", feature = "phase_9_dual_note")))]
+    {
+        let _ = (ctx, args);
+        err!(PoolError::InvalidInstructionData)
+    }
 }
 
 #[inline(never)]
@@ -689,35 +720,40 @@ pub fn handler<'info>(
         #[cfg(not(feature = "phase_9_dual_note"))]
         { false }
     };
+    let in_decimals = ctx.accounts.mint_in.decimals;
     if !skip_input_transfer {
-        token::transfer(
+        token_interface_cpi::transfer_checked(
             CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
-                Transfer {
+                TransferChecked {
                     from: ctx.accounts.in_vault.to_account_info(),
+                    mint: ctx.accounts.mint_in.to_account_info(),
                     to: ctx.accounts.adapter_in_ta.to_account_info(),
                     authority: pool_config_info.clone(),
                 },
                 signer,
             ),
             pi.public_amount_in,
+            in_decimals,
         )?;
     }
 
     // Relayer fee transfer (in IN mint, from in_vault). Circuit binding via
     // pi.relayer_fee_bind = Poseidon(TAG_FEE_BIND, fee, recipient).
     if pi.relayer_fee > 0 {
-        token::transfer(
+        token_interface_cpi::transfer_checked(
             CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
-                Transfer {
+                TransferChecked {
                     from: ctx.accounts.in_vault.to_account_info(),
+                    mint: ctx.accounts.mint_in.to_account_info(),
                     to: ctx.accounts.relayer_fee_ta.to_account_info(),
                     authority: pool_config_info.clone(),
                 },
                 signer,
             ),
             pi.relayer_fee,
+            in_decimals,
         )?;
     }
 

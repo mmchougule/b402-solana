@@ -19,7 +19,7 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::instruction::Instruction;
 use anchor_lang::solana_program::program::invoke;
-use anchor_spl::token::TokenAccount;
+use anchor_spl::token_interface::TokenAccount;
 
 use crate::error::PoolError;
 
@@ -40,19 +40,21 @@ pub struct CheckAdapterDeltaMock<'info> {
     #[account(mut)]
     pub caller: Signer<'info>,
 
-    /// The vault whose balance delta we measure.
+    /// The vault whose balance delta we measure. Tolerates Token-2022 vaults
+    /// via `InterfaceAccount`.
     #[account(mut)]
-    pub out_vault: Account<'info, TokenAccount>,
+    pub out_vault: InterfaceAccount<'info, TokenAccount>,
 
     /// CHECK: the adapter program to invoke. Registry-based validation
     /// happens in the real `adapt_execute`.
     pub adapter_program: UncheckedAccount<'info>,
 }
 
-#[inline(never)]
 pub fn handler(ctx: Context<CheckAdapterDeltaMock>, args: CheckAdapterDeltaArgs) -> Result<()> {
-    // 1. Snapshot pre-balance.
-    ctx.accounts.out_vault.reload()?;
+    // `Account<TokenAccount>` reflects syscall state deserialized at the start of
+    // this pool instruction. No prior pool code mutates `out_vault` before the
+    // pre-CPI snapshot, so an extra `reload()` only duplicated a syscall; the
+    // post-CPI `reload()` remains mandatory after the adapter CPI.
     let pre = ctx.accounts.out_vault.amount;
 
     // 2. Build the adapter instruction. Unified ABI:
@@ -102,4 +104,58 @@ pub fn handler(ctx: Context<CheckAdapterDeltaMock>, args: CheckAdapterDeltaArgs)
     );
 
     Ok(())
+}
+
+/// Host-only: prove the reserve-loop AccountMeta construction matches the prior iterator+collect shape.
+#[cfg(test)]
+mod adapter_metas_equiv {
+    use super::*;
+    use anchor_lang::prelude::Pubkey;
+
+    fn metas_collect(keys: &[(Pubkey, bool, bool)]) -> Vec<AccountMeta> {
+        keys.iter()
+            .map(|&(k, w, s)| {
+                if w {
+                    AccountMeta::new(k, s)
+                } else {
+                    AccountMeta::new_readonly(k, s)
+                }
+            })
+            .collect()
+    }
+
+    fn metas_reserve(keys: &[(Pubkey, bool, bool)]) -> Vec<AccountMeta> {
+        let mut v = Vec::with_capacity(keys.len());
+        for &(k, w, s) in keys {
+            v.push(if w {
+                AccountMeta::new(k, s)
+            } else {
+                AccountMeta::new_readonly(k, s)
+            });
+        }
+        v
+    }
+
+    #[test]
+    fn collect_matches_reserve_exhaustive_3_keys() {
+        let keys: Vec<Pubkey> = (0u8..3).map(|i| Pubkey::new_from_array([i; 32])).collect();
+        for b0 in [false, true] {
+            for s0 in [false, true] {
+                for b1 in [false, true] {
+                    for s1 in [false, true] {
+                        for b2 in [false, true] {
+                            for s2 in [false, true] {
+                                let row = vec![
+                                    (keys[0], b0, s0),
+                                    (keys[1], b1, s1),
+                                    (keys[2], b2, s2),
+                                ];
+                                assert_eq!(metas_collect(&row), metas_reserve(&row));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

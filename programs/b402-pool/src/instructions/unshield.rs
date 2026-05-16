@@ -1,5 +1,7 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Token, TokenAccount, Transfer};
+use anchor_spl::token_interface::{
+    self as token_interface_cpi, Mint, TokenAccount, TokenInterface, TransferChecked,
+};
 
 use anchor_lang::solana_program::poseidon::{hashv, Endianness, Parameters};
 
@@ -65,19 +67,26 @@ pub struct Unshield<'info> {
         bump,
         constraint = vault.key() == token_config.vault @ PoolError::VaultMismatch,
     )]
-    pub vault: Account<'info, TokenAccount>,
+    pub vault: InterfaceAccount<'info, TokenAccount>,
 
     #[account(
         mut,
         constraint = recipient_token_account.mint == token_config.mint @ PoolError::MintMismatch,
     )]
-    pub recipient_token_account: Account<'info, TokenAccount>,
+    pub recipient_token_account: InterfaceAccount<'info, TokenAccount>,
 
     /// Relayer fee destination. Zero-amount fee transactions may pass the
     /// vault address here as a sentinel to avoid an extra ATA; handler rejects
     /// fee > 0 in that case.
     #[account(mut)]
-    pub relayer_fee_token_account: Account<'info, TokenAccount>,
+    pub relayer_fee_token_account: InterfaceAccount<'info, TokenAccount>,
+
+    /// Mint account — required by `transfer_checked`. Address-checked against
+    /// `token_config.mint` for safety.
+    #[account(
+        address = token_config.mint @ PoolError::MintMismatch,
+    )]
+    pub mint: InterfaceAccount<'info, Mint>,
 
     #[account(
         mut,
@@ -96,7 +105,7 @@ pub struct Unshield<'info> {
     #[account(address = anchor_lang::solana_program::sysvar::instructions::ID)]
     pub instructions_sysvar: AccountInfo<'info>,
 
-    pub token_program: Program<'info, Token>,
+    pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
 }
 
@@ -336,36 +345,41 @@ pub fn handler<'info>(
         .ok_or(error!(PoolError::ValueOverflow))?;
 
     let pool_config_info = ctx.accounts.pool_config.to_account_info();
-    let cpi_accounts = Transfer {
+    let decimals = ctx.accounts.mint.decimals;
+    let cpi_accounts = TransferChecked {
         from: ctx.accounts.vault.to_account_info(),
+        mint: ctx.accounts.mint.to_account_info(),
         to: ctx.accounts.recipient_token_account.to_account_info(),
         authority: pool_config_info.clone(),
     };
     let seeds: &[&[u8]] = &[VERSION_PREFIX, SEED_CONFIG, &[ctx.bumps.pool_config]];
     let signer = &[seeds];
-    token::transfer(
+    token_interface_cpi::transfer_checked(
         CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
             cpi_accounts,
             signer,
         ),
         net,
+        decimals,
     )?;
 
     // Relayer fee transfer (if non-zero).
     if pi.relayer_fee > 0 {
-        let cpi_fee = Transfer {
+        let cpi_fee = TransferChecked {
             from: ctx.accounts.vault.to_account_info(),
+            mint: ctx.accounts.mint.to_account_info(),
             to: ctx.accounts.relayer_fee_token_account.to_account_info(),
             authority: pool_config_info.clone(),
         };
-        token::transfer(
+        token_interface_cpi::transfer_checked(
             CpiContext::new_with_signer(
                 ctx.accounts.token_program.to_account_info(),
                 cpi_fee,
                 signer,
             ),
             pi.relayer_fee,
+            decimals,
         )?;
     }
 
