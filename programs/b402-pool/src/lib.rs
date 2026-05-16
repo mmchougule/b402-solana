@@ -142,20 +142,17 @@ pub mod b402_pool {
         instructions::commit_inputs::gc_pending_inputs(ctx)
     }
 
-    /// PRD-35.9 — `adapt_execute` variant that reads `public_inputs`
-    /// from the per-user `pending_inputs` PDA instead of carrying them
-    /// in args. Saves ~320 B on the outer ix wire — the actual fix that
-    /// lifts the v0-tx 1232 B ceiling for per-user adapters (kamino,
-    /// drift, marginfi, …).
-    ///
-    /// SDK callers under `pendingInputsMode: true` dispatch here; legacy
-    /// callers keep using `adapt_execute` (above) unchanged.
-    #[cfg(feature = "prd_35_pending_inputs")]
+    /// PRD-35.9 — `adapt_execute` variant that reads `public_inputs` from the
+    /// per-user `pending_inputs` PDA. Until `prd_35_pending_inputs` +
+    /// `phase_9_dual_note` are enabled together in production builds, this
+    /// entry point returns `InvalidInstructionData` after validating
+    /// accounts (Anchor 0.30 requires the symbol + args type to exist for
+    /// `#[program]` codegen).
     pub fn adapt_execute_v2<'info>(
         ctx: Context<'_, '_, '_, 'info, AdaptExecute<'info>>,
         args: Box<AdaptExecuteV2Args>,
     ) -> Result<()> {
-        instructions::adapt_execute::handler_v2(ctx, args)
+        instructions::adapt_execute::adapt_execute_v2_stub(ctx, args)
     }
 }
 

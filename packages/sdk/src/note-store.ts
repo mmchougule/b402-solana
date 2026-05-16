@@ -43,16 +43,34 @@ function joinPath(dir: string, file: string): string {
 import type { Wallet } from './wallet.js';
 import { tryDecryptNote, type EncryptedNote } from './note-encryption.js';
 import { commitmentHash, nullifierHash } from './poseidon.js';
-import { parseProgramDataLog } from './notes/scanner.js';
+import { B402Indexer } from './indexer.js';
 import type { SpendableNote } from '@b402ai/solana-shared';
 
 export interface NoteStoreOptions {
   connection: Connection;
   poolProgramId: PublicKey;
   wallet: Wallet;
-  /** Optional: persist note state to disk (per-viewing-pub file). */
-  persist?: { dir: string };
+  /** Indexer client — required for non-localnet. backfill() reads commitments
+   *  from this; it never scans on-chain via RPC. */
+  indexer?: B402Indexer;
+  /** Optional persistence. Two shapes:
+   *  - `{ dir }` — write a per-viewing-pub JSON file under `dir`. Node-only.
+   *  - `{ load, save }` — pluggable adapter for consumers (bots, browsers,
+   *    custom storage). The SDK holds zero opinions about your DB; it
+   *    just round-trips one opaque JSON string per viewing-pub.
+   *
+   *  Same snapshot shape on both paths so an installation can migrate
+   *  between them by piping the JSON over. */
+  persist?:
+    | { dir: string }
+    | { load: () => Promise<string | null>; save: (data: string) => Promise<void> };
 }
+
+/** Internal: which persistence branch is active. Set in the constructor. */
+type PersistMode =
+  | { kind: 'none' }
+  | { kind: 'fs'; path: string }
+  | { kind: 'pluggable'; load: () => Promise<string | null>; save: (data: string) => Promise<void> };
 
 interface PersistedSnapshotV1 {
   v: 1;
@@ -88,22 +106,35 @@ export class NoteStore {
   private readonly notesByCommitment = new Map<string, SpendableNote>();
   private readonly spentNullifiers = new Set<string>();
   private _lastScannedSlot = 0n;
-  private _persistPath: string | null = null;
+  private _persist_mode: PersistMode = { kind: 'none' };
   /** Newest pool signature processed by backfill — used as the `until:`
    *  cursor on the next call. null = first run, scan latest window. */
   private _backfillCursor: string | null = null;
+  /** Single-flight save coordination for the pluggable persistence path.
+   *  Multiple `_persist()` calls in rapid succession (insertNote +
+   *  markSpent within ms) must NOT race on the DB — the underlying
+   *  callback is async and out-of-order completion would clobber the
+   *  newer snapshot. Pattern: at most one save in flight; if more
+   *  arrive, only the *latest* snapshot is queued; the in-flight save
+   *  picks it up when it finishes. */
+  private _save_in_flight: Promise<void> | null = null;
+  private _pending_snapshot: string | null = null;
 
   constructor(opts: NoteStoreOptions) {
     this.opts = opts;
     if (opts.persist) {
-      const viewingHex = bytesToHex(opts.wallet.viewingPub);
-      this._persistPath = joinPath(opts.persist.dir, `${viewingHex}.json`);
+      if ('dir' in opts.persist) {
+        const viewingHex = bytesToHex(opts.wallet.viewingPub);
+        this._persist_mode = { kind: 'fs', path: joinPath(opts.persist.dir, `${viewingHex}.json`) };
+      } else {
+        this._persist_mode = { kind: 'pluggable', load: opts.persist.load, save: opts.persist.save };
+      }
     }
   }
 
   /** Hydrate persisted state if any. */
   async start(): Promise<void> {
-    if (this._persistPath) this._hydrate();
+    await this._hydrate();
   }
 
   async stop(): Promise<void> {
@@ -195,123 +226,95 @@ export class NoteStore {
    */
   async backfill(opts: {
     limit?: number;
+    /** Ignored; kept for API back-compat. Old sig-cursor field is unused. */
     before?: string;
     from?: 'cursor' | 'genesis';
   } = {}): Promise<{
-    txsScanned: number;
+    txsScanned: number;        // 0 — this path makes ZERO RPC tx fetches
     eventsSeen: number;
     notesIngested: number;
     cursorAdvanced: boolean;
-    /** True if pagination hit MAX_PAGES before reaching the prior cursor.
-     *  Callers should re-invoke `backfill` to keep walking the tail. */
     truncated: boolean;
   }> {
-    const limit = opts.limit ?? 30;
+    if (!this.opts.indexer) {
+      throw new Error(
+        'NoteStore.backfill: an indexer is required (no on-chain RPC fallback). ' +
+        'Configure B402Solana with an indexerUrl — mainnet/devnet auto-default to one.',
+      );
+    }
+    const indexer = this.opts.indexer;
+    const limit = opts.limit ?? 200;
     const fromMode = opts.from ?? 'cursor';
 
-    // Reset path: caller wants a forced re-scan of the latest window. Drops
-    // the cursor and behaves like first-run.
+    // Reset path: forced full rescan from leaf 0.
     if (fromMode === 'genesis') {
       this._backfillCursor = null;
     }
 
-    const cursor = this._backfillCursor;
-    let txsScanned = 0;
+    // Cursor stored as decimal leafIndex string. Older persisted state may
+    // contain a base58 tx signature from the legacy sig-scan code; if it
+    // doesn't parse as a non-negative integer, treat it as "rescan all".
+    let since = 0n;
+    if (this._backfillCursor) {
+      const n = Number(this._backfillCursor);
+      if (Number.isFinite(n) && /^\d+$/.test(this._backfillCursor)) {
+        since = BigInt(this._backfillCursor);
+      }
+    }
+
     let eventsSeen = 0;
     let notesIngested = 0;
-    let newestSig: string | null = null;
+    let highestSeen: bigint | null = null;
     let truncated = false;
 
-    // Page through (newest → cursor]. Stop when the page comes back empty
-    // or shorter than `limit` (last page).
-    let before: string | undefined = opts.before;
-    // Bound iterations defensively — at limit=30 this caps the worst-case
-    // catch-up at 300 tx, which is far past any reasonable offline window.
-    // If the user does manage to exceed it we MUST NOT advance the cursor —
-    // otherwise we'd permanently skip whatever sits between the oldest sig
-    // we processed and the original cursor.
-    const MAX_PAGES = 10;
+    // Indexer paginates by leafIndex. Walk forward until empty page.
+    const MAX_PAGES = 50;
     for (let page = 0; page < MAX_PAGES; page += 1) {
-      const sigs = await this.opts.connection.getSignaturesForAddress(
-        this.opts.poolProgramId,
-        { limit, before, until: cursor ?? undefined },
-        'confirmed',
-      );
-      if (sigs.length === 0) break;
-      txsScanned += sigs.length;
-      // RPC returns newest-first. Capture the newest from the very first
-      // page only — that's the cursor we'll persist after processing.
-      if (page === 0) newestSig = sigs[0].signature;
+      const r = await indexer.commitmentsSince({ since, limit });
+      if (r.items.length === 0) break;
 
-      // Tuned for free-tier RPC: BATCH=2 + 100ms inter-batch gap stays
-      // under ~15 req/s sustained, well below Helius free's 10 req/s
-      // soft limit when combined with Connection's built-in 429 backoff.
-      // First-run cost on a 30-sig page: 30 * (50ms tx + 100ms gap) ≈ 4.5s,
-      // acceptable for a one-time bootstrap. Subsequent calls hit the
-      // cursor early and do 0–2 tx fetches.
-      const BATCH = 2;
-      const INTER_BATCH_MS = 100;
-      for (let i = 0; i < sigs.length; i += BATCH) {
-        if (i > 0) await new Promise((r) => setTimeout(r, INTER_BATCH_MS));
-        const batch = sigs.slice(i, i + BATCH);
-        const txs = await Promise.allSettled(
-          batch.map((sig) =>
-            sig.err
-              ? Promise.resolve(null)
-              : this.opts.connection.getTransaction(sig.signature, {
-                  maxSupportedTransactionVersion: 0,
-                  commitment: 'confirmed',
-                }),
-          ),
-        );
-        for (const result of txs) {
-          if (result.status !== 'fulfilled') continue;
-          const tx = result.value;
-          const logs = tx?.meta?.logMessages;
-          if (!logs) continue;
-          for (const line of logs) {
-            const ev = parseProgramDataLog(line);
-            if (!ev) continue;
-            eventsSeen += 1;
-            const commitmentBigint = leToBigint(ev.commitment);
-            if (this.notesByCommitment.has(String(commitmentBigint))) continue;
-            const ok = await this.ingestCommitment({
-              commitment: commitmentBigint,
-              leafIndex: ev.leafIndex,
-              encrypted: {
-                ciphertext: ev.ciphertext,
-                ephemeralPub: ev.ephemeralPub,
-                viewingTag: ev.viewingTag,
-              },
-            });
-            if (ok) notesIngested += 1;
-          }
-        }
+      for (const c of r.items) {
+        eventsSeen += 1;
+        const commitmentBig = hexLEToBigint(c.commitment);
+        if (this.notesByCommitment.has(String(commitmentBig))) continue;
+        const leafIndex = BigInt(c.leafIndex);
+        if (highestSeen === null || leafIndex > highestSeen) highestSeen = leafIndex;
+
+        // Indexer can be configured to omit ciphertext (zero-padded); skip
+        // those — they're shields where the depositor passed
+        // omitEncryptedNotes=true (their own note is locally inserted).
+        const ciphertext = hexToBytes(c.ciphertext);
+        if (isAllZero(ciphertext)) continue;
+
+        const ok = await this.ingestCommitment({
+          commitment: commitmentBig,
+          leafIndex,
+          encrypted: {
+            ciphertext,
+            ephemeralPub: hexToBytes(c.ephemeralPub),
+            viewingTag: hexToBytes(c.viewingTag),
+          },
+        });
+        if (ok) notesIngested += 1;
       }
 
-      // No more pages? Either fewer than limit returned or we've reached
-      // the cursor. Otherwise prepare to fetch the next older page using
-      // the OLDEST sig from this page as the `before` cursor.
-      if (sigs.length < limit) break;
-      before = sigs[sigs.length - 1].signature;
-      // If we're about to exit on the page-cap, flag truncation so we
-      // know NOT to advance the cursor below.
+      if (r.items.length < limit) break;
+      if (r.nextCursor) since = BigInt(r.nextCursor);
+      else since = BigInt(r.items[r.items.length - 1].leafIndex) + 1n;
       if (page === MAX_PAGES - 1) truncated = true;
     }
 
-    // Only advance the cursor when we actually walked the entire range
-    // back to the prior cursor (or past it on first run, when cursor was
-    // null and we exhausted the available history). On truncation, the
-    // tail between `before` and the prior cursor is unprocessed — leaving
-    // the cursor where it was means the next call resumes that work.
     let cursorAdvanced = false;
-    if (newestSig && !truncated && newestSig !== this._backfillCursor) {
-      this._backfillCursor = newestSig;
-      cursorAdvanced = true;
-      this._persist();
+    if (highestSeen !== null && !truncated) {
+      const next = (highestSeen + 1n).toString();
+      if (next !== this._backfillCursor) {
+        this._backfillCursor = next;
+        cursorAdvanced = true;
+        this._persist();
+      }
     }
 
-    return { txsScanned, eventsSeen, notesIngested, cursorAdvanced, truncated };
+    return { txsScanned: 0, eventsSeen, notesIngested, cursorAdvanced, truncated };
   }
 
 
@@ -358,78 +361,135 @@ export class NoteStore {
     return nullifierHash(n.spendingPriv, n.leafIndex);
   }
 
-  /** Atomic write: write to a sibling .tmp then rename. Best-effort — a
-   *  failure here doesn't roll back the in-memory mutation; we surface
-   *  the error to stderr but don't throw, so a single shield doesn't fail
-   *  because of disk-full. The next mutation retries. */
-  private _persist(): void {
-    if (!this._persistPath) return;
-    if (!nodeFs || !nodePath) return;  // browser: persist is a no-op
-    try {
-      nodeFs.mkdirSync(nodePath.dirname(this._persistPath), { recursive: true });
-      const snapshot: PersistedSnapshotV2 = {
-        v: 2,
-        notes: Array.from(this.notesByCommitment.values()).map((n) => ({
-          tokenMint: n.tokenMint.toString(),
-          value: n.value.toString(),
-          random: n.random.toString(),
-          spendingPub: n.spendingPub.toString(),
-          spendingPriv: n.spendingPriv.toString(),
-          commitment: n.commitment.toString(),
-          leafIndex: n.leafIndex.toString(),
-          encryptedBytesHex: bytesToHex(n.encryptedBytes),
-          ephemeralPubHex: bytesToHex(n.ephemeralPub),
-          viewingTagHex: bytesToHex(n.viewingTag),
-        })),
-        spentNullifiers: Array.from(this.spentNullifiers),
-        backfillCursor: this._backfillCursor,
-      };
-      const tmp = `${this._persistPath}.tmp`;
-      nodeFs.writeFileSync(tmp, JSON.stringify(snapshot), { mode: 0o600 });
-      nodeFs.renameSync(tmp, this._persistPath);
-    } catch (e) {
-      // eslint-disable-next-line no-console
-      console.warn(`note-store: persist failed (${this._persistPath}):`, e instanceof Error ? e.message : String(e));
-    }
+  /** Serialise current in-memory state to the v2 snapshot JSON shape.
+   *  Single source of truth for what both persist paths write. */
+  private _snapshotJson(): string {
+    const snapshot: PersistedSnapshotV2 = {
+      v: 2,
+      notes: Array.from(this.notesByCommitment.values()).map((n) => ({
+        tokenMint: n.tokenMint.toString(),
+        value: n.value.toString(),
+        random: n.random.toString(),
+        spendingPub: n.spendingPub.toString(),
+        spendingPriv: n.spendingPriv.toString(),
+        commitment: n.commitment.toString(),
+        leafIndex: n.leafIndex.toString(),
+        encryptedBytesHex: bytesToHex(n.encryptedBytes),
+        ephemeralPubHex: bytesToHex(n.ephemeralPub),
+        viewingTagHex: bytesToHex(n.viewingTag),
+      })),
+      spentNullifiers: Array.from(this.spentNullifiers),
+      backfillCursor: this._backfillCursor,
+    };
+    return JSON.stringify(snapshot);
   }
 
-  /** Read the persisted snapshot if present and populate in-memory maps.
-   *  Tolerant: missing file = first run, malformed file = warn + ignore. */
-  private _hydrate(): void {
-    if (!this._persistPath) return;
-    if (!nodeFs) return;  // browser: nothing to hydrate
-    if (!nodeFs.existsSync(this._persistPath)) return;
+  /** Apply a persisted-snapshot JSON string to in-memory state. Tolerant:
+   *  malformed or unknown-schema input is logged + ignored. */
+  private _applySnapshot(raw: string): void {
+    let snap: PersistedSnapshot;
     try {
-      const raw = nodeFs.readFileSync(this._persistPath, 'utf8');
-      const snap = JSON.parse(raw) as PersistedSnapshot;
-      if (snap.v !== 1 && snap.v !== 2) {
-        console.warn(`note-store: hydrate skipped — unknown schema v=${(snap as { v: unknown }).v}`);
-        return;
-      }
-      for (const n of snap.notes) {
-        const restored: SpendableNote = {
-          tokenMint: BigInt(n.tokenMint),
-          value: BigInt(n.value),
-          random: BigInt(n.random),
-          spendingPub: BigInt(n.spendingPub),
-          spendingPriv: BigInt(n.spendingPriv),
-          commitment: BigInt(n.commitment),
-          leafIndex: BigInt(n.leafIndex),
-          encryptedBytes: hexToBytes(n.encryptedBytesHex),
-          ephemeralPub: hexToBytes(n.ephemeralPubHex),
-          viewingTag: hexToBytes(n.viewingTagHex),
-        };
-        this.notesByCommitment.set(n.commitment, restored);
-      }
-      for (const s of snap.spentNullifiers) this.spentNullifiers.add(s);
-      // v=1 has no cursor → leave null; first backfill scans the latest
-      // window once and writes the upgraded v=2 snapshot.
-      if (snap.v === 2) {
-        this._backfillCursor = snap.backfillCursor ?? null;
-      }
+      snap = JSON.parse(raw) as PersistedSnapshot;
     } catch (e) {
-      // eslint-disable-next-line no-console
-      console.warn(`note-store: hydrate failed (${this._persistPath}):`, e instanceof Error ? e.message : String(e));
+      console.warn(`note-store: hydrate skipped — JSON parse failed: ${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
+    if (snap.v !== 1 && snap.v !== 2) {
+      console.warn(`note-store: hydrate skipped — unknown schema v=${(snap as { v: unknown }).v}`);
+      return;
+    }
+    for (const n of snap.notes) {
+      const restored: SpendableNote = {
+        tokenMint: BigInt(n.tokenMint),
+        value: BigInt(n.value),
+        random: BigInt(n.random),
+        spendingPub: BigInt(n.spendingPub),
+        spendingPriv: BigInt(n.spendingPriv),
+        commitment: BigInt(n.commitment),
+        leafIndex: BigInt(n.leafIndex),
+        encryptedBytes: hexToBytes(n.encryptedBytesHex),
+        ephemeralPub: hexToBytes(n.ephemeralPubHex),
+        viewingTag: hexToBytes(n.viewingTagHex),
+      };
+      this.notesByCommitment.set(n.commitment, restored);
+    }
+    for (const s of snap.spentNullifiers) this.spentNullifiers.add(s);
+    if (snap.v === 2) this._backfillCursor = snap.backfillCursor ?? null;
+  }
+
+  /** Fire-and-forget save. Synchronous mutators (insertNote, markSpent)
+   *  call this to push the latest snapshot to durable storage. Failures
+   *  surface to stderr but don't throw, so in-memory state is never
+   *  rolled back by a transient disk/DB error. The next mutation retries.
+   *
+   *  Pluggable adapters get an async save(); we don't await it to keep
+   *  the public mutator surface sync — consumers don't need to thread
+   *  promises through every NoteStore touch. */
+  private _persist(): void {
+    if (this._persist_mode.kind === 'none') return;
+    const raw = this._snapshotJson();
+    if (this._persist_mode.kind === 'fs') {
+      if (!nodeFs || !nodePath) return;  // browser: persist is a no-op
+      const path = this._persist_mode.path;
+      try {
+        nodeFs.mkdirSync(nodePath.dirname(path), { recursive: true });
+        const tmp = `${path}.tmp`;
+        nodeFs.writeFileSync(tmp, raw, { mode: 0o600 });
+        nodeFs.renameSync(tmp, path);
+      } catch (e) {
+        console.warn(`note-store: persist failed (${path}):`, e instanceof Error ? e.message : String(e));
+      }
+      return;
+    }
+    // Pluggable: serialize so out-of-order DB completions can't clobber a
+    // newer snapshot with an older one. At most one save in flight; if
+    // more arrive while one is running, only the latest is queued.
+    this._pending_snapshot = raw;
+    if (this._save_in_flight) return;
+    const save = this._persist_mode.save;
+    this._save_in_flight = (async () => {
+      while (this._pending_snapshot != null) {
+        const next = this._pending_snapshot;
+        this._pending_snapshot = null;
+        try {
+          await save(next);
+        } catch (e) {
+          console.warn(`note-store: persist (pluggable) failed:`, e instanceof Error ? e.message : String(e));
+        }
+      }
+      this._save_in_flight = null;
+    })();
+  }
+
+  /** Wait for any in-flight pluggable save to flush. Useful for tests and
+   *  graceful shutdown (avoid losing the very last in-memory write). */
+  async flushPersistence(): Promise<void> {
+    if (this._save_in_flight) await this._save_in_flight;
+  }
+
+  /** Read persisted state into in-memory maps. Missing data → first-run
+   *  (silent + empty). Both paths share the same JSON shape so a snapshot
+   *  written via one can be loaded via the other. */
+  private async _hydrate(): Promise<void> {
+    if (this._persist_mode.kind === 'none') return;
+    if (this._persist_mode.kind === 'fs') {
+      if (!nodeFs) return;  // browser: nothing to hydrate
+      const path = this._persist_mode.path;
+      if (!nodeFs.existsSync(path)) return;
+      try {
+        const raw = nodeFs.readFileSync(path, 'utf8');
+        this._applySnapshot(raw);
+      } catch (e) {
+        console.warn(`note-store: hydrate failed (${path}):`, e instanceof Error ? e.message : String(e));
+      }
+      return;
+    }
+    // pluggable
+    try {
+      const raw = await this._persist_mode.load();
+      if (raw != null) this._applySnapshot(raw);
+    } catch (e) {
+      console.warn(`note-store: hydrate (pluggable) failed:`, e instanceof Error ? e.message : String(e));
     }
   }
 }
@@ -449,4 +509,14 @@ function hexToBytes(s: string): Uint8Array {
   const out = new Uint8Array(s.length / 2);
   for (let i = 0; i < out.length; i++) out[i] = parseInt(s.slice(i * 2, i * 2 + 2), 16);
   return out;
+}
+
+/** Hex (LE byte order) → bigint. Indexer encodes commitments as LE hex. */
+function hexLEToBigint(s: string): bigint {
+  return leToBigint(hexToBytes(s));
+}
+
+function isAllZero(b: Uint8Array): boolean {
+  for (let i = 0; i < b.length; i++) if (b[i] !== 0) return false;
+  return true;
 }

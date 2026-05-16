@@ -136,16 +136,16 @@ pub fn verify_nullifier_ix_in_tx(
         if ix.program_id != *nullifier_program_id {
             continue;
         }
+        let data = ix.data.as_slice();
         require!(
-            ix.data.len() == B402_NULLIFIER_IX_DATA_LEN,
+            data.len() == B402_NULLIFIER_IX_DATA_LEN,
             PoolError::NullifierIxMalformed
         );
         require!(
-            ix.data[..8] == B402_NULLIFIER_DISCRIMINATOR,
+            data[0..8] == B402_NULLIFIER_DISCRIMINATOR,
             PoolError::NullifierIxMalformed
         );
-        let id_in_ix: &[u8; 32] = ix.data[B402_NULLIFIER_ID_OFFSET
-            ..B402_NULLIFIER_ID_OFFSET + 32]
+        let id_in_ix: &[u8; 32] = data[B402_NULLIFIER_ID_OFFSET..B402_NULLIFIER_ID_OFFSET + 32]
             .try_into()
             .map_err(|_| error!(PoolError::NullifierIxMalformed))?;
         if id_in_ix == expected_nullifier {

@@ -26,9 +26,9 @@ import {
   createAssociatedTokenAccountIdempotentInstruction,
   getAssociatedTokenAddressSync,
 } from '@solana/spl-token';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
-import * as os from 'node:os';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
 
 // ── mainnet program IDs ───────────────────────────────────────────────────────
 export const POOL = new PublicKey('42a3hsCXtQLWonyxWZosaaCJCweYYKMrvNd25p1Jrt2y');

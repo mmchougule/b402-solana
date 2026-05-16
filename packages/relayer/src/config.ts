@@ -71,6 +71,23 @@ const EnvSchema = z.object({
 
   /** Override the default 1.4M CU budget per relay. */
   COMPUTE_UNIT_LIMIT: z.coerce.number().int().positive().max(1_400_000).default(1_400_000),
+
+  /**
+   * Priority fee floor in microLamports per compute unit. Applied even when
+   * `getRecentPrioritizationFees` reports near-zero network demand — without
+   * this, our zero-priority txs get dropped under any congestion burst.
+   *
+   * Cost math at default 10_000:  1.4M CU × 10k = 14_000 lamports ≈ $0.002.
+   * Trivial vs. typical swap value; mandatory for reliable landing.
+   */
+  PRIORITY_FEE_MICROLAMPORTS_FLOOR: z.coerce.number().int().nonnegative().default(10_000),
+
+  /**
+   * Priority fee ceiling. Caps spend during heavy congestion to avoid
+   * accidentally paying more in priority than the user's trade is worth.
+   * Default 500k microLamports × 1.4M CU = 700k lamports ≈ $0.10 worst case.
+   */
+  PRIORITY_FEE_MICROLAMPORTS_CEIL: z.coerce.number().int().positive().default(500_000),
 });
 
 export interface Config {
@@ -89,6 +106,8 @@ export interface Config {
   authEnabled: boolean;
   maxTxSize: number;
   computeUnitLimit: number;
+  priorityFeeFloorMicroLamports: number;
+  priorityFeeCeilMicroLamports: number;
 }
 
 function loadKeypair(path: string): Keypair {
@@ -156,5 +175,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     authEnabled: apiKeys !== null,
     maxTxSize: parsed.MAX_TX_SIZE,
     computeUnitLimit: parsed.COMPUTE_UNIT_LIMIT,
+    priorityFeeFloorMicroLamports: parsed.PRIORITY_FEE_MICROLAMPORTS_FLOOR,
+    priorityFeeCeilMicroLamports: parsed.PRIORITY_FEE_MICROLAMPORTS_CEIL,
   };
 }

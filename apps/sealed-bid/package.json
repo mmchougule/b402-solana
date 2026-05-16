@@ -6,7 +6,8 @@
   },
   "dependencies": {
     "@arcium-hq/client": "0.9.7",
-    "@coral-xyz/anchor": "^0.32.1"
+    "@coral-xyz/anchor": "^0.32.1",
+    "@solana/web3.js": "1.95.8"
   },
   "devDependencies": {
     "chai": "^4.3.4",
@@ -17,5 +18,9 @@
     "@types/mocha": "^9.0.0",
     "typescript": "^5.7.3",
     "prettier": "^2.6.2"
+  },
+  "packageManager": "yarn@1.22.22",
+  "resolutions": {
+    "@solana/web3.js": "1.87.6"
   }
 }

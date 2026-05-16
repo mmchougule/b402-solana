@@ -44,6 +44,9 @@ phase_9_dual_note = []
 # while the new path is being smoked; flip default ON in a follow-up
 # commit once fork e2e is green.
 prd_35_pending_inputs = []
+# Anchor 0.30+ split IDL generation behind this feature flag; required for
+# `anchor build` to emit the IDL JSON consumed by the SDK.
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
 
 [dependencies]
 anchor-lang = { workspace = true, features = ["init-if-needed"] }

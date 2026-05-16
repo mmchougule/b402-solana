@@ -65,10 +65,65 @@ export interface SubmitDeps {
   jitoBundleUrl: string | null;
   /** Override fetch impl in tests. */
   fetchImpl?: typeof fetch;
+  /** Priority fee floor (microLamports per CU). Applied even at low congestion
+   *  so txs always pay something — pure-zero priority gets dropped under any
+   *  burst of network demand. Defaults to 10_000. */
+  priorityFeeFloorMicroLamports?: number;
+  /** Priority fee ceiling (microLamports per CU). Caps spend during heavy
+   *  congestion. Defaults to 500_000. */
+  priorityFeeCeilMicroLamports?: number;
+  /** Optional logger for telemetry on the priority-fee decision. */
+  logger?: { info: (data: object, msg: string) => void; warn: (data: object, msg: string) => void };
 }
+
+const DEFAULT_PRIORITY_FEE_FLOOR = 10_000;
+const DEFAULT_PRIORITY_FEE_CEIL = 500_000;
 
 export class RpcSubmitter implements Submitter {
   constructor(private readonly deps: SubmitDeps) {}
+
+  /**
+   * Dynamic priority-fee selector. Strategy:
+   *   1. Query `getRecentPrioritizationFees` (no filter; global signal).
+   *   2. Sort recent non-zero observations, take the 75th percentile.
+   *   3. Clamp to [floor, ceil] from config.
+   *
+   * Why p75 (not p50): we want to land in the next 1-3 slots even when
+   * demand spikes. Median = "land eventually." p75 = "land soon" without
+   * overspending. Production trading bots typically use p75-p90.
+   *
+   * Cache: hold the last value for 10s. Querying every tx adds RPC load
+   * with no real signal change at sub-10s timescales.
+   */
+  private _cachedPriorityFee: { value: number; ts: number } | null = null;
+
+  private async pickPriorityFee(): Promise<number> {
+    const { connection, logger } = this.deps;
+    const floor = this.deps.priorityFeeFloorMicroLamports ?? DEFAULT_PRIORITY_FEE_FLOOR;
+    const ceil = this.deps.priorityFeeCeilMicroLamports ?? DEFAULT_PRIORITY_FEE_CEIL;
+    const now = Date.now();
+    if (this._cachedPriorityFee && now - this._cachedPriorityFee.ts < 10_000) {
+      return this._cachedPriorityFee.value;
+    }
+
+    let chosen = floor;
+    try {
+      const fees = await connection.getRecentPrioritizationFees();
+      const nonZero = fees.map((f) => f.prioritizationFee).filter((f) => f > 0);
+      if (nonZero.length > 0) {
+        nonZero.sort((a, b) => a - b);
+        const p75 = nonZero[Math.floor(nonZero.length * 0.75)] ?? floor;
+        chosen = Math.max(floor, Math.min(ceil, p75));
+      }
+    } catch (e) {
+      // On failure, fall through to floor — better to pay a minimum than
+      // submit zero-priority and risk drop.
+      logger?.warn({ err: (e as Error).message }, 'getRecentPrioritizationFees failed; using floor');
+    }
+    logger?.info({ microLamports: chosen, floor, ceil }, 'priority fee selected');
+    this._cachedPriorityFee = { value: chosen, ts: now };
+    return chosen;
+  }
 
   async submit(input: SubmitInput): Promise<SubmitResult> {
     const tx = await this.buildAndSign(input);
@@ -86,6 +141,17 @@ export class RpcSubmitter implements Submitter {
   private async buildAndSign(input: SubmitInput): Promise<VersionedTransaction> {
     const { connection, relayer } = this.deps;
 
+    // Compute budget setup:
+    //   - setComputeUnitLimit: CU ceiling for execution (oversized but safe).
+    //   - setComputeUnitPrice: the priority fee per CU. This is the new
+    //     critical addition — Solana validators sort the tx queue by
+    //     compute_unit_price, so zero-priority txs get dropped under any
+    //     measurable congestion. We compute a dynamic price based on the
+    //     network's recent fee distribution, clamped to a sane range.
+    const priorityFeeMicroLamports = await this.pickPriorityFee();
+    const priorityIx = ComputeBudgetProgram.setComputeUnitPrice({
+      microLamports: priorityFeeMicroLamports,
+    });
     const cuIx = ComputeBudgetProgram.setComputeUnitLimit({ units: input.computeUnitLimit });
 
     // Resolve any ALTs the client referenced.
@@ -160,7 +226,10 @@ export class RpcSubmitter implements Submitter {
     const msg = new TransactionMessage({
       payerKey: relayer.publicKey,
       recentBlockhash: blockhash,
-      instructions: [cuIx, ix, ...additionalIxs],
+      // Order: priority-fee ix BEFORE limit ix. Both must precede the
+      // payload. Validators read them in any order, but keeping
+      // priority-first matches the @solana/web3.js convention.
+      instructions: [priorityIx, cuIx, ix, ...additionalIxs],
     }).compileToV0Message(luts);
 
     const vtx = new VersionedTransaction(msg);

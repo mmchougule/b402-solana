@@ -62,6 +62,9 @@ export async function buildServer() {
     relayer: cfg.keypair,
     maxTxSize: cfg.maxTxSize,
     jitoBundleUrl: cfg.jitoBundleUrl,
+    priorityFeeFloorMicroLamports: cfg.priorityFeeFloorMicroLamports,
+    priorityFeeCeilMicroLamports: cfg.priorityFeeCeilMicroLamports,
+    logger: fastify.log,
   });
 
   const startedAt = Date.now();

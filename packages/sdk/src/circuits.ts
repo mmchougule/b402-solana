@@ -16,10 +16,10 @@
  * mirrored deployments. Override the cache root with B402_CIRCUITS_CACHE.
  */
 
-import * as fs from 'node:fs';
-import * as os from 'node:os';
-import * as path from 'node:path';
-import { createHash } from 'node:crypto';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { createHash } from 'crypto';
 
 export interface CircuitArtifact {
   /** Public name of the file as it appears in the CDN. */

@@ -123,6 +123,66 @@ fn send_check(
     svm.send_transaction(tx).map(|_| ())
 }
 
+/// Returns total compute units charged for the tx (LiteSVM metadata).
+fn send_check_cu(
+    svm: &mut LiteSVM,
+    caller: &Keypair,
+    accts: &Accounts,
+    in_amount: u64,
+    expected_out_value: u64,
+    delta: i64,
+) -> Result<u64, litesvm::types::FailedTransactionMetadata> {
+    let args = CheckArgs {
+        in_amount,
+        expected_out_value,
+        action_payload: delta.to_le_bytes().to_vec(),
+    };
+    let mut data = discriminator::instruction("check_adapter_delta_mock").to_vec();
+    args.serialize(&mut data).unwrap();
+
+    let ix = Instruction {
+        program_id: ids::b402_pool(),
+        accounts: vec![
+            AccountMeta::new(caller.pubkey(), true),
+            AccountMeta::new(accts.out_vault, false),
+            AccountMeta::new_readonly(mock_adapter_id(), false),
+            AccountMeta::new_readonly(adapter_authority(), false),
+            AccountMeta::new(accts.in_vault, false),
+            AccountMeta::new(accts.out_vault, false),
+            AccountMeta::new(accts.adapter_in_ta, false),
+            AccountMeta::new(accts.adapter_out_ta, false),
+            AccountMeta::new_readonly(token_program_id(), false),
+        ],
+        data,
+    };
+    let cu = ComputeBudgetInstruction::set_compute_unit_limit(400_000);
+    let msg = Message::new(&[cu, ix], Some(&caller.pubkey()));
+    let tx = Transaction::new(&[caller], msg, svm.latest_blockhash());
+    svm.send_transaction(tx).map(|m| m.compute_units_consumed)
+}
+
+#[test]
+fn proofbpf_litesvm_cu_snapshot_adapter_delta_ok() {
+    let (mut svm, accts, caller) = setup_svm();
+    let cu = send_check_cu(&mut svm, &caller, &accts, 50, 100, 0).expect("delta=0 must pass");
+    eprintln!("PROOFBPF_CU_TOTAL={cu}");
+}
+
+/// Multiple fresh LiteSVM runs → median CU (more stable than a single snapshot).
+#[test]
+fn proofbpf_litesvm_cu_median_adapter_delta_ok() {
+    let mut samples: Vec<u64> = Vec::with_capacity(9);
+    for _ in 0..9 {
+        let (mut svm, accts, caller) = setup_svm();
+        let cu = send_check_cu(&mut svm, &caller, &accts, 50, 100, 0).expect("delta=0 must pass");
+        samples.push(cu);
+    }
+    samples.sort_unstable();
+    let median = samples[4];
+    eprintln!("PROOFBPF_CU_MEDIAN={median}");
+    eprintln!("PROOFBPF_CU_SAMPLES={}", samples.iter().map(u64::to_string).collect::<Vec<_>>().join(","));
+}
+
 #[test]
 fn adapter_returning_exactly_min_out_passes_check() {
     let (mut svm, accts, caller) = setup_svm();

@@ -1,0 +1,30 @@
+{
+  "name": "@b402ai/private-dca",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Agent-driven private DCA on Solana — recurring private swaps via b402 shielded pool with a public Jupiter baseline for comparison.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build-deps": "pnpm --filter='@b402ai/solana-shared' --filter='@b402ai/solana-prover' --filter='@b402ai/solana' build",
+    "private": "tsx cli.ts",
+    "public": "tsx baseline-cli.ts",
+    "render": "tsx render-comparison.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@b402ai/solana": "workspace:*",
+    "@b402ai/solana-shared": "workspace:*",
+    "@lightprotocol/stateless.js": "^0.23.0-beta.5",
+    "@solana/spl-token": "^0.4.9",
+    "@solana/web3.js": "^1.95.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4"
+  }
+}

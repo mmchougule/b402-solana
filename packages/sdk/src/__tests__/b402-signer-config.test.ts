@@ -87,4 +87,21 @@ describe('B402Solana config back-compat', () => {
     expect(a.wallet.spendingPub).toEqual(b.wallet.spendingPub);
     expect(a.wallet.viewingPub).toEqual(b.wallet.viewingPub);
   });
+
+  it('notesPersistence config forwards to NoteStore — load is called on ready()', async () => {
+    // Regression: SDK 0.0.27 added pluggable persist to NoteStore but the
+    // B402Solana constructor only forwarded filesystem `dir`. The
+    // pluggable shape was silently dropped, leaving callers thinking
+    // they had Postgres persistence when in fact nothing was saved.
+    const kp = Keypair.generate();
+    const load = vi.fn(async () => null);
+    const save = vi.fn(async () => {});
+    const sdk = new B402Solana({
+      cluster: 'devnet',
+      keypair: kp,
+      notesPersistence: { load, save },
+    });
+    await sdk.ready();
+    expect(load).toHaveBeenCalled();
+  });
 });

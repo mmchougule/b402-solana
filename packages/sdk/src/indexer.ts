@@ -77,6 +77,23 @@ export interface IndexerSpentResponse {
   signature?: string;
 }
 
+export interface IndexerCommitment {
+  /** Decimal bigint string. */
+  leafIndex: string;
+  /** Hex (LE) 32-byte commitment hash. */
+  commitment: string;
+  /** Hex ciphertext from the on-chain `encrypted_notes` event. */
+  ciphertext: string;
+  /** Hex (LE) 32-byte ephemeral pub from the encrypt envelope. */
+  ephemeralPub: string;
+  /** Hex 2-byte viewing tag (early-filter before the expensive decrypt). */
+  viewingTag: string;
+  /** Hex (LE) 32-byte tree root after this commitment was inserted. */
+  treeRootAfter: string;
+  /** Decimal slot string. */
+  slot: string;
+}
+
 /**
  * Minimal hex/bigint helpers — keep the surface tight so we don't pull
  * crypto-flavoured deps into a thin HTTP client.
@@ -213,6 +230,27 @@ export class B402Indexer {
   async state(): Promise<IndexerStateResponse> {
     return fetchJson<IndexerStateResponse>(
       `${this.cfg.url}/v1/state`,
+      this.cfg.timeoutMs,
+    );
+  }
+
+  /**
+   * Page through all commitments since `since` (exclusive). Each item carries
+   * the leafIndex, commitment hash, encrypted ciphertext, ephemeral pub, and
+   * a 2-byte viewing tag the SDK can use to early-filter to its own notes
+   * before the (more expensive) decrypt attempt.
+   *
+   * Designed to replace the dumb on-chain scan in NoteStore.backfill().
+   * One HTTPS call returns up to `limit` commitments; loop until empty.
+   */
+  async commitmentsSince(opts: {
+    since: bigint;
+    limit?: number;
+  }): Promise<{ items: IndexerCommitment[]; nextCursor: string | null }> {
+    const limit = opts.limit ?? 200;
+    const url = `${this.cfg.url}/v1/commitments?since=${opts.since.toString()}&limit=${limit}`;
+    return fetchJson<{ items: IndexerCommitment[]; nextCursor: string | null }>(
+      url,
       this.cfg.timeoutMs,
     );
   }

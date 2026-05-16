@@ -6,6 +6,7 @@ packages:
   - 'packages/mcp-server'
   - 'packages/create-agent'
   - 'apps/playground'
+  - 'apps/private-dca'
   - 'circuits'
   - 'examples'
   - 'tests/v2'

@@ -16,4 +16,4 @@ options:
   machineType: E2_HIGHCPU_8
 timeout: 1800s
 substitutions:
-  _TAG: '0.0.4'
+  _TAG: '0.0.6'

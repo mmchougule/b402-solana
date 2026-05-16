@@ -1,0 +1,106 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "theme": "palm",
+  "name": "b402-solana",
+  "colors": {
+    "primary": "#F4B526",
+    "light": "#F4B526",
+    "dark": "#F4B526"
+  },
+  "favicon": "/fav-icon.png",
+  "navigation": {
+    "groups": [
+      {
+        "group": "Get Started",
+        "pages": [
+          "introduction",
+          "quickstart"
+        ]
+      },
+      {
+        "group": "Use it from an agent",
+        "pages": [
+          "mcp/overview",
+          "mcp/tools",
+          "mcp/claude-code-setup",
+          "mcp/cursor-setup",
+          "mcp/prompt-patterns"
+        ]
+      },
+      {
+        "group": "Use it from your code",
+        "pages": [
+          "sdk/installation",
+          "sdk/shield-unshield",
+          "sdk/private-actions",
+          "sdk/scanner"
+        ]
+      },
+      {
+        "group": "Adapters",
+        "pages": [
+          "adapters/overview",
+          "adapters/jupiter",
+          "adapters/kamino",
+          "adapters/percolator",
+          "adapters/building-an-adapter"
+        ]
+      },
+      {
+        "group": "How it works",
+        "pages": [
+          "concepts/composability",
+          "concepts/privacy-model",
+          "concepts/shielded-pool",
+          "concepts/trust-assumptions",
+          "protocol/architecture",
+          "protocol/pool-program",
+          "protocol/circuits",
+          "protocol/verifier",
+          "protocol/nullifier-tree",
+          "protocol/nullifier-program"
+        ]
+      },
+      {
+        "group": "Reference",
+        "pages": [
+          "reference/program-ids",
+          "reference/instruction-reference",
+          "reference/error-codes",
+          "reference/metrics",
+          "reference/faq"
+        ]
+      }
+    ]
+  },
+  "logo": {
+    "light": "/logo/b402-full-logo.png",
+    "dark": "/logo/b402-full-logo.png"
+  },
+  "appearance": {
+    "default": "dark",
+    "strict": false
+  },
+  "navbar": {
+    "links": [
+      {
+        "label": "GitHub",
+        "href": "https://github.com/vistara-labs/b402-solana"
+      },
+      {
+        "label": "b402.ai",
+        "href": "https://b402.ai"
+      }
+    ],
+    "primary": {
+      "type": "button",
+      "label": "Get started",
+      "href": "/quickstart"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/vistara-labs/b402-solana"
+    }
+  }
+}

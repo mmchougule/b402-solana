@@ -44,7 +44,9 @@ pub mod b402_mock_adapter {
         );
 
         require!(action_payload.len() == 8, MockError::InvalidPayload);
-        let delta = i64::from_le_bytes(action_payload[..8].try_into().unwrap());
+        let mut le = [0u8; 8];
+        le.copy_from_slice(&action_payload[0..8]);
+        let delta = i64::from_le_bytes(le);
 
         let to_send: u64 = if delta >= 0 {
             min_out_amount.saturating_add(delta as u64)

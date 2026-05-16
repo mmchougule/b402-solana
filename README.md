@@ -270,9 +270,12 @@ cd ../crypto && cargo test
 # 2. Build programs for BPF
 cargo build-sbf --tools-version v1.54 --manifest-path programs/b402-verifier-transact/Cargo.toml
 cargo build-sbf --tools-version v1.54 --manifest-path programs/b402-verifier-adapt/Cargo.toml
-cargo build-sbf --tools-version v1.54 --manifest-path programs/b402-pool/Cargo.toml --features test-mock
 cargo build-sbf --tools-version v1.54 --manifest-path programs/b402-jupiter-adapter/Cargo.toml
-cargo build-sbf --tools-version v1.54 --manifest-path programs/b402-mock-adapter/Cargo.toml
+# `b402_pool` + `b402_mock_adapter` must match what `tests/onchain` (LiteSVM) loads.
+# Platform-tools v1.54 currently trips "Access violation … 0x32" inside CPI for this pair;
+# v1.48 matches the VM until we bump litesvm / align toolchains.
+cargo build-sbf --tools-version v1.48 --manifest-path programs/b402-pool/Cargo.toml --features test-mock
+cargo build-sbf --tools-version v1.48 --manifest-path programs/b402-mock-adapter/Cargo.toml
 
 # 3. On-chain tests (litesvm, in-process Solana VM)
 cd tests/onchain && cargo test

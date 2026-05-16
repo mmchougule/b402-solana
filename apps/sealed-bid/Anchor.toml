@@ -8,11 +8,14 @@ skip-lint = false
 [programs.localnet]
 b_402_sealed_bid = "8pq15sh91b48FZymok9jR1WFi2fFiNWUPHPpmfCZptmq"
 
+[programs.devnet]
+b_402_sealed_bid = "8pq15sh91b48FZymok9jR1WFi2fFiNWUPHPpmfCZptmq"
+
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "localnet"
+cluster = "devnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]

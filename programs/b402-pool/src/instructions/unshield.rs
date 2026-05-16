@@ -82,11 +82,13 @@ pub struct Unshield<'info> {
     pub relayer_fee_token_account: InterfaceAccount<'info, TokenAccount>,
 
     /// Mint account — required by `transfer_checked`. Address-checked against
-    /// `token_config.mint` for safety.
+    /// `token_config.mint` for safety. Boxed: keeps the Anchor-generated
+    /// `try_accounts` stack frame under the BPF 4096-byte ceiling
+    /// (otherwise overflows by 8 bytes with the new mint slot).
     #[account(
         address = token_config.mint @ PoolError::MintMismatch,
     )]
-    pub mint: InterfaceAccount<'info, Mint>,
+    pub mint: Box<InterfaceAccount<'info, Mint>>,
 
     #[account(
         mut,
