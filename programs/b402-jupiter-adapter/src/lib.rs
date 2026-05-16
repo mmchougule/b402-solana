@@ -9,8 +9,10 @@
 //! adapter is trusted only to try hard; it is NOT trusted to report honestly.
 
 use anchor_lang::prelude::*;
-use anchor_spl::token_interface::{TokenAccount, TokenInterface};
-use anchor_spl::token::{self as classic_token, Transfer as ClassicTransfer};
+use anchor_spl::token_interface::{
+    self as token_interface_cpi, Mint as InterfaceMint, TokenAccount, TokenInterface,
+    TransferChecked,
+};
 
 declare_id!("3RHRcbinCmcj8JPBfVxb9FW76oh4r8y21aSx4JFy3yx7");
 
@@ -94,26 +96,31 @@ pub mod b402_jupiter_adapter {
         let received = post_out.saturating_sub(pre_out);
         require!(received >= min_out_amount, AdapterError::SlippageExceeded);
 
-        // Transfer all of the received amount to pool's out_vault.
+        // Transfer the received amount back to pool's out_vault.
         //
-        // Legacy `token::transfer` is used here (not `transfer_checked`)
-        // because the adapter doesn't carry an `out_mint` slot in its
-        // `Accounts` struct — keeping wire-compat with mock + kamino
-        // adapters that share the same pool CPI shape. This path only
-        // works for classic SPL OUT mints. Swaps into Token-2022 outputs
-        // need a follow-up that adds out_mint + `transfer_checked` here.
-        let cpi_accounts = ClassicTransfer {
+        // Cross-program swaps (e.g. Token-2022 pump.fun mint IN, classic SPL
+        // wSOL OUT — or vice versa) need the OUT-side transfer to address its
+        // own token program. The adapter now carries dedicated `out_mint` +
+        // `token_program_out` slots so the OUT CPI can invoke whichever program
+        // owns out_vault, independent of the IN program.
+        //
+        // `transfer_checked` instead of legacy `transfer`: required for
+        // Token-2022 vaults and harmless for classic SPL (it just adds a
+        // decimals assertion).
+        let cpi_accounts = TransferChecked {
             from: out_ta.to_account_info(),
+            mint: ctx.accounts.out_mint.to_account_info(),
             to: ctx.accounts.out_vault.to_account_info(),
             authority: ctx.accounts.adapter_authority.to_account_info(),
         };
-        classic_token::transfer(
+        token_interface_cpi::transfer_checked(
             CpiContext::new_with_signer(
-                ctx.accounts.token_program.to_account_info(),
+                ctx.accounts.token_program_out.to_account_info(),
                 cpi_accounts,
                 signer_seeds,
             ),
             received,
+            ctx.accounts.out_mint.decimals,
         )?;
 
         Ok(())
@@ -151,15 +158,25 @@ pub struct Execute<'info> {
     )]
     pub adapter_out_ta: InterfaceAccount<'info, TokenAccount>,
 
-    /// `Interface<TokenInterface>` so the pool can pass either the classic
-    /// SPL Token or the Token-2022 program here. IN-side flexibility (pool
-    /// → adapter_in_ta) is handled entirely by the pool program. OUT-side
-    /// transfer below (adapter_out_ta → out_vault) currently uses the
-    /// classic `Transfer` ix, which Token-2022 rejects — meaning swaps INTO
-    /// a Token-2022 mint will fail at this transfer until we add an
-    /// `out_mint` slot and switch to `transfer_checked`. The pump.fun shield
-    /// → swap-to-USDC flow does NOT need this (USDC is classic SPL).
+    /// OUT-side mint header — required by `transfer_checked` for
+    /// adapter_out_ta → out_vault. Address is constrained at the pool layer
+    /// (mint == token_config_out.mint); the adapter trusts the pool to pass
+    /// the correct mint here. Independent of IN-side so cross-program swaps
+    /// (Token-2022 ↔ classic SPL) work end-to-end.
+    pub out_mint: InterfaceAccount<'info, InterfaceMint>,
+
+    /// IN-side token program. Used by the pool when it transfers in_vault →
+    /// adapter_in_ta and by any IN-side ATA derivation that the adapter
+    /// touches. Jupiter itself decides which program(s) it needs internally
+    /// (those come in via `remaining_accounts`).
     pub token_program: Interface<'info, TokenInterface>,
+
+    /// OUT-side token program. Carries the program that owns `out_vault` and
+    /// `adapter_out_ta`. Distinct from `token_program` so that swaps where
+    /// IN and OUT live on different token programs (e.g. Token-2022 pump.fun
+    /// mint → classic SPL wSOL, or the reverse) succeed at the
+    /// `adapter_out_ta → out_vault` transfer.
+    pub token_program_out: Interface<'info, TokenInterface>,
 }
 
 #[error_code]
