@@ -158,24 +158,22 @@ pub struct Execute<'info> {
     )]
     pub adapter_out_ta: InterfaceAccount<'info, TokenAccount>,
 
-    /// OUT-side mint header — required by `transfer_checked` for
-    /// adapter_out_ta → out_vault. Address is constrained at the pool layer
-    /// (mint == token_config_out.mint); the adapter trusts the pool to pass
-    /// the correct mint here. Independent of IN-side so cross-program swaps
-    /// (Token-2022 ↔ classic SPL) work end-to-end.
-    pub out_mint: InterfaceAccount<'info, InterfaceMint>,
-
-    /// IN-side token program. Used by the pool when it transfers in_vault →
-    /// adapter_in_ta and by any IN-side ATA derivation that the adapter
-    /// touches. Jupiter itself decides which program(s) it needs internally
-    /// (those come in via `remaining_accounts`).
+    /// IN-side token program. Pool pushes this at slot 5 (matching the
+    /// existing wire shape). Jupiter itself decides which program(s) it needs
+    /// internally via `remaining_accounts`.
     pub token_program: Interface<'info, TokenInterface>,
 
-    /// OUT-side token program. Carries the program that owns `out_vault` and
-    /// `adapter_out_ta`. Distinct from `token_program` so that swaps where
-    /// IN and OUT live on different token programs (e.g. Token-2022 pump.fun
-    /// mint → classic SPL wSOL, or the reverse) succeed at the
-    /// `adapter_out_ta → out_vault` transfer.
+    /// OUT-side mint header — required by `transfer_checked` for
+    /// adapter_out_ta → out_vault. Pool's `mint_out` slot is address-checked
+    /// against `token_config_out.mint`; this adapter trusts that validation.
+    /// Pool pushes this at slot 6 (immediately after `token_program`) for
+    /// stateless adapters like Jupiter.
+    pub out_mint: InterfaceAccount<'info, InterfaceMint>,
+
+    /// OUT-side token program. Distinct from `token_program` so swaps where
+    /// IN and OUT live on different token programs (Token-2022 pump.fun mint
+    /// ↔ classic SPL wSOL, or reverse) succeed at the
+    /// `adapter_out_ta → out_vault` transfer. Pool pushes this at slot 7.
     pub token_program_out: Interface<'info, TokenInterface>,
 }
 

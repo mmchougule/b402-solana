@@ -187,6 +187,16 @@ pub struct AdaptExecute<'info> {
     )]
     pub mint_in: Box<InterfaceAccount<'info, InterfaceMint>>,
 
+    /// OUT-mint header — same role as `mint_in` for the OUT-side transfer
+    /// the adapter performs (`adapter_out_ta → out_vault`). Address-checked
+    /// against the out token-config so a malicious relayer can't substitute
+    /// a different mint to spoof decimals. Pool forwards this account to
+    /// the adapter via `build_adapter_cpi_metas`.
+    #[account(
+        address = token_config_out.mint @ PoolError::MintMismatch,
+    )]
+    pub mint_out: Box<InterfaceAccount<'info, InterfaceMint>>,
+
     #[account(
         mut,
         seeds = [VERSION_PREFIX, SEED_TREE],
@@ -247,6 +257,11 @@ pub struct AdaptExecute<'info> {
     pub pending_inputs: UncheckedAccount<'info>,
 
     pub token_program: Interface<'info, TokenInterface>,
+    /// OUT-side token program. Distinct from `token_program` so cross-program
+    /// swaps (Token-2022 ↔ classic SPL) succeed at the adapter's
+    /// `adapter_out_ta → out_vault` transfer. For same-program swaps, SDK
+    /// passes the same program for both slots; pool forwards both verbatim.
+    pub token_program_out: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
 }
 
@@ -324,9 +339,17 @@ pub(crate) fn build_adapter_cpi_metas(
     // declare an `ix_sysvar` named slot and prepending it would shift
     // all `remaining_accounts` by 1.
     ix_sysvar: Option<Pubkey>,
+    // Cross-program swap support (Token-2022 ↔ classic SPL). Added in the
+    // Token-2022 migration. Adapter declares these as named slots AFTER its
+    // ix_sysvar slot (if present), so they're pushed in the same order here.
+    // Pool's address constraints validate them; adapter trusts the pool to
+    // pass mint_out matching out_vault's mint and token_program_out matching
+    // out_vault's owning program.
+    out_mint: Pubkey,
+    token_program_out: Pubkey,
     remaining: &[(Pubkey, /*is_writable*/ bool, /*is_signer*/ bool)],
 ) -> Vec<AccountMeta> {
-    let mut m = Vec::with_capacity(7 + remaining.len());
+    let mut m = Vec::with_capacity(9 + remaining.len());
     m.push(AccountMeta::new(adapter_authority, false));
     m.push(AccountMeta::new(in_vault, false));
     m.push(AccountMeta::new(out_vault, false));
@@ -336,6 +359,8 @@ pub(crate) fn build_adapter_cpi_metas(
     if let Some(ix_sv) = ix_sysvar {
         m.push(AccountMeta::new_readonly(ix_sv, false));
     }
+    m.push(AccountMeta::new_readonly(out_mint, false));
+    m.push(AccountMeta::new_readonly(token_program_out, false));
     for (key, is_writable, is_signer) in remaining {
         if *is_writable {
             m.push(AccountMeta::new(*key, *is_signer));
@@ -793,6 +818,8 @@ pub fn handler<'info>(
         ctx.accounts.adapter_out_ta.key(),
         ctx.accounts.token_program.key(),
         ix_sysvar_for_adapter,
+        ctx.accounts.mint_out.key(),
+        ctx.accounts.token_program_out.key(),
         adapter_remaining
             .iter()
             .map(|a| (*a.key, a.is_writable, a.is_signer))
@@ -800,7 +827,7 @@ pub fn handler<'info>(
             .as_slice(),
     );
     let mut adapter_infos: Vec<AccountInfo<'info>> =
-        Vec::with_capacity(7 + adapter_remaining.len());
+        Vec::with_capacity(9 + adapter_remaining.len());
     adapter_infos.push(ctx.accounts.adapter_authority.to_account_info());
     adapter_infos.push(ctx.accounts.in_vault.to_account_info());
     adapter_infos.push(ctx.accounts.out_vault.to_account_info());
@@ -810,6 +837,8 @@ pub fn handler<'info>(
     if stateful_adapter {
         adapter_infos.push(ctx.accounts.instructions_sysvar.clone());
     }
+    adapter_infos.push(ctx.accounts.mint_out.to_account_info());
+    adapter_infos.push(ctx.accounts.token_program_out.to_account_info());
     for a in adapter_remaining.iter() {
         adapter_infos.push(a.clone());
     }
@@ -1763,7 +1792,7 @@ mod adapter_cpi_meta_tests {
         // as Kamino's feePayer in the inner CPI; readonly here surfaces as
         // Anchor ConstraintMut on the kamino-adapter side.
         let (a, ivt, ovt, ita, ota, tok) = fixtures();
-        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, None, &[]);
+        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, None, Pubkey::new_unique(), Pubkey::new_unique(), &[]);
         assert_eq!(metas[0].pubkey, a);
         assert!(
             metas[0].is_writable,
@@ -1775,7 +1804,7 @@ mod adapter_cpi_meta_tests {
     #[test]
     fn vaults_and_scratch_atas_are_writable() {
         let (a, ivt, ovt, ita, ota, tok) = fixtures();
-        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, None, &[]);
+        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, None, Pubkey::new_unique(), Pubkey::new_unique(), &[]);
         // Slot 1: in_vault
         assert_eq!(metas[1].pubkey, ivt);
         assert!(metas[1].is_writable, "in_vault MUST be writable — token transfers debit it");
@@ -1793,7 +1822,7 @@ mod adapter_cpi_meta_tests {
     #[test]
     fn token_program_is_readonly_and_not_signer() {
         let (a, ivt, ovt, ita, ota, tok) = fixtures();
-        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, None, &[]);
+        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, None, Pubkey::new_unique(), Pubkey::new_unique(), &[]);
         assert_eq!(metas[5].pubkey, tok);
         assert!(!metas[5].is_writable, "token_program is a Program account; never written");
         assert!(!metas[5].is_signer);
@@ -1806,7 +1835,7 @@ mod adapter_cpi_meta_tests {
         let r2 = (Pubkey::new_unique(), false, false); // readonly, not signer
         let r3 = (Pubkey::new_unique(), true, true);   // writable, signer
         let r4 = (Pubkey::new_unique(), false, true);  // readonly, signer
-        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, None, &[r1, r2, r3, r4]);
+        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, None, Pubkey::new_unique(), Pubkey::new_unique(), &[r1, r2, r3, r4]);
 
         // Total = 6 named + 4 forwarded.
         assert_eq!(metas.len(), 10);
@@ -1839,7 +1868,7 @@ mod adapter_cpi_meta_tests {
         // accounts in this exact order. Per-adapter remaining_accounts
         // begin at index 6.
         let (a, ivt, ovt, ita, ota, tok) = fixtures();
-        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, None, &[]);
+        let metas = build_adapter_cpi_metas(a, ivt, ovt, ita, ota, tok, None, Pubkey::new_unique(), Pubkey::new_unique(), &[]);
         assert_eq!(metas.len(), 6);
         assert_eq!(metas[0].pubkey, a, "slot 0: adapter_authority");
         assert_eq!(metas[1].pubkey, ivt, "slot 1: in_vault");
