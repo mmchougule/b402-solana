@@ -66,7 +66,12 @@ export const AdditionalIxSchema = z.object({
 
 export const RelayRequestSchema = z.object({
   ixData: Base64String,
-  accountKeys: z.array(AccountMetaSchema).min(1).max(64),
+  // Solana inline tx caps at ~36 unique accounts; with ALTs (v0 tx) total
+  // can reach 256. Multi-hop Jupiter aggregator routes (Quantum, GoonFi,
+  // SolFi, Whirlpool→AlphaQ→SolFi chains) regularly push remaining_accounts
+  // to 80-120. The old 64 cap silently blocked nearly every multi-hop
+  // pump.fun-class trade. 220 keeps headroom under the 256 v0 ceiling.
+  accountKeys: z.array(AccountMetaSchema).min(1).max(220),
   altAddresses: z.array(z.string().min(32).max(44)).max(8).optional(),
   computeUnitLimit: z.number().int().positive().max(1_400_000).optional(),
   /** Optional second signer (rare — most ops use relayer-only). */

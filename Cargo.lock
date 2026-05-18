@@ -582,6 +582,7 @@ dependencies = [
  "anchor-lang",
  "anchor-spl",
  "indexmap",
+ "spl-token-2022",
 ]
 
 [[package]]

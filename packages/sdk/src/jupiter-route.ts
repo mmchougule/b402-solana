@@ -28,6 +28,13 @@ export interface JupiterRouteRequest {
   /** Whether to limit Jupiter to single-hop routes. Default true (multi-hop
    *  blows past tx-size cap on most pairs). */
   onlyDirectRoutes?: boolean;
+  /** Jupiter's tx-size pre-filter — only returns routes whose total account
+   *  count is ≤ this number. Useful for wrapped-in-pool swaps where we add
+   *  pool/adapter/nullifier overhead on top of Jupiter's route. Defaults to
+   *  the Jupiter API default (64). Set to ~40 for routes that go through
+   *  b402's adapt_execute + create_nullifier sibling-ix (those add ~20-25
+   *  accounts of overhead before ALT compaction). */
+  maxAccounts?: number;
 }
 
 export interface JupiterRouteResponse {
@@ -53,22 +60,35 @@ export interface JupiterRouteResponse {
 export async function fetchJupiterRoute(
   req: JupiterRouteRequest,
 ): Promise<JupiterRouteResponse> {
-  const dexes = req.dexes ?? 'Phoenix';
-  const onlyDirect = req.onlyDirectRoutes ?? true;
+  // Defaults aligned with what Jupiter's web UI uses: multi-hop allowed, no
+  // dex filter. The old `onlyDirectRoutes=true` + `dexes='Phoenix'` defaults
+  // worked for early demos with USDC↔SOL but reject every multi-hop token
+  // (PUMP, HYPE, JTO, RENDER, PYTH, KALSHI — all route via Quantum / GoonFi /
+  // SolFi / HumidiFi via multi-hop). Callers can still narrow via `dexes`.
+  const onlyDirect = req.onlyDirectRoutes ?? false;
+  // Empty / undefined `dexes` → OMIT the param entirely. Sending `dexes=`
+  // makes Jupiter interpret it as "no DEX allowed" → NO-ROUTE.
+  const dexesParam = (req.dexes && req.dexes.length > 0)
+    ? `&dexes=${encodeURIComponent(req.dexes)}`
+    : '';
+  const maxAccountsParam = req.maxAccounts !== undefined
+    ? `&maxAccounts=${req.maxAccounts}`
+    : '';
   const url =
     `https://lite-api.jup.ag/swap/v1/quote?inputMint=${req.inMint.toBase58()}` +
     `&outputMint=${req.outMint.toBase58()}` +
     `&amount=${req.amount}` +
     `&slippageBps=${req.slippageBps}` +
     `&onlyDirectRoutes=${onlyDirect ? 'true' : 'false'}` +
-    `&dexes=${encodeURIComponent(dexes)}`;
+    dexesParam +
+    maxAccountsParam;
   const quoteRes = await fetch(url);
   if (!quoteRes.ok) throw new Error(`Jupiter quote ${quoteRes.status}: ${await quoteRes.text().catch(() => '')}`);
   const quote = (await quoteRes.json()) as JupiterRouteResponse['quote'];
   if (!quote.outAmount) {
     throw new Error(
       `no Jupiter route ${req.inMint.toBase58().slice(0, 4)}→${req.outMint.toBase58().slice(0, 4)} ` +
-      `for ${req.amount} via dexes=[${dexes}] (onlyDirect=${onlyDirect}). Try widening dexes or disabling direct-only.`,
+      `for ${req.amount} via dexes=[${req.dexes ?? '(none — multi-hop allowed)'}] (onlyDirect=${onlyDirect}). Try widening dexes or disabling direct-only.`,
     );
   }
   const swapBody = {

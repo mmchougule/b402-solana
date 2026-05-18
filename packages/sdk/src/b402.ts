@@ -1722,6 +1722,16 @@ export class B402Solana {
     /** DEX allowlist for Jupiter routing. Default Phoenix (smallest
      *  account count, fits the 1232 B tx cap reliably). */
     dexes?: string;
+    /** If true, restrict Jupiter to single-hop routes. Smaller tx (fewer
+     *  accounts), works for tokens with a direct wSOL pool. If false /
+     *  unset, multi-hop allowed (may bust the 1232 B cap). */
+    onlyDirectRoutes?: boolean;
+    /** Jupiter-side `maxAccounts` filter. Caps the route plan's account
+     *  count so the wrapped tx fits the 1232 B v0 cap after we add pool +
+     *  adapter + nullifier sibling-ix overhead (~20-25 accounts). Default
+     *  unset (Jupiter's own default = 64). For Token-2022 / TransferHook
+     *  mints (PUMP class), pass ~40 to leave headroom. */
+    maxAccounts?: number;
   }): Promise<PrivateSwapResult> {
     await this.ready();
 
@@ -1776,6 +1786,8 @@ export class B402Solana {
         slippageBps,
         userPublicKey: adapterAuthority,
         ...(req.dexes !== undefined ? { dexes: req.dexes } : {}),
+        ...(req.onlyDirectRoutes !== undefined ? { onlyDirectRoutes: req.onlyDirectRoutes } : {}),
+        ...(req.maxAccounts !== undefined ? { maxAccounts: req.maxAccounts } : {}),
       });
       const jupIxData = new Uint8Array(Buffer.from(route.swap.swapInstruction.data, 'base64'));
       const u32Le = (n: number) => { const b = Buffer.alloc(4); b.writeUInt32LE(n, 0); return b; };
@@ -2140,7 +2152,7 @@ export class B402Solana {
       }
     }
     const rpc: any = this._photonRpc;
-    const { bn } = await import('@lightprotocol/stateless.js');
+    const { bn, batchAddressTree } = await import('@lightprotocol/stateless.js');
     const checks = await Promise.all(
       notes.map(async (n) => {
         const key = n.leafIndex.toString();
@@ -2150,20 +2162,38 @@ export class B402Solana {
           const nh = await nullifierHash(this._wallet!.spendingPriv, n.leafIndex);
           const nhLe = bigintToLe32(nh);
           const address = deriveNullifierAddress(nhLe);
-          // getMultipleNewAddressProofs returns non-inclusion proofs from
-          // the batch address tree. Success ⇒ address absent ⇒ unspent.
-          // Throws with "already exists" ⇒ address present ⇒ spent.
-          await rpc.getMultipleNewAddressProofs([bn(address.toBytes())]);
+          // Use the SAME endpoint the swap-time call uses
+          // (getValidityProofV0), not getMultipleNewAddressProofs. The two
+          // endpoints disagree for ~3% of spent nullifiers in practice:
+          // getMultipleNewAddressProofs occasionally returns generic
+          // "Validation Error" or "Internal server error" for an already-
+          // inserted address INSTEAD of "already exists", which the old
+          // catch() treated as transient and kept the note. The swap then
+          // failed with "Address X already exists" — the recycled orphan
+          // was actually spent. Aligning the filter with the swap call
+          // makes the two views consistent.
+          await rpc.getValidityProofV0([], [{
+            tree: new PublicKey(batchAddressTree),
+            queue: new PublicKey(batchAddressTree),
+            address: bn(address.toBytes()),
+          }]);
           this._spentCache.set(key, { spent: false, at: now });
           return { n, spent: false };
         } catch (e: any) {
           const msg = String(e?.message ?? e);
-          if (/already exists/i.test(msg)) {
+          // Treat BOTH explicit "already exists" AND validation-flavored
+          // errors mentioning the address as spent. Photon's worded
+          // responses vary by endpoint version; pre-bake both shapes.
+          const isSpent =
+            /already exists/i.test(msg) ||
+            /Validation Error.*already exists/i.test(msg);
+          if (isSpent) {
             this._spentCache.set(key, { spent: true, at: now });
             this._notes!.markSpent(n.commitment);
             return { n, spent: true };
           }
-          // Transient Photon error — keep the note; swap-time probe catches.
+          // True transient error (5xx, timeout) — keep the note; swap-time
+          // path will surface a real failure if it's actually spent.
           return { n, spent: false };
         }
       }),

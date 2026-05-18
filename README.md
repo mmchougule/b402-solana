@@ -1,12 +1,15 @@
-# b402-solana
+# b402 — privacy layer for Solana
 
 [![ci](https://github.com/mmchougule/b402-solana/actions/workflows/ci.yml/badge.svg)](https://github.com/mmchougule/b402-solana/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-**Composable Confidential DeFi on Solana.** Shield once, then swap, lend, LP, or trade perps
-from a private balance — without your wallet appearing on-chain as the
-executing party. Single-tx execution, composable with any Solana protocol
-via a registered adapter.
+A ZK-shielded UTXO pool with a proof-bound adapter ABI on Solana. Shield
+assets into the pool, then spend notes through a registered adapter to swap
+on Jupiter, lend on Kamino, or route through any composed program — atomically,
+in a single transaction where the executing wallet is the pool's relayer.
+
+The deposit address and the executing wallet share no on-chain edge.
+Telegram-native trading client + MCP server ship in the same repo.
 
 Implementation: Circom 2 circuits, Anchor BPF programs, Groth16 verification
 through the `alt_bn128_*` syscalls (via `Lightprotocol/groth16-solana`),

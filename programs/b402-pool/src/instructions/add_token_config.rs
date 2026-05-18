@@ -2,6 +2,8 @@ use anchor_lang::prelude::*;
 use anchor_lang::system_program;
 use anchor_spl::associated_token::AssociatedToken;
 use anchor_spl::token_interface::{self, InitializeAccount3, Mint, TokenInterface};
+use spl_token_2022::extension::{BaseStateWithExtensions, ExtensionType, StateWithExtensions};
+use spl_token_2022::state::{Account as Token2022Account, Mint as Token2022Mint};
 
 use crate::constants::{SEED_CONFIG, SEED_TOKEN, SEED_VAULT, VERSION_PREFIX};
 use crate::events::TokenWhitelisted;
@@ -107,12 +109,28 @@ pub fn handler(ctx: Context<AddTokenConfig>, args: AddTokenConfigArgs) -> Result
             crate::error::PoolError::MintMismatch
         );
 
-        // Account size depends on the token program: legacy SPL Token uses
-        // 165 bytes (TokenAccount::LEN), Token-2022 uses 170 bytes (base) +
-        // any extension state. We only support unextended vault accounts —
-        // the pool itself never enables extensions on its vault — so 170 is
-        // correct for Token-2022 and 165 for classic SPL.
-        let space = if is_token_2022 { 170 } else { 165 };
+        // Compute the vault account size from the mint's actual extensions.
+        // Some Token-2022 mint extensions (e.g. TransferFeeConfig) require a
+        // companion extension on every holder account (TransferFeeAmount, +13
+        // bytes); others (TransferHook, MetadataPointer, TokenMetadata, ...)
+        // don't. Legacy SPL Token always uses the 165-byte base. Delegating
+        // to spl-token-2022's helpers keeps this correct as the allowlist
+        // grows — if you add ConfidentialTransfer or NonTransferable later,
+        // the size adjusts automatically.
+        let space: usize = if is_token_2022 {
+            let mint_data = mint_account_info.try_borrow_data()?;
+            let mint_parsed = StateWithExtensions::<Token2022Mint>::unpack(&mint_data)
+                .map_err(|_| error!(crate::error::PoolError::InvalidInstructionData))?;
+            let mint_exts = mint_parsed
+                .get_extension_types()
+                .map_err(|_| error!(crate::error::PoolError::InvalidInstructionData))?;
+            let required_account_exts =
+                ExtensionType::get_required_init_account_extensions(&mint_exts);
+            ExtensionType::try_calculate_account_len::<Token2022Account>(&required_account_exts)
+                .map_err(|_| error!(crate::error::PoolError::InvalidInstructionData))?
+        } else {
+            anchor_spl::token::TokenAccount::LEN
+        };
         let rent_lamports = Rent::get()?.minimum_balance(space);
 
         let mint_key = ctx.accounts.mint.key();

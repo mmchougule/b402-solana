@@ -13,7 +13,16 @@ const VERIFIER_T_ID = new PublicKey("Afjbnv2Ekxa98jjRw33xPPhZabevek2uZxoE75kr6Zr
 const VERIFIER_A_ID = new PublicKey("3Y2tyhNSaUiW5AcZcmFGRyTMdnroxHxc5GqFQPcMTZae");
 
 const c = new Connection(RPC_URL, "confirmed");
-const admin = Keypair.fromSecretKey(new Uint8Array(JSON.parse(fs.readFileSync(path.join(os.homedir(), ".config/solana/id.json"), "utf8"))));
+// Use the deterministic seed-7 admin keypair that examples/e2e.ts expects
+// on localnet, so init + e2e stay in sync (otherwise e2e's add_token_config
+// fails with UnauthorizedAdmin).
+const admin = Keypair.fromSeed(new Uint8Array(32).fill(7));
+// Airdrop SOL since this keypair has no balance on fresh fork.
+const bal = await c.getBalance(admin.publicKey);
+if (bal < 1e9) {
+  const sig = await c.requestAirdrop(admin.publicKey, 5e9);
+  await c.confirmTransaction(sig, "confirmed");
+}
 
 const cfg = await c.getAccountInfo(poolConfigPda(POOL_ID));
 if (cfg) { console.log("pool already initialized"); process.exit(0); }

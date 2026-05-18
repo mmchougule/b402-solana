@@ -1,0 +1,22 @@
+substitutions:
+  _REGION: us-central1
+  _IMAGE_TAG: latest
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
+
+images:
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/b402-images/b402-solana-relayer:${_IMAGE_TAG}"
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --file=packages/relayer/Dockerfile
+      - --tag=${_REGION}-docker.pkg.dev/${PROJECT_ID}/b402-images/b402-solana-relayer:${_IMAGE_TAG}
+      - --tag=${_REGION}-docker.pkg.dev/${PROJECT_ID}/b402-images/b402-solana-relayer:latest
+      - .
+
+timeout: 1800s

@@ -154,6 +154,7 @@ async function main() {
     depositor,
     relayer,
     amount: 100n,
+    omitEncryptedNotes: true,
   });
   console.log(`▶ shield ok in ${Date.now() - shieldStart}ms`);
   console.log(`  signature  = ${shieldResult.signature}`);

@@ -23,6 +23,9 @@ pub struct InitPool<'info> {
     #[account(mut)]
     pub deployer: Signer<'info>,
 
+    // Boxed: opt-level=z reshuffled inlining and try_accounts's combined frame
+    // for these 4 init accounts exceeds the 4096-byte BPF stack ceiling.
+    // Boxing moves the account bodies to heap so try_accounts stays lean.
     #[account(
         init,
         payer = deployer,
@@ -30,7 +33,7 @@ pub struct InitPool<'info> {
         seeds = [VERSION_PREFIX, SEED_CONFIG],
         bump,
     )]
-    pub pool_config: Account<'info, PoolConfig>,
+    pub pool_config: Box<Account<'info, PoolConfig>>,
 
     #[account(
         init,
@@ -48,7 +51,7 @@ pub struct InitPool<'info> {
         seeds = [VERSION_PREFIX, SEED_ADAPTERS],
         bump,
     )]
-    pub adapter_registry: Account<'info, AdapterRegistry>,
+    pub adapter_registry: Box<Account<'info, AdapterRegistry>>,
 
     #[account(
         init,
@@ -57,7 +60,7 @@ pub struct InitPool<'info> {
         seeds = [VERSION_PREFIX, SEED_TREASURY],
         bump,
     )]
-    pub treasury_config: Account<'info, TreasuryConfig>,
+    pub treasury_config: Box<Account<'info, TreasuryConfig>>,
 
     pub system_program: Program<'info, System>,
 }
