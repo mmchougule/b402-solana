@@ -117,6 +117,36 @@ function bigintToLeHex32(v: bigint): string {
 }
 
 /** AbortController-driven timeout wrapper around fetch. */
+/** Retry policy for proveLeafWithRetry. */
+export interface ProveLeafRetryOpts {
+  /** Total number of attempts (including the first). Default 3. */
+  attempts?: number;
+  /** Initial backoff (ms) before the second attempt. Grows 1.5x each retry. Default 600. */
+  initialDelayMs?: number;
+  /** Cap on the backoff between attempts (ms). Default 1800. */
+  maxDelayMs?: number;
+  /** Test seam — inject a faster sleep in unit tests. Default uses real setTimeout. */
+  sleep?: (ms: number) => Promise<void>;
+}
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Decide whether an indexer error is worth retrying. Transient: 404 (leaf
+ * not indexed yet), 5xx (server hiccup), network errors / aborts. Anything
+ * else (400, 401, 403, validation errors, on-chain root mismatch) is
+ * permanent — don't waste time.
+ */
+export function isTransientIndexerError(e: unknown): boolean {
+  const msg = (e as { message?: string })?.message ?? String(e);
+  if (/HTTP 404\b/i.test(msg)) return true;
+  if (/HTTP 5\d{2}\b/i.test(msg)) return true;
+  if (/aborted|ECONNRESET|ETIMEDOUT|ENOTFOUND|fetch failed/i.test(msg)) return true;
+  return false;
+}
+
 async function fetchJson<T>(url: string, timeoutMs: number): Promise<T> {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -178,6 +208,49 @@ export class B402Indexer {
       pathBits: r.pathBits,
       root: hexToBigint(r.root),
     };
+  }
+
+  /**
+   * Fetch a Merkle proof, retrying on transient indexer staleness.
+   *
+   * Motivation: shield-then-immediate-swap pairs race the indexer. A leaf
+   * lands on chain at slot N, the swap proof needs that leaf's Merkle path,
+   * but the indexer hasn't ingested slot N yet (~3-10s lag under normal
+   * load) → 404 from /v1/proof.
+   *
+   * Strategy: 404 / 5xx / network errors are "indexer hasn't caught up" or
+   * "transient" — retry with exponential backoff capped at ~1.8s per gap.
+   * Other 4xx (400 bad request, 401, 403) are permanent — surface
+   * immediately without burning cycles.
+   *
+   * Default policy: 3 attempts, ~600ms / 900ms / 1350ms backoff between
+   * tries → up to ~2.85s total before falling back. The caller
+   * (b402.ts:_proveLeafForSpend) does fallback to proveMostRecentLeaf if
+   * this still throws.
+   */
+  async proveLeafWithRetry(
+    leafIndex: bigint,
+    opts: ProveLeafRetryOpts = {},
+  ): Promise<MerkleProof> {
+    const attempts = opts.attempts ?? 3;
+    const initialDelayMs = opts.initialDelayMs ?? 600;
+    const maxDelayMs = opts.maxDelayMs ?? 1800;
+    const sleep = opts.sleep ?? defaultSleep;
+    let lastErr: unknown;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        return await this.proveLeaf(leafIndex);
+      } catch (e) {
+        lastErr = e;
+        if (!isTransientIndexerError(e) || i === attempts - 1) {
+          throw e;
+        }
+        const delay = Math.min(maxDelayMs, Math.floor(initialDelayMs * Math.pow(1.5, i)));
+        await sleep(delay);
+      }
+    }
+    // Unreachable — the loop always returns or throws — but TS needs it.
+    throw lastErr;
   }
 
   /**

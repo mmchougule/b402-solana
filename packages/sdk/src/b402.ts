@@ -961,11 +961,16 @@ export class B402Solana {
   private async _proveLeafForSpend(note: SpendableNote): Promise<MerkleProof> {
     if (this.indexer) {
       try {
-        return await this.indexer.proveLeaf(note.leafIndex);
+        // Retry with backoff to absorb the shield-then-immediate-swap race:
+        // a fresh leaf may be on chain at slot N while the indexer is at
+        // N-X (typical lag ~3-10s). Up to 3 attempts spread over ~2.85s
+        // before falling back. Permanent errors (4xx other than 404) skip
+        // the retries via isTransientIndexerError.
+        return await this.indexer.proveLeafWithRetry(note.leafIndex);
       } catch (e) {
         // eslint-disable-next-line no-console
         console.warn(
-          `b402: indexer proof for leaf ${note.leafIndex} failed (${
+          `b402: indexer proof for leaf ${note.leafIndex} failed after retries (${
             (e as Error).message
           }) — falling back to proveMostRecentLeaf. Multi-deposit spend in arbitrary order will fail until indexer recovers.`,
         );
