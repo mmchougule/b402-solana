@@ -17,6 +17,8 @@ this repo is the on-Solana pool program and a proof-bound adapter ABI for
 composing into Jupiter, Kamino, and other registered protocols atomically
 from a private balance.
 
+> **Note: the live mainnet deployment is a test playground, not production.** The current program IDs are an experimental preview — use small amounts only and treat it as a tech demo. An audited production deployment, under multisig upgrade authority, is in progress and will replace these program IDs.
+
 ## Use it on mainnet (one line, no env vars)
 
 ```bash
