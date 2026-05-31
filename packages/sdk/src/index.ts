@@ -56,6 +56,28 @@ export {
   type KaminoPerUserAccounts,
 } from './kamino.js';
 
+// Adapter helpers — Percolator perp open/close.
+export {
+  buildPercolatorOpenActionPayload,
+  buildPercolatorCloseActionPayload,
+  buildPercolatorPerUserPayload,
+  buildPercolatorExecuteIxData,
+  buildPercolatorPerUserRemainingAccounts,
+  derivePercolatorAdapterAuthority,
+  derivePercolatorOwnerPda,
+  derivePercolatorPerpMapping,
+  type PercolatorOpenArgs,
+  type PercolatorCloseArgs,
+  type PercolatorPerUserAccounts,
+  PERCOLATOR_MAX_ACCOUNTS_DEFAULT,
+} from './percolator.js';
+
+// Percolator method request shapes (B402Solana.privatePerpOpen / privatePerpClose).
+export type {
+  PrivatePerpOpenRequest,
+  PrivatePerpCloseRequest,
+} from './b402.js';
+
 // Jupiter route helper — used internally by `b402.swap()` and exported
 // for callers who want to pre-fetch a quote then call `privateSwap()`.
 export {
