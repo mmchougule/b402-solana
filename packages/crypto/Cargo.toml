@@ -10,7 +10,7 @@ ark-ff.workspace = true
 ark-serialize.workspace = true
 light-poseidon.workspace = true
 thiserror.workspace = true
-num-bigint = "0.4"
+num-bigint = "0.5"
 
 [dev-dependencies]
 proptest = "1.5"
