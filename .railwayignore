@@ -1,0 +1,27 @@
+# Things the Dockerfile does NOT copy. Trims upload body so Railway's
+# CLI doesn't choke on flaky networks. Keep this file aligned with the
+# COPY directives in apps/paysh-demo-server/Dockerfile.
+.git/
+node_modules/
+target/
+test-ledger/
+
+# Other workspaces and programs the demo server doesn't depend on.
+programs/
+b402-assurance/
+apps/playground/
+tests/
+ops/
+docs/
+examples/
+
+# Source circuits — only circuits/build/ is needed at runtime.
+circuits/circom/
+circuits/scripts/
+circuits/*.r1cs
+
+# Misc
+.next/
+*.so
+*.log
+.anchor/

@@ -46,6 +46,12 @@ The v2 ABI is **non-breaking with respect to deployments**: v1 devnet deployment
 
 Forward PRDs are not on the v2 critical path. They are specified now so the v1/v2 architecture does not preclude any of them.
 
+## Distribution & integration
+
+| # | Title | Status |
+|---|---|---|
+| 25 | pay.sh Private Receivables Bridge | Signed Off — Locked |
+
 ## Review process
 
 Each PRD moves through: **Draft → Under Review → Revisions → Signed Off → Locked**.
